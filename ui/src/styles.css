@@ -336,3 +336,14 @@ h2 {
 .suggestion-list { list-style: none; margin: 12px 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .suggestion { display: flex; align-items: center; gap: 12px; padding: 8px; border: 1px dashed var(--line); border-radius: 10px; }
 .suggestion img { border-radius: 8px; object-fit: cover; }
+
+/* Subjects as chips. The count is what makes them worth clicking — it says
+   whether there is anything there before you spend a click finding out. */
+.tag-cloud { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.tag-chip {
+  background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 999px; padding: 5px 12px; font-size: 0.88rem;
+  display: inline-flex; align-items: baseline; gap: 7px;
+}
+.tag-chip:hover { border-color: var(--accent); background: rgba(61, 169, 252, 0.1); }
+.tag-count { color: var(--ink-soft); font-size: 0.76rem; font-variant-numeric: tabular-nums; }

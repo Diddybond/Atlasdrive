@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { api, DriveMatch, SearchResult } from "../api";
+import { useEffect } from "react";
+import { api, DriveMatch, SearchResult, TagCount } from "../api";
 
 export function SearchScreen() {
   const [query, setQuery] = useState("");
@@ -13,6 +14,11 @@ export function SearchScreen() {
   const [searched, setSearched] = useState(false);
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
+  const [tags, setTags] = useState<TagCount[]>([]);
+
+  useEffect(() => {
+    void api.catalogueTags(60).then(setTags);
+  }, []);
   const [correcting, setCorrecting] = useState<string | null>(null);
   const [dateError, setDateError] = useState<string | null>(null);
 
@@ -47,9 +53,16 @@ export function SearchScreen() {
 
   async function run(e: React.FormEvent) {
     e.preventDefault();
+    await search(query);
+  }
+
+  /// Shared by the form and the tag chips, so clicking a subject is exactly the
+  /// same operation as typing it.
+  async function search(term: string) {
+    setQuery(term);
     setLoading(true);
     try {
-      const r = await api.search(query, { includeOffline });
+      const r = await api.search(term, { includeOffline });
       setResults(r.results);
       setUnderstood(r.understood);
       setTextOnly(r.text_only);
@@ -101,6 +114,30 @@ export function SearchScreen() {
         />
         Include photographs on disconnected drives
       </label>
+
+      {tags.length > 0 && (
+        <div className="card">
+          <h2>What is in your photographs</h2>
+          <p className="drive-meta subtle">
+            Everything AtlasDrive recognised across your drives. Click one to see those
+            photographs.
+          </p>
+          <ul className="tag-cloud">
+            {tags.map((t) => (
+              <li key={t.tag}>
+                <button
+                  className="tag-chip"
+                  onClick={() => void search(t.tag)}
+                  aria-label={`Find ${t.count} photographs of ${t.tag}`}
+                >
+                  {t.tag}
+                  <span className="tag-count">{t.count.toLocaleString()}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {searched && understood.length > 0 && (
         <p className="search-note" role="status">

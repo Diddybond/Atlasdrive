@@ -194,6 +194,31 @@ pub fn drive_contents(conn: &Connection, drive_number: Option<i64>) -> Result<Ve
     Ok(out)
 }
 
+/// Every subject the catalogue has recognised, most common first.
+///
+/// This is what makes the archive browsable rather than interrogable: without
+/// it, finding anything depends on guessing a word that happens to be in there.
+/// Person tags are excluded — people belong on the People screen, where naming
+/// them is a deliberate act (D-007), not mixed into a subject list.
+pub fn all_tags(conn: &Connection, limit: usize) -> Result<Vec<TagCount>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.name, count(*) AS n
+           FROM file_tags ft
+           JOIN tags t  ON t.id = ft.tag_id
+           JOIN files f ON f.id = ft.file_id
+          WHERE f.status = 'complete' AND t.tag_type <> 'person'
+          GROUP BY t.name
+          ORDER BY n DESC, t.name ASC
+          LIMIT ?1",
+    )?;
+    let out = stmt
+        .query_map([limit as i64], |r| {
+            Ok(TagCount { tag: r.get(0)?, count: r.get(1)? })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(out)
+}
+
 /// Which drives hold photographs matching a search, and how many each holds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriveMatch {

@@ -50,6 +50,23 @@ describe("AtlasDrive UI", () => {
     expect(screen.getAllByText(/1 photograph$/).length).toBeGreaterThan(0);
   });
 
+  it("lists what is in the photographs and searches when a subject is clicked", async () => {
+    render(<App />);
+    // The archive is browsable without having to guess a search term.
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+    });
+    // Counts are shown, so you know whether a subject is worth clicking.
+    const chip = screen.getByRole("button", { name: /Find 131 photographs of wedding/ });
+    expect(chip).toBeDefined();
+
+    fireEvent.click(chip);
+    // Clicking is the same operation as typing it, so the box reflects it.
+    await waitFor(() => {
+      expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("wedding");
+    });
+  });
+
   it("explains which visual terms the local encoder understood", async () => {
     render(<App />);
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "beach" } });

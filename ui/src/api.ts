@@ -109,6 +109,11 @@ export interface GalleryFace {
   group_size: number;
 }
 
+export interface TagCount {
+  tag: string;
+  count: number;
+}
+
 export interface SuggestedFace {
   face_id: string;
   cluster_id: string;
@@ -202,6 +207,7 @@ export const api = {
       name,
     }),
   photosOfPerson: (personId: string) => call<PersonPhoto[]>("photos_of_person", { personId }),
+  catalogueTags: (limit?: number) => call<TagCount[]>("catalogue_tags", { limit }),
   photoThumbnail: (fileId: string, maxEdge?: number) =>
     call<string | null>("photo_thumbnail", { fileId, maxEdge }),
   pendingSuggestions: (personId: string, limit?: number) =>
@@ -379,6 +385,15 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       person.confirmed_faces += face ? face.group_size : 1;
       return Promise.resolve({ person, suggested: 2 } as unknown as T);
     }
+    case "catalogue_tags":
+      return Promise.resolve([
+        { tag: "people", count: 708 },
+        { tag: "adult", count: 694 },
+        { tag: "clothing", count: 588 },
+        { tag: "suit", count: 411 },
+        { tag: "outdoor", count: 283 },
+        { tag: "wedding", count: 131 },
+      ] as unknown as T);
     case "photo_thumbnail": {
       const seed = String(args?.fileId ?? "").length * 47;
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="90"><rect width="120" height="90" fill="hsl(${seed % 360},40%,70%)"/></svg>`;

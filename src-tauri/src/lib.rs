@@ -517,6 +517,17 @@ fn rename_drive(
     repo.rename(&drive.id, &name).map_err(map_err)
 }
 
+/// Every subject the catalogue recognised, for browsing rather than guessing.
+#[tauri::command]
+fn catalogue_tags(
+    state: State<AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<family_archive_core::inventory::TagCount>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::inventory::all_tags(&archive, limit.unwrap_or(60)).map_err(map_err)
+}
+
 /// What is stored on each drive — answerable with every drive unplugged.
 #[tauri::command]
 fn drive_contents(
@@ -911,7 +922,8 @@ pub fn run() {
             reject_suggestions,
             resolve_suggestion,
             photo_thumbnail,
-            pending_suggestions
+            pending_suggestions,
+            catalogue_tags
         ])
         .run(tauri::generate_context!())
         .expect("error while running AtlasDrive");
