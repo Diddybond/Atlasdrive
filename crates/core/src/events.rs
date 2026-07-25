@@ -100,6 +100,16 @@ impl Event {
     }
 }
 
+/// A candidate place to divide an event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitPoint {
+    /// The first photograph of what would become the second event.
+    pub at: String,
+    /// How long the camera was idle before it.
+    pub gap_hours: f64,
+    pub photos_after: i64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProposeReport {
     pub proposed: u64,
@@ -274,6 +284,52 @@ impl<'a> EventRepo<'a> {
         self.conn.execute("DELETE FROM events WHERE id = ?1", [from])?;
         self.refresh_bounds(into)?;
         Ok(moved as u64)
+    }
+
+    /// Where an event could sensibly be divided.
+    ///
+    /// Returns the internal time gaps, largest first, as candidate break
+    /// points. This exists so nobody has to type a timestamp: the interface can
+    /// offer "split at 15:04, after a 4 hour pause", which is how a person
+    /// actually thinks about two shoots sharing a day.
+    ///
+    /// Only gaps of at least two hours are offered. Below that the pause is a
+    /// meal or a lens change, not a different event.
+    pub fn split_points(&self, event_id: &str, limit: usize) -> Result<Vec<SplitPoint>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT de.earliest_date
+               FROM event_files ef
+               JOIN date_estimates de ON de.file_id = ef.file_id
+              WHERE ef.event_id = ?1 AND de.earliest_date IS NOT NULL
+              ORDER BY de.earliest_date",
+        )?;
+        let dates: Vec<String> = stmt
+            .query_map([event_id], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?;
+        drop(stmt);
+
+        // Two hours, not one. A wedding pauses for an hour over the meal and
+        // the speeches; offering that as a place to split the day in two would
+        // be noise. Two shoots genuinely sharing a day are separated by more.
+        const MIN_GAP_SECONDS: i64 = 2 * 3600;
+        let mut points: Vec<SplitPoint> = Vec::new();
+        for pair in dates.windows(2) {
+            if let (Some(a), Some(b)) = (parse_epoch(&pair[0]), parse_epoch(&pair[1])) {
+                let gap = b - a;
+                if gap >= MIN_GAP_SECONDS {
+                    points.push(SplitPoint {
+                        at: pair[1].clone(),
+                        gap_hours: gap as f64 / 3600.0,
+                        // Everything from this timestamp onwards moves.
+                        photos_after: dates.iter().filter(|d| d.as_str() >= pair[1].as_str()).count()
+                            as i64,
+                    });
+                }
+            }
+        }
+        points.sort_by(|a, b| b.gap_hours.partial_cmp(&a.gap_hours).unwrap_or(std::cmp::Ordering::Equal));
+        points.truncate(limit);
+        Ok(points)
     }
 
     /// Split the photographs from `at_date` onwards into a new event.
@@ -557,13 +613,18 @@ mod tests {
         .unwrap();
     }
 
+    /// A continuous run of photographs, three minutes apart.
+    ///
+    /// The spacing matters: an earlier version jumped an hour every ten
+    /// photographs, which made a "continuous shoot" fixture contain hour-long
+    /// gaps and quietly tested the opposite of its name.
     fn shoot(conn: &Connection, prefix: &str, day: &str, start_hour: u32, count: usize) {
         for i in 0..count {
-            let h = start_hour + (i as u32 / 10);
+            let minutes = start_hour * 60 + (i as u32 * 3);
             photo(
                 conn,
                 &format!("{prefix}{i:03}"),
-                &format!("{day}T{:02}:{:02}:00", h.min(23), (i % 60)),
+                &format!("{day}T{:02}:{:02}:00", (minutes / 60).min(23), minutes % 60),
             );
         }
     }
@@ -700,6 +761,47 @@ mod tests {
         // Bounds were recomputed, not left describing the old membership.
         let split_off = after.iter().find(|e| e.id == new_id).unwrap();
         assert!(split_off.earliest_date.as_ref().unwrap().contains("15:"));
+    }
+
+    /// Nobody should have to type a timestamp to split an event: the natural
+    /// break is visible in the photographs themselves.
+    #[test]
+    fn offers_the_natural_place_to_split_an_event() {
+        let conn = catalogue();
+        // Morning christening, a six-hour pause, then an evening portrait
+        // session — one proposed event, two obvious halves.
+        shoot(&conn, "am", "2026-04-12", 9, 10);
+        shoot(&conn, "pm", "2026-04-12", 16, 10);
+        let repo = EventRepo::new(&conn);
+        repo.propose(DEFAULT_GAP_HOURS).unwrap();
+        let event = repo.list(None).unwrap().remove(0);
+        assert_eq!(event.photo_count, 20, "the gap rule keeps the day together");
+
+        let points = repo.split_points(&event.id, 3).unwrap();
+        assert!(!points.is_empty(), "the six-hour pause must be offered");
+
+        // The largest gap is the afternoon break, and it is offered first.
+        let best = &points[0];
+        assert!(best.gap_hours >= 5.0, "expected the long pause, got {}h", best.gap_hours);
+        assert!(best.at.contains("16:"), "should break at the afternoon start: {}", best.at);
+        assert_eq!(best.photos_after, 10);
+
+        // And splitting there does what the offer said it would.
+        let new_id = repo.split(&event.id, &best.at).unwrap();
+        assert_eq!(repo.files(&new_id).unwrap().len(), 10);
+        assert_eq!(repo.files(&event.id).unwrap().len(), 10);
+    }
+
+    /// A single continuous shoot has no sensible break, and inventing one would
+    /// be worse than offering nothing.
+    #[test]
+    fn a_continuous_shoot_offers_no_split() {
+        let conn = catalogue();
+        shoot(&conn, "a", "2026-05-30", 12, 30);
+        let repo = EventRepo::new(&conn);
+        repo.propose(DEFAULT_GAP_HOURS).unwrap();
+        let event = repo.list(None).unwrap().remove(0);
+        assert!(repo.split_points(&event.id, 5).unwrap().is_empty());
     }
 
     #[test]

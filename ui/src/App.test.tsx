@@ -535,3 +535,58 @@ describe("More like this", () => {
     expect(screen.getAllByText("beach_1998.jpg")).toHaveLength(1);
   });
 });
+
+describe("Adjusting an event", () => {
+  async function namedWedding() {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Events/ }));
+    await waitFor(() => screen.getByRole("button", { name: "Find events" }));
+    fireEvent.click(screen.getByRole("button", { name: "Find events" }));
+    await waitFor(() => screen.getByRole("button", { name: "Save" }));
+    fireEvent.change(screen.getByLabelText(/What was it/), {
+      target: { value: "Wedding day" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => screen.getByText("Wedding day"));
+  }
+
+  it("offers the natural break rather than asking for a timestamp", async () => {
+    await namedWedding();
+    fireEvent.click(screen.getAllByRole("button", { name: "Adjust…" })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Split it in two", level: 3 })).toBeDefined();
+    });
+    // Described as a pause, with the consequence stated — no timestamps typed.
+    expect(screen.getByText(/3\.5-hour pause/)).toBeDefined();
+    expect(screen.getByText(/210 photographs would move/)).toBeDefined();
+  });
+
+  it("splits an event at the offered break", async () => {
+    await namedWedding();
+    fireEvent.click(screen.getAllByRole("button", { name: "Adjust…" })[0]);
+    await waitFor(() => screen.getByRole("button", { name: "Split here" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Split here" }));
+    await waitFor(() => {
+      expect(screen.getByText(/now their own event/)).toBeDefined();
+    });
+  });
+
+  it("merges another event into this one", async () => {
+    await namedWedding();
+    fireEvent.click(screen.getAllByRole("button", { name: "Adjust…" })[0]);
+    await waitFor(() => screen.getByLabelText("Event to fold in"));
+
+    const select = screen.getByLabelText("Event to fold in") as HTMLSelectElement;
+    // The event being adjusted must not be offered as something to fold in.
+    const options = [...select.options].map((o) => o.value).filter(Boolean);
+    expect(options.length).toBeGreaterThan(0);
+    fireEvent.change(select, { target: { value: options[0] } });
+    fireEvent.click(screen.getByRole("button", { name: "Merge in" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Merged \d+ photograph/)).toBeDefined();
+    });
+  });
+});

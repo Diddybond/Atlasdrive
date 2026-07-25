@@ -948,3 +948,32 @@ works and that an unembedded file yields nothing rather than an error.
 
 Also fixed here: `similar_to` removed the query photograph from its own results
 *after* applying the limit, so asking for five similar photographs returned four.
+
+## D-041: An event is split at a pause the app found, not a timestamp the owner typed
+
+**Status:** settled.
+
+**Context.** The gap rule (D-038) deliberately errs towards keeping a day
+together, so the expected correction is splitting one proposal into two shoots
+that shared a day. The CLI took a timestamp. Nobody knows the timestamp — they
+know there was a long pause after lunch.
+
+**Decision.** `EventRepo::split_points` reports the internal gaps, largest
+first, with how many photographs would move. The interface offers "after a
+3.5-hour pause — 210 photographs would move" and splits there. A continuous
+shoot returns nothing rather than an invented break.
+
+The minimum offered gap is **two hours, not one**. A wedding pauses for an hour
+over the meal and the speeches; offering that as a place to cut the day in two
+would be noise. Two shoots genuinely sharing a day are separated by more.
+
+**A fixture bug this exposed.** The `shoot` test helper advanced an hour every
+ten photographs, so a fixture named "a continuous shoot" contained hour-long
+gaps and was quietly testing the opposite of its name. It now spaces
+photographs three minutes apart. A fixture whose name and behaviour disagree is
+worse than no fixture, because it produces confident green ticks.
+
+**Also settled here.** `.check-name` capitalised its contents, which suits the
+snake_case identifiers the verifier emits and mangles prose reused in the same
+slot ("After A 3.5-Hour Pause"). Capitalisation is now opt-in via
+`.check-name.identifier`, applied where identifiers actually appear.

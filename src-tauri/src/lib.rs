@@ -1051,6 +1051,20 @@ fn split_event(state: State<AppState>, event_id: String, at: String) -> Result<S
         .map_err(map_err)
 }
 
+/// Where an event could sensibly be divided, largest pause first.
+#[tauri::command]
+fn event_split_points(
+    state: State<AppState>,
+    event_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<family_archive_core::events::SplitPoint>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::events::EventRepo::new(&archive)
+        .split_points(&event_id, limit.unwrap_or(3))
+        .map_err(map_err)
+}
+
 #[tauri::command]
 fn event_clients(state: State<AppState>) -> Result<Vec<(String, i64)>, String> {
     let paths = state.paths.lock().unwrap().clone();
@@ -1231,6 +1245,7 @@ pub fn run() {
             merge_events,
             split_event,
             event_clients,
+            event_split_points,
             event_files,
             choose_folder,
             get_settings,

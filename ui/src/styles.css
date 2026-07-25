@@ -278,13 +278,30 @@ h2 {
   font-size: 0.92rem;
 }
 
+/* An event row can expand to hold its correction controls, so it cannot use
+   the fixed grid the flat check rows use. */
+.event-row { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
+.event-row > .check-name { font-weight: 600; margin-right: 12px; }
+.adjust-panel {
+  margin: 12px 0 4px; padding: 12px;
+  background: var(--surface-sunken, rgba(127, 127, 127, 0.06));
+  border-radius: 8px;
+}
+.adjust-panel h3 { font-size: 0.95rem; margin: 0 0 8px; }
+.adjust-panel h3 + * { margin-top: 0; }
+.adjust-panel select { max-width: 60%; }
+
 .check-list { list-style: none; margin: 0; padding: 0; }
 .check-row { display: grid; grid-template-columns: 64px 200px 1fr; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
 .pill { text-align: center; border-radius: 6px; padding: 2px 6px; font-weight: 700; font-size: 0.78rem; }
 .pill.ok { background: rgba(31, 122, 77, 0.15); color: var(--ok); }
 .pill.warn { background: rgba(138, 90, 0, 0.15); color: var(--warn); }
 .pill.fail { background: rgba(163, 40, 43, 0.15); color: var(--fail); }
-.check-name { font-weight: 600; text-transform: capitalize; }
+.check-name { font-weight: 600; }
+/* Verifier and doctor rows show snake_case identifiers, which read better
+   capitalised. Prose in the same slot must not be title-cased, so this is
+   applied where it belongs rather than to every .check-name. */
+.check-name.identifier { text-transform: capitalize; }
 .check-detail { color: var(--ink-soft); }
 
 @media (max-width: 720px) {

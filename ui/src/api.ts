@@ -15,6 +15,12 @@ export interface ArchiveEvent {
   photo_count: number;
 }
 
+export interface SplitPoint {
+  at: string;
+  gap_hours: number;
+  photos_after: number;
+}
+
 export interface ProposeReport {
   proposed: number;
   photos_grouped: number;
@@ -271,6 +277,10 @@ export const api = {
   forgetEvent: (eventId: string) => call<void>("forget_event", { eventId }),
   eventClients: () => call<[string, number][]>("event_clients"),
   eventFiles: (eventId: string) => call<string[]>("event_files", { eventId }),
+  eventSplitPoints: (eventId: string, limit?: number) =>
+    call<SplitPoint[]>("event_split_points", { eventId, limit }),
+  splitEvent: (eventId: string, at: string) => call<string>("split_event", { eventId, at }),
+  mergeEvents: (into: string, from: string) => call<number>("merge_events", { into, from }),
   chooseFolder: (prompt?: string) => call<string | null>("choose_folder", { prompt }),
   getSettings: () => call<Settings>("get_settings"),
   saveSettings: (settings: Settings) => call<void>("save_settings", { settings }),
@@ -600,6 +610,31 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       const counts = new Map<string, number>();
       for (const e of mockEvents) if (e.client) counts.set(e.client, (counts.get(e.client) ?? 0) + 1);
       return Promise.resolve([...counts.entries()] as unknown as T);
+    }
+    case "event_split_points":
+      return Promise.resolve(
+        (args?.eventId === "ev-wedding"
+          ? [{ at: "2026-05-30T19:40:00", gap_hours: 3.5, photos_after: 210 }]
+          : []) as unknown as T,
+      );
+    case "split_event": {
+      const src = mockEvents.find((e) => e.id === args?.eventId);
+      if (src) {
+        src.photo_count -= 210;
+        mockEvents.push({
+          id: `${src.id}-split`, name: null, client: null,
+          earliest_date: String(args?.at), latest_date: src.latest_date,
+          status: "proposed", photo_count: 210,
+        });
+      }
+      return Promise.resolve("new-event" as unknown as T);
+    }
+    case "merge_events": {
+      const into = mockEvents.find((e) => e.id === args?.into);
+      const from = mockEvents.find((e) => e.id === args?.from);
+      if (into && from) into.photo_count += from.photo_count;
+      mockEvents = mockEvents.filter((e) => e.id !== args?.from);
+      return Promise.resolve((from?.photo_count ?? 0) as unknown as T);
     }
     case "event_files":
       return Promise.resolve(["f1", "f2", "f3"] as unknown as T);

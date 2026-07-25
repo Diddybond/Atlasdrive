@@ -298,7 +298,7 @@ export function SettingsScreen() {
           {checks.map((c) => (
             <li key={c.name} className="check-row">
               <span className={`pill ${badge(c.status)}`}>{c.status}</span>
-              <span className="check-name">{c.name.replace(/_/g, " ")}</span>
+              <span className="check-name identifier">{c.name.replace(/_/g, " ")}</span>
               <span className="check-detail">{c.detail}</span>
             </li>
           ))}

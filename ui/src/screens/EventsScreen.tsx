@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, ArchiveEvent } from "../api";
+import { api, ArchiveEvent, SplitPoint } from "../api";
 import type { SearchContext } from "../App";
 
 /// A proposal is described by its size until someone names it.
@@ -58,6 +58,9 @@ export function EventsScreen({
   const [client, setClient] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [adjusting, setAdjusting] = useState<string | null>(null);
+  const [splits, setSplits] = useState<SplitPoint[]>([]);
+  const [mergeFrom, setMergeFrom] = useState("");
 
   async function refresh() {
     setEvents(await api.listEvents());
@@ -109,6 +112,42 @@ export function EventsScreen({
       await api.forgetEvent(proposal.id);
       setName("");
       setClient("");
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /// Open the correction panel for one event, loading where it could be split.
+  async function adjust(eventId: string) {
+    if (adjusting === eventId) {
+      setAdjusting(null);
+      return;
+    }
+    setAdjusting(eventId);
+    setMergeFrom("");
+    setSplits(await api.eventSplitPoints(eventId, 3));
+  }
+
+  async function doSplit(eventId: string, at: string) {
+    setBusy(true);
+    try {
+      await api.splitEvent(eventId, at);
+      setAdjusting(null);
+      setNote("Split. The later photographs are now their own event, waiting to be named.");
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doMerge(into: string) {
+    if (!mergeFrom) return;
+    setBusy(true);
+    try {
+      const moved = await api.mergeEvents(into, mergeFrom);
+      setAdjusting(null);
+      setNote(`Merged ${moved} photograph${moved === 1 ? "" : "s"}.`);
       await refresh();
     } finally {
       setBusy(false);
@@ -225,7 +264,7 @@ export function EventsScreen({
         ) : (
           <ul className="check-list">
             {named.map((e) => (
-              <li key={e.id} className="check-row">
+              <li key={e.id} className="event-row">
                 <span className="check-name">{describe(e)}</span>
                 <span className="check-detail">
                   {e.photo_count} photographs
@@ -243,10 +282,69 @@ export function EventsScreen({
                       Show photographs
                     </button>
                   )}{" "}
+                  <button
+                    className="ghost"
+                    onClick={() => void adjust(e.id)}
+                    aria-expanded={adjusting === e.id}
+                  >
+                    Adjust…
+                  </button>{" "}
                   <button className="ghost" onClick={() => void api.forgetEvent(e.id).then(refresh)}>
                     Remove
                   </button>
                 </span>
+                {adjusting === e.id && (
+                  <div className="adjust-panel">
+                    <h3>Split it in two</h3>
+                    {splits.length === 0 ? (
+                      <p className="check-detail">
+                        No obvious break — the camera ran continuously, so this looks like one
+                        shoot.
+                      </p>
+                    ) : (
+                      <ul className="check-list">
+                        {splits.map((p) => (
+                          <li key={p.at} className="check-row">
+                            <span className="check-name">
+                              After a {p.gap_hours.toFixed(1)}-hour pause
+                            </span>
+                            <span className="check-detail">
+                              {p.photos_after} photographs would move to a new event
+                            </span>
+                            <button onClick={() => void doSplit(e.id, p.at)} disabled={busy}>
+                              Split here
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    <h3>Or fold another event into this one</h3>
+                    <div className="row-between">
+                      <select
+                        aria-label="Event to fold in"
+                        value={mergeFrom}
+                        onChange={(ev) => setMergeFrom(ev.target.value)}
+                      >
+                        <option value="">Choose an event…</option>
+                        {events
+                          .filter((o) => o.id !== e.id)
+                          .map((o) => (
+                            <option key={o.id} value={o.id}>
+                              {/* describe() already gives the count for an
+                                  unnamed event, so pair it with the date
+                                  rather than repeating the count. */}
+                              {describe(o)}
+                              {when(o) ? ` · ${when(o)}` : ""}
+                            </option>
+                          ))}
+                      </select>
+                      <button onClick={() => void doMerge(e.id)} disabled={busy || !mergeFrom}>
+                        Merge in
+                      </button>
+                    </div>
+                  </div>
+                )}
               </li>
             ))}
           </ul>
