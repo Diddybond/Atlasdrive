@@ -12,6 +12,14 @@ The application scans approved drives without modifying original files, keeps se
 
 > Find any family photograph, identify the numbered drive that holds it, and verify that the original has not been altered.
 
+## Implementation status
+
+An implementation is now in this repository: a tested Rust service layer
+(`crates/core`), a CLI + standalone verifier (`crates/cli`), a Tauri v2 desktop
+shell (`src-tauri`) and a React/TypeScript interface (`ui`). Build and run
+instructions are in [`docs/SETUP.md`](docs/SETUP.md); current progress against
+the definition of done is in [`docs/COMPLETION_STATUS.md`](docs/COMPLETION_STATUS.md).
+
 ## Start here
 
 1. Read [`docs/00_START_HERE.md`](docs/00_START_HERE.md).

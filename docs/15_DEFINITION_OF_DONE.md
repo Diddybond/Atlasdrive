@@ -1,5 +1,9 @@
 # 15. Definition of Done and 96% Completion Rubric
 
+> **Current evidence-backed score: ~85/100** — see `docs/COMPLETION_STATUS.md`
+> for the per-gate and per-section breakdown. Not yet at 96%; not claimed
+> complete. 8/10 critical gates verified on Linux; 2 pending on-device macOS.
+
 ## Completion rule
 
 The coding loop may stop for product completion only when:

@@ -1,5 +1,11 @@
 # 14. Roadmap
 
+> **Implementation status (2026-07-25):** Phases 0–3 and 5–7 substantially
+> implemented and tested in the Rust core (see `docs/COMPLETION_STATUS.md`).
+> Phase 4 catalogue search implemented (text/FTS + drive/connection filters).
+> Phase 8–9 hardening and archive-health are partial. Natural-language visual
+> search and macOS on-device packaging remain the top gaps.
+
 ## Phase 0: repository and safety foundation
 
 - Tauri and React scaffold
