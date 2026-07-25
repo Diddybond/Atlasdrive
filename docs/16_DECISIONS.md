@@ -760,3 +760,70 @@ drives that is 190 index-backed counting queries, which is nothing.
 `drives.backup_of_drive_id` and `set_backup_relationship` already existed in the
 data model and had never been reachable; a confirmed clone relationship can now
 be recorded against them.
+
+## D-036: The vector index is exhaustive-but-compact, not approximate
+
+**Status:** settled.
+
+**Context.** `vector_search` read every embedding out of SQLite on every query,
+decoded each blob into a `Vec<f32>`, and scored it. At the archive's target
+scale — twenty drives, 200,000+ photographs, 768-dimension Apple Vision
+embeddings — that is 614MB pulled through SQLite and several hundred thousand
+short-lived allocations, per query. The dot products were never the cost; the
+I/O and the allocation were.
+
+**Decision.** Embeddings are L2-normalised, quantised to `i8`, and held in one
+contiguous allocation, one file per `(model_id, model_version)` partition.
+Because the vectors are unit length, cosine similarity is the dot product, so
+scoring is an integer dot product over a flat slice with no per-vector
+allocation. Measured: **24ms per query and 147MB resident at 200,000 × 768**.
+
+An approximate structure (HNSW and friends) was considered and rejected. It
+would be faster still, but it trades recall for that speed, needs tuning, and
+adds a dependency. A scan over quantised vectors is fast enough to type against,
+returns the right answer rather than a probable one, and has nothing to tune.
+If the archive ever outgrows that, `VectorIndex::search` is the only thing that
+would have to change.
+
+**The quantisation floor, stated rather than hidden.** `i8` resolves about 1/127
+per component, which over 768 dimensions works out at roughly 0.01 of cosine
+similarity. Two photographs whose true similarity differs by less than that may
+swap places; the order between them was never meaningful. The tests assert the
+claim that does matter — that nothing appreciably better is missed — rather than
+exact rank equality, which on near-tied vectors would be asserting on noise.
+
+**A bug this found.** The first implementation normalised scores by `SCALE²`,
+assuming a quantised unit vector has norm exactly 127. It does not: with 768
+dimensions each component is around 0.036, so rounding 4.58 to 5 is a 9% error
+on that component, and the accumulated drift produced a self-similarity of
+**1.013** — impossible for a cosine. Each row's true quantised norm is now
+stored and divided out, giving the exact cosine of the quantised vectors.
+
+**Staleness.** A stale cache silently returns wrong answers, so each saved index
+records a fingerprint of the rows it was built from and refuses itself when the
+catalogue has moved on. A refusal costs a rebuild; trusting a stale index would
+cost correctness. A corrupt or truncated index file is refused rather than
+misread, and `load_or_build` recovers by rebuilding.
+
+## D-037: Visual search over-fetches before filtering
+
+**Status:** settled.
+
+**Context.** Found while wiring D-036. `vector_search` took the global top-N by
+similarity and *then* applied the drive, person and online filters. On a
+twenty-drive archive a drive-filtered search keeps roughly one twentieth of what
+it ranks, so a request for ten results ranked ten candidates, discarded nine of
+them, and returned one — while thousands of matching photographs sat just below
+the cut. The bug was invisible with a single registered drive, which is why it
+survived this long.
+
+**Decision.** Rank `limit * OVERFETCH` candidates and stop collecting once
+`limit` have survived the filters. `OVERFETCH` is 20: the smallest factor that
+covers a one-drive-in-twenty filter without ranking the whole catalogue.
+
+**Consequence.** Filtering cannot be pushed into the ranking without giving the
+index knowledge of the catalogue's relational structure, which would couple it
+to schema it has no business knowing. Over-fetching keeps the index a pure
+similarity structure. A test registers two drives, queries into the larger
+one's cluster, filters to the smaller, and asserts every photograph on it is
+still reachable.

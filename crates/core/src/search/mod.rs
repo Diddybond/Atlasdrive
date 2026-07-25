@@ -5,6 +5,16 @@
 //! functions with source drives offline. Every result carries its drive number
 //! and connection status; offline results are never silently omitted.
 
+pub mod vecindex;
+
+/// How many extra candidates to rank before applying filters.
+///
+/// A drive-filtered search over a twenty-drive archive keeps roughly one
+/// twentieth of what it ranks, so ranking only the caller's page size would
+/// return almost nothing. Twenty is the smallest factor that covers that case
+/// without ranking the whole catalogue.
+const OVERFETCH: usize = 20;
+
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -73,11 +83,32 @@ pub struct VisualQuery<'v> {
 /// Read-only search over the catalogue.
 pub struct SearchRepo<'a> {
     conn: &'a Connection,
+    /// Where the persisted vector index lives, when one is available.
+    ///
+    /// Optional so that tests and the verifier can construct a repo from a
+    /// bare connection. Without it, searching still works — it just reads
+    /// every embedding out of SQLite, which is fine for a few thousand files
+    /// and is not fine for two hundred thousand.
+    index_dir: Option<std::path::PathBuf>,
 }
 
 impl<'a> SearchRepo<'a> {
     pub fn new(conn: &'a Connection) -> Self {
-        Self { conn }
+        Self { conn, index_dir: None }
+    }
+
+    /// A repo that will use (and maintain) a persisted vector index.
+    pub fn with_index_dir(conn: &'a Connection, dir: impl Into<std::path::PathBuf>) -> Self {
+        Self { conn, index_dir: Some(dir.into()) }
+    }
+
+    fn index_path(&self, model_id: &str, model_version: &str) -> Option<std::path::PathBuf> {
+        // One file per partition: a 768-dimension Vision index and a 65-
+        // dimension heuristic one are different spaces and must not share.
+        let safe = |s: &str| s.replace(['/', '\\', '.'], "-");
+        self.index_dir.as_ref().map(|d| {
+            d.join(format!("vec-{}-{}.idx", safe(model_id), safe(model_version)))
+        })
     }
 
     /// Full-text search over filename, path, tags, OCR text and scene text.
@@ -124,6 +155,56 @@ impl<'a> SearchRepo<'a> {
         model_version: &str,
         filters: &SearchFilters,
     ) -> Result<Vec<SearchResult>> {
+        let limit = filters.limit_or(100);
+
+        // Rank far more candidates than the caller will show. Filters are
+        // applied *after* ranking — a drive or date filter that removed most of
+        // a top-100 would otherwise return a nearly empty page while thousands
+        // of matching photographs sat just below the cut.
+        let candidates = (limit * OVERFETCH).max(limit);
+
+        let scored: Vec<(String, f32)> = match self.index_path(model_id, model_version) {
+            Some(path) => {
+                match vecindex::VectorIndex::load_or_build(
+                    self.conn, &path, model_id, model_version,
+                ) {
+                    Ok(index) => index.search(query_vector, candidates),
+                    // An index that cannot be built must not take search down
+                    // with it; the exhaustive path still answers correctly.
+                    Err(_) => self.scan_all_embeddings(query_vector, model_id, model_version)?,
+                }
+            }
+            None => self.scan_all_embeddings(query_vector, model_id, model_version)?,
+        };
+
+        let mut out = Vec::new();
+        for (file_id, sim) in scored {
+            if out.len() >= limit {
+                break;
+            }
+            if let Some(mut res) = self.load_result(&file_id)? {
+                if !passes_filters(&res, filters) {
+                    continue;
+                }
+                res.matched.push("visual".into());
+                res.score = sim;
+                out.push(res);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The exhaustive path: score every embedding straight from SQLite.
+    ///
+    /// Kept as the fallback rather than deleted, because it is the definition
+    /// the index is a cache of, and because a repo built without an index
+    /// directory still has to work.
+    fn scan_all_embeddings(
+        &self,
+        query_vector: &[f32],
+        model_id: &str,
+        model_version: &str,
+    ) -> Result<Vec<(String, f32)>> {
         let mut stmt = self.conn.prepare(
             "SELECT ve.file_id, ve.vector
              FROM visual_embeddings ve
@@ -138,23 +219,10 @@ impl<'a> SearchRepo<'a> {
         for row in rows {
             let (file_id, blob) = row?;
             let vector = decode_vector(&blob);
-            let sim = cosine_similarity(query_vector, &vector);
-            scored.push((file_id, sim));
+            scored.push((file_id, cosine_similarity(query_vector, &vector)));
         }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        let mut out = Vec::new();
-        for (file_id, sim) in scored.into_iter().take(filters.limit_or(100)) {
-            if let Some(mut res) = self.load_result(&file_id)? {
-                if !passes_filters(&res, filters) {
-                    continue;
-                }
-                res.matched.push("visual".into());
-                res.score = sim;
-                out.push(res);
-            }
-        }
-        Ok(out)
+        Ok(scored)
     }
 
     /// Natural-language search: the text/metadata index and the visual
