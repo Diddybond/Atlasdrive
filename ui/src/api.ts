@@ -181,11 +181,17 @@ export interface SearchResponse {
 export interface Progress {
   runId: string;
   driveNumber: number;
+  scanRoot?: string;
+  startedAt: string;
+  updatedAt?: string;
   filesDiscovered: number;
   filesDone: number;
   filesFailed: number;
   filesQueued: number;
   currentBatch: number;
+  /// The photograph most recently finished. Shown so a long run visibly moves
+  /// even between whole-number changes in the counter.
+  lastCompletedFile?: string | null;
   status: string;
 }
 
@@ -425,6 +431,11 @@ const mockBackups: BackupInfo[] = [];
 // would never see.
 let mockBackupSeq = 0;
 
+// A scan that started a little while ago and is still going, at roughly the
+// speed measured on a real NTFS drive.
+const MOCK_FILES_PER_SEC = 0.22;
+const mockRunStarted = Date.now() - 20 * 60 * 1000;
+
 let mockEvents: ArchiveEvent[] = [];
 
 function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -494,17 +505,27 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(undefined as unknown as T);
     case "is_indexing":
       return Promise.resolve(false as unknown as T);
-    case "get_progress":
+    case "get_progress": {
+      // A run that actually advances, so the rate and finish-time working is
+      // exercised rather than assumed. A frozen mock would have let a broken
+      // estimate look perfectly healthy.
+      const elapsedSec = (Date.now() - mockRunStarted) / 1000;
+      const done = Math.min(8333, Math.floor(elapsedSec * MOCK_FILES_PER_SEC));
       return Promise.resolve({
         runId: "mock-run",
-        driveNumber: 14,
-        filesDiscovered: 4213,
-        filesDone: 4213,
-        filesFailed: 2,
-        filesQueued: 0,
-        currentBatch: 66,
-        status: "complete",
+        driveNumber: 2,
+        scanRoot: "/Volumes/New Volume",
+        startedAt: new Date(mockRunStarted).toISOString(),
+        updatedAt: new Date().toISOString(),
+        filesDiscovered: 8333,
+        filesDone: done,
+        filesFailed: 0,
+        filesQueued: 8333 - done,
+        currentBatch: Math.floor(done / 64) + 1,
+        lastCompletedFile: `Weddings/2019/IMG_${String(4000 + done).padStart(4, "0")}.jpg`,
+        status: done >= 8333 ? "complete" : "running",
       } as unknown as T);
+    }
     case "run_verifier":
       return Promise.resolve([
         { name: "db_integrity", status: "Pass", detail: "integrity_check and foreign_key_check ok" },

@@ -353,6 +353,20 @@ impl<'a> Pipeline<'a> {
                         if !dry_run {
                             q.complete(&item.id)?;
                         }
+                        // Publish after every photograph, not only at the end of
+                        // a batch. A batch is 64 files, which on a slow drive is
+                        // five minutes — long enough that a progress display
+                        // sits perfectly still and the whole run looks stuck.
+                        // The write is a few hundred bytes against roughly three
+                        // seconds of Vision analysis per file, so the cost is
+                        // nothing next to being able to see it working.
+                        progress.files_done = summary.files_done;
+                        progress.files_failed = summary.files_failed;
+                        progress.current_batch = batch_no;
+                        progress.touch();
+                        if !dry_run {
+                            let _ = progress.write(self.paths);
+                        }
                     }
                     Err(e) if e.is_hard_halt() => {
                         // Immediate hard halt (integrity, unsafe path, network...).

@@ -1319,3 +1319,41 @@ failures here, after the tests and the linter had signed off on neither.
 **This is the same shape as D-049**, one level further out: a rule verified in
 the place it was written and never in the place it runs. First it was Rust
 versus TypeScript; now it is source versus binary.
+
+## D-052: A scan says how far it has got and when it will finish
+
+**Status:** settled.
+
+**Context.** "I'd like an actual visual, such as a counter or dashboard, that
+allows me to see the progress of what the drive is doing." Scan activity had a
+progress bar and six counters, and still failed at this, for two reasons.
+
+*Progress was written once per batch.* A batch is 64 files; on the NTFS drive
+being indexed that is roughly five minutes. Between writes the display was
+frozen, so a healthy run looked stuck — the same complaint as the button that
+appeared to do nothing, in a different place. `progress.write` is now called
+after every photograph. A few hundred bytes against roughly three seconds of
+Vision analysis per file is not a cost worth protecting.
+
+*Nothing answered the question actually being asked.* "Discovered / Completed /
+Remaining / Failed / Batch / Status" describes the run without saying whether to
+wait up or go to bed. The dashboard now leads with the count at a size readable
+in passing, and adds **speed**, **time left**, and the **clock time it should
+finish** — "about 10:29" is what a person wants at midnight; "8,053 remaining"
+is not.
+
+**Rate is measured in the interface**, over a three-minute window, from the
+updates it is already receiving. A figure derived from what is arriving on
+screen cannot drift from what is on screen. The window is long enough to be
+steady — one photograph takes anywhere from one second to twenty depending on
+how many faces are in it — and short enough to reflect the drive being read now.
+Below twenty seconds of samples it says "measuring…" rather than dividing by a
+near-zero interval and printing something wild, and a stalled run shows a
+falling rate rather than a confidently wrong one.
+
+**The mock advances.** A frozen fixture would have let a broken rate or a
+nonsense finish time look perfectly healthy — which is exactly how the three
+fixture defects earlier in this session survived. The browser mock now
+simulates a run at 0.22 files/sec, the speed measured on the real drive, and the
+dashboard computed 13.3/min and 10h 6m against it — matching the 0.222 files/sec
+and 10.4 hours measured independently from the catalogue.

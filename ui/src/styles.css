@@ -333,6 +333,27 @@ h2 {
   border-radius: 6px; font-size: 0.88rem;
 }
 
+/* The count, sized to be readable from across a room — this is the thing
+   someone glances at on their way past overnight. */
+.counter { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 14px 0 4px; }
+.counter strong {
+  font-family: var(--font-display); font-size: 2.4rem; line-height: 1;
+  font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+}
+.counter-of { color: var(--ink-soft); }
+.counter-pct { margin-left: auto; font-weight: 700; font-size: 1.1rem; font-variant-numeric: tabular-nums; }
+
+/* Estimates like "about 10:29" must not wrap, or one tile grows taller than
+   the row and the group stops reading as a set of equals. */
+.stats dd { white-space: nowrap; }
+
+.now-doing { margin: 10px 0 0; font-size: 0.85rem; color: var(--ink-soft); }
+.now-doing .filename {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+.stats dd.bad { color: var(--fail, #b3261e); }
+
 .check-list { list-style: none; margin: 0; padding: 0; }
 .check-row { display: grid; grid-template-columns: 64px 200px 1fr; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
 .pill { text-align: center; border-radius: 6px; padding: 2px 6px; font-weight: 700; font-size: 0.78rem; }

@@ -763,3 +763,44 @@ describe("Scanning a drive from the Drives screen", () => {
     expect(card.textContent).toContain("Scanned prints");
   });
 });
+
+describe("Scan progress dashboard", () => {
+  async function openScan() {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Scan activity/ }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Scan activity", level: 1 })).toBeDefined();
+    });
+  }
+
+  it("shows how far through the drive it is", async () => {
+    await openScan();
+    await waitFor(() => {
+      expect(screen.getByText(/of 8,333 photographs/)).toBeDefined();
+    });
+    // A progress bar with a real value, not just a decorative strip.
+    const bar = screen.getByRole("progressbar");
+    expect(Number(bar.getAttribute("aria-valuenow"))).toBeGreaterThanOrEqual(0);
+    expect(bar.getAttribute("aria-valuemax")).toBe("100");
+  });
+
+  it("says what it is working on and that it is safe to walk away", async () => {
+    await openScan();
+    await waitFor(() => {
+      expect(screen.getByText(/Just finished/)).toBeDefined();
+    });
+    expect(screen.getByText(/stay awake until the scan finishes/)).toBeDefined();
+    expect(screen.getByText(/interrupting it loses nothing/)).toBeDefined();
+  });
+
+  it("waits for real evidence before quoting a speed", async () => {
+    await openScan();
+    // With only one sample there is nothing honest to say, so it must say that
+    // rather than divide by a near-zero interval and print a wild figure.
+    await waitFor(() => {
+      expect(screen.getByText("measuring…")).toBeDefined();
+    });
+    const times = screen.getAllByText("—").length + screen.getAllByText("…").length;
+    expect(times).toBeGreaterThan(0);
+  });
+});
