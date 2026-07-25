@@ -886,11 +886,12 @@ fn face_crops_are_stored_locally_and_survive_disconnection() {
     std::fs::remove_dir_all(&h.drive_dir).unwrap();
 
     // The crop is still readable, and is a real decodable image.
-    let png = repo
+    let (bytes, format) = repo
         .thumbnail(&gallery[0].face_id, &h.key)
         .unwrap()
         .expect("crop is stored locally");
-    let decoded = image::load_from_memory(&png).expect("a valid PNG");
+    assert_eq!(format, "jpeg");
+    let decoded = image::load_from_memory(&bytes).expect("a valid image");
     assert!(decoded.width() <= crate::faces::FACE_THUMBNAIL_EDGE);
     assert!(decoded.height() <= crate::faces::FACE_THUMBNAIL_EDGE);
 
@@ -903,8 +904,9 @@ fn face_crops_are_stored_locally_and_survive_disconnection() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_ne!(raw, png, "the stored bytes must not be the plain PNG");
-    assert_ne!(&raw[..8.min(raw.len())], b"\x89PNG\r\n\x1a\n");
+    assert_ne!(raw, bytes, "the stored bytes must not be the plain image");
+    // Not a bare JPEG either — SOI marker would be the giveaway.
+    assert_ne!(&raw[..2.min(raw.len())], b"\xff\xd8");
 }
 
 #[test]

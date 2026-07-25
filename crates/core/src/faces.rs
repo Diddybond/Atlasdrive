@@ -145,16 +145,16 @@ impl<'a> FaceRepo<'a> {
     pub fn store_thumbnail(
         &self,
         face_id: &str,
-        png: &[u8],
+        image_bytes: &[u8],
         width: u32,
         height: u32,
         key: &MasterKey,
     ) -> Result<()> {
-        let sealed = crypto::seal(key, png)?;
+        let sealed = crypto::seal(key, image_bytes)?;
         self.conn.execute(
             "INSERT INTO face_thumbnails
                (face_id, width, height, format, ciphertext, nonce, enc_version, key_version, created_at)
-             VALUES (?1,?2,?3,'png',?4,?5,?6,?7,?8)
+             VALUES (?1,?2,?3,'jpeg',?4,?5,?6,?7,?8)
              ON CONFLICT(face_id) DO UPDATE SET
                 width=excluded.width, height=excluded.height,
                 ciphertext=excluded.ciphertext, nonce=excluded.nonce,
@@ -201,23 +201,29 @@ impl<'a> FaceRepo<'a> {
         }
     }
 
-    /// Decrypted PNG bytes for one face, if a crop was stored.
-    pub fn thumbnail(&self, face_id: &str, key: &MasterKey) -> Result<Option<Vec<u8>>> {
+    /// Decrypted image bytes for one face, with the format they are in.
+    ///
+    /// The format is read from the row rather than assumed, so crops written
+    /// before the switch to JPEG still display correctly.
+    pub fn thumbnail(&self, face_id: &str, key: &MasterKey) -> Result<Option<(Vec<u8>, String)>> {
         let row = self.conn.query_row(
-            "SELECT ciphertext, nonce, enc_version, key_version
+            "SELECT ciphertext, nonce, enc_version, key_version, format
                FROM face_thumbnails WHERE face_id = ?1",
             [face_id],
             |r| {
-                Ok(Sealed {
-                    ciphertext: r.get(0)?,
-                    nonce: r.get(1)?,
-                    enc_version: r.get(2)?,
-                    key_version: r.get(3)?,
-                })
+                Ok((
+                    Sealed {
+                        ciphertext: r.get(0)?,
+                        nonce: r.get(1)?,
+                        enc_version: r.get(2)?,
+                        key_version: r.get(3)?,
+                    },
+                    r.get::<_, String>(4)?,
+                ))
             },
         );
         match row {
-            Ok(sealed) => Ok(Some(crypto::open(key, &sealed)?)),
+            Ok((sealed, format)) => Ok(Some((crypto::open(key, &sealed)?, format))),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }

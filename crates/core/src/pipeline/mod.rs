@@ -93,14 +93,14 @@ pub struct IndexSummary {
     pub files_missing: u64,
 }
 
-/// Crop a detected face out of the decoded original and encode a small PNG.
+/// Crop a detected face out of the decoded original and encode a small JPEG.
 ///
 /// Returns `None` when the crop would be too small to recognise anyone from,
 /// which is the honest outcome for a face in the far background of a crowd.
 ///
 /// The margin matches the one used for the identity embedding, so the picture
 /// the user judges is the same region the matching was based on.
-fn crop_face_png(
+fn crop_face_image(
     rgb: &image::RgbImage,
     face: &crate::ai::FaceDetection,
 ) -> Option<(Vec<u8>, u32, u32)> {
@@ -126,11 +126,14 @@ fn crop_face_png(
     let (tw, th) = thumbnail::fit_within(w, h, crate::faces::FACE_THUMBNAIL_EDGE);
     let small = image::imageops::resize(&crop, tw, th, image::imageops::FilterType::Lanczos3);
 
-    let mut png = Vec::new();
-    image::DynamicImage::ImageRgb8(small)
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .ok()?;
-    Some((png, tw, th))
+    // JPEG, not PNG: these are photographs of faces viewed at thumbnail size, so
+    // lossless costs roughly 10x the disk for no visible benefit. At 2,000 faces
+    // per wedding that is the difference between ~13MB and ~135MB.
+    let mut jpeg = Vec::new();
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut jpeg), 82);
+    encoder.encode_image(&small).ok()?;
+    Some((jpeg, tw, th))
 }
 
 /// What an incremental rescan found when comparing disk against the catalogue.
@@ -831,7 +834,7 @@ impl<'a> Pipeline<'a> {
 
             // A small crop of the face, kept locally so the gallery is browsable
             // with every drive unplugged. Encrypted, like the embedding.
-            if let Some((png, w, h)) = crop_face_png(rgb, f) {
+            if let Some((png, w, h)) = crop_face_image(rgb, f) {
                 face_repo.store_thumbnail(&face_id, &png, w, h, self.key)?;
             }
 
@@ -995,7 +998,7 @@ impl<'a> Pipeline<'a> {
                     continue;
                 };
                 let face = crate::ai::FaceDetection { x, y, w, h, quality: 0.0, embedding: None };
-                match crop_face_png(&rgb, &face) {
+                match crop_face_image(&rgb, &face) {
                     Some((png, tw, th)) => {
                         repo.store_thumbnail(&face_id, &png, tw, th, self.key)?;
                         done += 1;

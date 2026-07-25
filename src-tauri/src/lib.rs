@@ -173,10 +173,10 @@ fn face_thumbnail(state: State<AppState>, face_id: String) -> Result<Option<Stri
     let key = keystore::default_keystore(paths.keys_dir())
         .get_or_create()
         .map_err(map_err)?;
-    let png = faces::FaceRepo::new(&archive)
+    let crop = faces::FaceRepo::new(&archive)
         .thumbnail(&face_id, &key)
         .map_err(map_err)?;
-    Ok(png.map(|bytes| format!("data:image/png;base64,{}", b64(&bytes))))
+    Ok(crop.map(|(bytes, format)| format!("data:image/{format};base64,{}", b64(&bytes))))
 }
 
 /// Minimal base64, to avoid a dependency for one call site.

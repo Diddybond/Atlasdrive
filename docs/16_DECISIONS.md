@@ -409,8 +409,14 @@ can name it, and often never can — so the interface has to lead with pictures.
 
 **Decision, in three parts:**
 
-**1. Encrypted face crops (schema v2).** A ~200px crop of each face is stored in
-`face_thumbnails`, sealed with the master key exactly as embeddings are. Kept
+**1. Encrypted face crops (schema v2).** A ~200px JPEG crop of each face is
+stored in `face_thumbnails`, sealed with the master key exactly as embeddings
+are. JPEG rather than PNG: measured on a real 758-photograph wedding, 2,126
+lossless crops came to **135 MB** — roughly 10x what quality-82 JPEG costs, for
+no visible benefit at 80px. Extrapolated to a 100,000-photograph archive that is
+the difference between gigabytes and tens of gigabytes. The `format` column is
+read back rather than assumed, so crops written before the switch still
+display. Kept
 locally so the gallery is browsable with every drive unplugged, and encrypted
 because a folder of croppped faces in Application Support is *more* sensitive
 than the vectors derived from them, not less. The crop uses the same 45% margin
