@@ -906,6 +906,107 @@ fn doctor(state: State<AppState>) -> Result<std::collections::BTreeMap<String, S
 }
 
 // ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn propose_events(
+    state: State<AppState>,
+    gap_hours: Option<f64>,
+) -> Result<family_archive_core::events::ProposeReport, String> {
+    use family_archive_core::events::{EventRepo, DEFAULT_GAP_HOURS};
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    EventRepo::new(&archive)
+        .propose(gap_hours.unwrap_or(DEFAULT_GAP_HOURS))
+        .map_err(map_err)
+}
+
+#[tauri::command]
+fn list_events(
+    state: State<AppState>,
+    status: Option<String>,
+) -> Result<Vec<family_archive_core::events::Event>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::events::EventRepo::new(&archive)
+        .list(status.as_deref())
+        .map_err(map_err)
+}
+
+/// The next event awaiting a decision, so the interface can review one at a
+/// time rather than presenting a wall of proposals.
+#[tauri::command]
+fn next_event_proposal(
+    state: State<AppState>,
+) -> Result<Option<family_archive_core::events::Event>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::events::EventRepo::new(&archive)
+        .next_proposal()
+        .map_err(map_err)
+}
+
+#[tauri::command]
+fn name_event(
+    state: State<AppState>,
+    event_id: String,
+    name: String,
+    client: Option<String>,
+) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::events::EventRepo::new(&archive)
+        .name_event(&event_id, &name, client.as_deref())
+        .map_err(map_err)
+}
+
+#[tauri::command]
+fn forget_event(state: State<AppState>, event_id: String) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::events::EventRepo::new(&archive)
+        .forget(&event_id)
+        .map_err(map_err)
+}
+
+#[tauri::command]
+fn merge_events(state: State<AppState>, into: String, from: String) -> Result<u64, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::events::EventRepo::new(&archive)
+        .merge(&into, &from)
+        .map_err(map_err)
+}
+
+#[tauri::command]
+fn split_event(state: State<AppState>, event_id: String, at: String) -> Result<String, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::events::EventRepo::new(&archive)
+        .split(&event_id, &at)
+        .map_err(map_err)
+}
+
+#[tauri::command]
+fn event_clients(state: State<AppState>) -> Result<Vec<(String, i64)>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::events::EventRepo::new(&archive)
+        .clients()
+        .map_err(map_err)
+}
+
+#[tauri::command]
+fn event_files(state: State<AppState>, event_id: String) -> Result<Vec<String>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::events::EventRepo::new(&archive)
+        .files(&event_id)
+        .map_err(map_err)
+}
+
+// ---------------------------------------------------------------------------
 // Backup
 // ---------------------------------------------------------------------------
 
@@ -1058,6 +1159,15 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            propose_events,
+            list_events,
+            next_event_proposal,
+            name_event,
+            forget_event,
+            merge_events,
+            split_event,
+            event_clients,
+            event_files,
             choose_folder,
             get_settings,
             save_settings,

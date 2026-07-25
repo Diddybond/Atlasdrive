@@ -79,6 +79,11 @@ enum Command {
         #[command(subcommand)]
         action: BackupAction,
     },
+    /// Group photographs into the events they were taken at.
+    Events {
+        #[command(subcommand)]
+        action: EventAction,
+    },
     /// Reclaim disk space: re-encode legacy PNG thumbnails and compact the
     /// database. Safe to run at any time; changes nothing you can see.
     Compact,
@@ -87,6 +92,58 @@ enum Command {
         /// Required, and the only supported mode: unredacted export is not offered.
         #[arg(long)]
         redacted: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum EventAction {
+    /// Propose events by clustering capture times. Existing events are kept.
+    Propose {
+        /// Gap in hours that starts a new event.
+        #[arg(long, default_value_t = family_archive_core::events::DEFAULT_GAP_HOURS)]
+        gap_hours: f64,
+    },
+    /// List events, newest first.
+    List {
+        /// Only 'proposed' or only 'named'.
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Name an event, confirming its grouping.
+    Name {
+        #[arg(long)]
+        event: String,
+        #[arg(long)]
+        name: String,
+        /// Who it was shot for, so several shoots gather under one client.
+        #[arg(long)]
+        client: Option<String>,
+    },
+    /// Split an event in two at a date/time, e.g. 2026-04-12T15:00:00.
+    Split {
+        #[arg(long)]
+        event: String,
+        #[arg(long)]
+        at: String,
+    },
+    /// Fold one event into another.
+    Merge {
+        #[arg(long)]
+        into: String,
+        #[arg(long)]
+        from: String,
+    },
+    /// Remove an event. Its photographs stay in the catalogue.
+    Forget {
+        #[arg(long)]
+        event: String,
+    },
+    /// Every client, with how many shoots each has.
+    Clients,
+    /// Shoots for one client.
+    Client {
+        #[arg(long)]
+        name: String,
     },
 }
 
@@ -363,6 +420,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Doctor => doctor_cmd(&ctx),
         Command::Date { file, from, to, clear } => date_cmd(&ctx, &file, &from, to.as_deref(), clear),
         Command::Backup { action } => backup_cmd(&ctx, action),
+        Command::Events { action } => events_cmd(&ctx, action),
         Command::Compact => compact_cmd(&ctx),
         Command::Report { redacted } => report_cmd(&ctx, redacted),
     }
@@ -868,6 +926,91 @@ fn date_cmd(ctx: &Ctx, file: &str, from: &str, to: Option<&str>, clear: bool) ->
     println!("{}", family_archive_core::dates::describe(&est));
     println!("Your correction is kept even if this photograph is analysed again.");
     Ok(())
+}
+
+fn events_cmd(ctx: &Ctx, action: EventAction) -> Result<()> {
+    use family_archive_core::events::EventRepo;
+
+    let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
+    let repo = EventRepo::new(&archive);
+
+    let show = |e: &family_archive_core::events::Event| {
+        let client = e.client.as_deref().map(|c| format!("  [{c}]")).unwrap_or_default();
+        let mark = if e.status == "proposed" { " (proposed)" } else { "" };
+        println!("  {}  {}{}{}", &e.id[..8], e.display_name(), client, mark);
+    };
+
+    match action {
+        EventAction::Propose { gap_hours } => {
+            let r = repo.propose(gap_hours)?;
+            println!("Proposed {} event(s) from {} photographs.", r.proposed, r.photos_grouped);
+            if r.photos_skipped > 0 {
+                println!("  {} left ungrouped (too few to be a shoot)", r.photos_skipped);
+            }
+            if r.photos_undated > 0 {
+                println!("  {} have no usable date and cannot be grouped", r.photos_undated);
+            }
+            if r.proposed > 0 {
+                println!("\nName them with: atlasdrive events name --event <id> --name \"...\"");
+            }
+            Ok(())
+        }
+        EventAction::List { status } => {
+            let events = repo.list(status.as_deref())?;
+            if events.is_empty() {
+                println!("No events yet. Run: atlasdrive events propose");
+                return Ok(());
+            }
+            println!("{} event(s), newest first:", events.len());
+            for e in &events {
+                show(e);
+            }
+            Ok(())
+        }
+        EventAction::Name { event, name, client } => {
+            repo.name_event(&event, &name, client.as_deref())?;
+            println!("Named.");
+            Ok(())
+        }
+        EventAction::Split { event, at } => {
+            let new_id = repo.split(&event, &at)?;
+            println!("Split. The later photographs are now event {}.", &new_id[..8]);
+            Ok(())
+        }
+        EventAction::Merge { into, from } => {
+            let moved = repo.merge(&into, &from)?;
+            println!("Merged {moved} photograph(s).");
+            Ok(())
+        }
+        EventAction::Forget { event } => {
+            repo.forget(&event)?;
+            println!("Forgotten. The photographs stay in the catalogue.");
+            Ok(())
+        }
+        EventAction::Clients => {
+            let clients = repo.clients()?;
+            if clients.is_empty() {
+                println!("No clients recorded yet.");
+                return Ok(());
+            }
+            for (name, n) in clients {
+                println!("  {n:>3}  {name}");
+            }
+            Ok(())
+        }
+        EventAction::Client { name } => {
+            let events = repo.for_client(&name)?;
+            if events.is_empty() {
+                println!("No shoots recorded for {name}.");
+                return Ok(());
+            }
+            println!("{} shoot(s) for {name}:", events.len());
+            for e in &events {
+                show(e);
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Reclaim space without changing what the catalogue contains.

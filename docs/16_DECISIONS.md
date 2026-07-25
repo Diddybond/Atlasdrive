@@ -827,3 +827,48 @@ to schema it has no business knowing. Over-fetching keeps the index a pure
 similarity structure. A test registers two drives, queries into the larger
 one's cluster, filters to the smaller, and asserts every photograph on it is
 still reachable.
+
+## D-038: Events are split on a time gap, not on calendar days
+
+**Status:** settled.
+
+**Context.** A photograph archive is event-shaped: the useful unit of recall is
+"that wedding in May" or "the Crown Parents shoot", not a date range typed into
+a filter. The owner also shoots repeatedly for the same clients, so several
+shoots need to gather under one name without being merged into one event.
+
+**Decision.** Photographs are clustered by the gap between consecutive capture
+times, with `DEFAULT_GAP_HOURS = 10`.
+
+Splitting on a *gap* rather than on calendar days is the whole point. A wedding
+routinely runs past midnight, and a calendar-day rule would cut the evening
+reception off from the ceremony it followed — the single most obvious way to get
+this wrong, and the case a test pins down explicitly.
+
+Ten hours keeps a long day together while still separating consecutive days,
+which are normally more than ten hours apart at the boundary (an evening finish,
+a morning start). The threshold is deliberately generous: over-merging is cheap
+to fix (split it) and under-merging is not (the owner has to find and merge
+fragments scattered through a list), so the bias is towards keeping a day
+together. Clusters below `MIN_EVENT_PHOTOS = 5` are not proposed at all, or a
+stray test frame becomes an "event" and buries the real ones.
+
+**Proposed, not decided.** Events follow the face-review shape: the app can see
+that forty photographs were taken across one Saturday, but only the owner knows
+whether that was a wedding, a christening, or two unrelated things on one day.
+Proposals are `status = 'proposed'` and `event_files.confirmed = 0` until named.
+The interface reviews one at a time, largest first, which is the pattern that
+worked for faces after "this is confusing".
+
+**Clients.** A plain column on the event, not a table. A client here is a name
+the owner types, used to gather shoots for the same people; giving it identity,
+addresses and invoices would be building a CRM, which this is not. Lookup is
+case-insensitive because nobody types a name the same way twice.
+
+**Re-runnable.** Only photographs not already in an event are considered, so
+proposing again after a new drive is scanned picks up the new work and leaves
+named events untouched. Photographs with no usable date are counted and reported
+rather than swept into whichever event happens to be adjacent.
+
+Measured on the real archive: 758 wedding photographs proposed as exactly one
+event spanning 13:02 to 01:30 the following morning.

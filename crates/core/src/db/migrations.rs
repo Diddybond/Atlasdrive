@@ -97,7 +97,58 @@ const ARCHIVE_MIGRATIONS: &[Migration] = &[
         name: "suggestion_score",
         sql: ARCHIVE_V3,
     },
+    Migration {
+        version: 4,
+        name: "events",
+        sql: ARCHIVE_V4,
+    },
 ];
+
+/// Events, and the clients they were shot for.
+///
+/// An event is a shoot: a wedding, a christening, a portrait session. It exists
+/// because a photograph archive is event-shaped — the useful unit of recall is
+/// "that wedding in May", not a date range typed into a filter.
+///
+/// `client` is a plain column on the event rather than a table of its own. A
+/// client here is a name the owner types, used to gather several shoots for the
+/// same people; giving it identity, addresses and invoices would be building a
+/// CRM, which this is not. If that changes, promoting it later is a migration
+/// and nothing else depends on the shape.
+///
+/// `event_files` is a join rather than a column on `files` because the
+/// membership is proposed by the app and confirmed by a human, and a proposal
+/// that has not been accepted must not look like a fact. `confirmed` carries
+/// that distinction, exactly as face suggestions do.
+const ARCHIVE_V4: &str = r#"
+CREATE TABLE events (
+    id            TEXT PRIMARY KEY,
+    name          TEXT,
+    client        TEXT,
+    -- Bounds of the photographs in the event, maintained as members change.
+    earliest_date TEXT,
+    latest_date   TEXT,
+    notes         TEXT,
+    -- 'proposed' until a human names or accepts it.
+    status        TEXT NOT NULL DEFAULT 'proposed'
+                  CHECK (status IN ('proposed','named','rejected')),
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE TABLE event_files (
+    event_id   TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    file_id    TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    confirmed  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (event_id, file_id)
+);
+
+CREATE INDEX idx_event_files_file  ON event_files(file_id);
+CREATE INDEX idx_events_client     ON events(client);
+CREATE INDEX idx_events_status     ON events(status);
+CREATE INDEX idx_events_dates      ON events(earliest_date, latest_date);
+"#;
 
 /// How strongly a proposed group matched the person it was proposed as.
 ///

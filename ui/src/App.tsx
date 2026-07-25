@@ -3,15 +3,17 @@ import { SearchScreen } from "./screens/SearchScreen";
 import { DrivesScreen } from "./screens/DrivesScreen";
 import { ScanScreen } from "./screens/ScanScreen";
 import { ReviewScreen } from "./screens/ReviewScreen";
+import { EventsScreen } from "./screens/EventsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { runningInTauri } from "./api";
 
-type Section = "search" | "drives" | "review" | "scan" | "settings";
+type Section = "search" | "drives" | "review" | "events" | "scan" | "settings";
 
 const NAV: { id: Section; label: string; hint: string }[] = [
   { id: "search", label: "Search", hint: "Find any photograph" },
   { id: "drives", label: "Drives", hint: "Your numbered drives" },
   { id: "review", label: "People", hint: "Name faces, check suggestions" },
+  { id: "events", label: "Events", hint: "Weddings, shoots, clients" },
   { id: "scan", label: "Scan activity", hint: "Indexing progress" },
   { id: "settings", label: "Settings", hint: "Diagnostics and safety" },
 ];
@@ -60,6 +62,7 @@ export function App() {
         {section === "drives" && <DrivesScreen />}
         {section === "review" && <ReviewScreen />}
         {section === "scan" && <ScanScreen />}
+        {section === "events" && <EventsScreen />}
         {section === "settings" && <SettingsScreen />}
       </main>
     </div>

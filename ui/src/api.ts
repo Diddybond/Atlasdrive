@@ -5,6 +5,23 @@
 // demonstrable and testable without the native layer. The shapes mirror the
 // serde types in family-archive-core.
 
+export interface ArchiveEvent {
+  id: string;
+  name?: string | null;
+  client?: string | null;
+  earliest_date?: string | null;
+  latest_date?: string | null;
+  status: "proposed" | "named" | "rejected";
+  photo_count: number;
+}
+
+export interface ProposeReport {
+  proposed: number;
+  photos_grouped: number;
+  photos_skipped: number;
+  photos_undated: number;
+}
+
 export interface Settings {
   backup_destination?: string | null;
   backup_include_key: boolean;
@@ -241,6 +258,14 @@ export const api = {
   runVerifier: () => call<VerifierCheck[]>("run_verifier"),
   prepareReview: (limit: number) => call<ClusterSummary[]>("prepare_review", { limit }),
   doctor: () => call<Record<string, string>>("doctor"),
+  proposeEvents: (gapHours?: number) => call<ProposeReport>("propose_events", { gapHours }),
+  listEvents: (status?: string) => call<ArchiveEvent[]>("list_events", { status }),
+  nextEventProposal: () => call<ArchiveEvent | null>("next_event_proposal"),
+  nameEvent: (eventId: string, name: string, client?: string) =>
+    call<void>("name_event", { eventId, name, client }),
+  forgetEvent: (eventId: string) => call<void>("forget_event", { eventId }),
+  eventClients: () => call<[string, number][]>("event_clients"),
+  eventFiles: (eventId: string) => call<string[]>("event_files", { eventId }),
   chooseFolder: (prompt?: string) => call<string | null>("choose_folder", { prompt }),
   getSettings: () => call<Settings>("get_settings"),
   saveSettings: (settings: Settings) => call<void>("save_settings", { settings }),
@@ -345,6 +370,8 @@ const mockBackups: BackupInfo[] = [];
 // thing it stands in for, or the UI gets exercised against duplicate keys it
 // would never see.
 let mockBackupSeq = 0;
+
+let mockEvents: ArchiveEvent[] = [];
 
 function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   switch (cmd) {
@@ -523,6 +550,39 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     }
     case "doctor":
       return Promise.resolve({ keystore: "file-fallback-dev", archive_integrity: "ok", ai_offline: "true" } as unknown as T);
+    case "propose_events": {
+      mockEvents = [
+        { id: "ev-wedding", name: null, client: null, earliest_date: "2026-05-30T13:02:00", latest_date: "2026-05-31T01:30:00", status: "proposed", photo_count: 758 },
+        { id: "ev-crown", name: null, client: null, earliest_date: "2026-03-14T09:15:00", latest_date: "2026-03-14T16:40:00", status: "proposed", photo_count: 212 },
+      ];
+      return Promise.resolve({ proposed: 2, photos_grouped: 970, photos_skipped: 6, photos_undated: 3 } as unknown as T);
+    }
+    case "list_events": {
+      const want = args?.status as string | undefined;
+      return Promise.resolve((want ? mockEvents.filter((e) => e.status === want) : mockEvents) as unknown as T);
+    }
+    case "next_event_proposal":
+      return Promise.resolve((mockEvents.find((e) => e.status === "proposed") ?? null) as unknown as T);
+    case "name_event": {
+      const target = mockEvents.find((e) => e.id === args?.eventId);
+      if (target) {
+        target.name = String(args?.name ?? "");
+        target.client = (args?.client as string) || null;
+        target.status = "named";
+      }
+      return Promise.resolve(undefined as unknown as T);
+    }
+    case "forget_event": {
+      mockEvents = mockEvents.filter((e) => e.id !== args?.eventId);
+      return Promise.resolve(undefined as unknown as T);
+    }
+    case "event_clients": {
+      const counts = new Map<string, number>();
+      for (const e of mockEvents) if (e.client) counts.set(e.client, (counts.get(e.client) ?? 0) + 1);
+      return Promise.resolve([...counts.entries()] as unknown as T);
+    }
+    case "event_files":
+      return Promise.resolve(["f1", "f2", "f3"] as unknown as T);
     case "choose_folder":
       return Promise.resolve("/Users/you/Library/CloudStorage/GoogleDrive-you@example.com/My Drive/AtlasDrive" as unknown as T);
     case "get_settings":

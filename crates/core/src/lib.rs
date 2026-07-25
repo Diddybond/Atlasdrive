@@ -23,6 +23,7 @@ pub mod diagnostics;
 pub mod db;
 pub mod drive;
 pub mod error;
+pub mod events;
 pub mod export;
 pub mod faces;
 pub mod integrity;

@@ -372,3 +372,83 @@ describe("Backup", () => {
     });
   });
 });
+
+describe("Events", () => {
+  async function openEvents() {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Events/ }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Events", level: 1 })).toBeDefined();
+    });
+  }
+
+  it("starts with nothing and offers to find events", async () => {
+    await openEvents();
+    expect(screen.getByRole("button", { name: "Find events" })).toBeDefined();
+    expect(screen.getByText(/None yet/)).toBeDefined();
+  });
+
+  it("reviews one proposal at a time rather than showing a wall", async () => {
+    await openEvents();
+    fireEvent.click(screen.getByRole("button", { name: "Find events" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Name this one", level: 2 })).toBeDefined();
+    });
+    // Two were proposed, but only one is being asked about.
+    expect(screen.getByText("2 waiting")).toBeDefined();
+    expect(screen.getAllByRole("heading", { name: "Name this one" })).toHaveLength(1);
+    // An unnamed proposal still describes itself by its dates.
+    expect(screen.getByText(/758 photographs/)).toBeDefined();
+  });
+
+  it("names an event with a client and moves to the next", async () => {
+    await openEvents();
+    fireEvent.click(screen.getByRole("button", { name: "Find events" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Name this one", level: 2 })).toBeDefined();
+    });
+
+    fireEvent.change(screen.getByLabelText(/What was it/), {
+      target: { value: "Aimee & Kent wedding" },
+    });
+    fireEvent.change(screen.getByLabelText(/Client/), { target: { value: "Aimee Kanovan" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // It appears under named events, with its client...
+    await waitFor(() => {
+      expect(screen.getByText("Aimee & Kent wedding")).toBeDefined();
+    });
+    // The client shows in two places by design: on the event row, and in the
+    // Clients list that gathers several shoots for the same people.
+    expect(screen.getAllByText(/Aimee Kanovan/).length).toBeGreaterThanOrEqual(2);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Clients", level: 2 })).toBeDefined();
+    });
+    // ...and the next proposal is now the one being asked about.
+    await waitFor(() => {
+      expect(screen.getByText("1 waiting")).toBeDefined();
+    });
+  });
+
+  it("cannot save an event without a name", async () => {
+    await openEvents();
+    fireEvent.click(screen.getByRole("button", { name: "Find events" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Save" })).toBeDefined();
+    });
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("can reject a proposal that is not really an event", async () => {
+    await openEvents();
+    fireEvent.click(screen.getByRole("button", { name: "Find events" }));
+    await waitFor(() => {
+      expect(screen.getByText("2 waiting")).toBeDefined();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Not an event" }));
+    await waitFor(() => {
+      expect(screen.getByText("1 waiting")).toBeDefined();
+    });
+  });
+});
