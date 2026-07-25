@@ -71,6 +71,11 @@ export function EventsScreen() {
       const r = await api.proposeEvents();
       const bits = [`Found ${r.proposed} event${r.proposed === 1 ? "" : "s"} in ${r.photos_grouped} photographs.`];
       if (r.photos_skipped) bits.push(`${r.photos_skipped} were too few to be a shoot.`);
+      if (r.photos_imprecise)
+        bits.push(
+          `${r.photos_imprecise} are dated only to a wide range — scanned prints, most likely — ` +
+            `and were left alone rather than grouped by a guess.`,
+        );
       if (r.photos_undated) bits.push(`${r.photos_undated} have no usable date.`);
       setNote(bits.join(" "));
       await refresh();

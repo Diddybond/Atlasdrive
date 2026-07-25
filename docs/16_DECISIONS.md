@@ -872,3 +872,36 @@ rather than swept into whichever event happens to be adjacent.
 
 Measured on the real archive: 758 wedding photographs proposed as exactly one
 event spanning 13:02 to 01:30 the following morning.
+
+## D-039: Events are only proposed from dates precise enough to mean something
+
+**Status:** settled.
+
+**Context.** Found on a critical re-read of D-038 rather than from a failure.
+Event clustering used `date_estimates.earliest_date` as though it were a capture
+time. It is not: a date estimate is a *range*. A digital photograph carries an
+EXIF timestamp where earliest and latest are the same instant, but a scanned
+print may only be placed as "sometime between 1985 and 1989".
+
+Clustering on the start of a four-year range would have clumped hundreds of
+unrelated prints into one fabricated event — and done it silently. The
+photographs would have looked grouped, and the grouping would have meant
+nothing. The owner's archive includes drives of scanned prints, so this was
+certain to happen, and invisible on the wedding drive used to develop the
+feature because every date there is a real EXIF timestamp.
+
+**Decision.** A photograph is only clustered when its estimate spans no more
+than `MAX_DATE_SPAN_HOURS` (48). Anything vaguer is counted as
+`photos_imprecise` and reported, never guessed at. Forty-eight hours rather than
+twenty-four so a photograph dated to a calendar day still groups.
+
+**Consequence.** The interface says plainly why those photographs were left out
+— "dated only to a wide range, scanned prints most likely" — rather than
+silently omitting them, because an unexplained absence is what sends someone
+looking for a bug. Two tests pin both directions: a decade-wide print is never
+grouped, and a date known to the day still is.
+
+**A general lesson worth recording.** The feature was built and tested against
+the one drive available, where the flaw could not appear. Thresholds and
+assumptions validated on a single homogeneous drive should be treated as
+unvalidated until they have met the archive's variety.

@@ -673,6 +673,36 @@ fn start_index(
             pipeline.run(&opts).map_err(map_err)?;
             Ok(())
         })();
+        // A successful run is the moment there is new work worth protecting, so
+        // it is the right moment to back up — if the owner asked for that. A
+        // failed or cancelled run is not, because the catalogue may be
+        // mid-batch. Dry runs change nothing and are skipped too.
+        if result.is_ok() && !dry_run {
+            let prefs = family_archive_core::settings::load(&paths);
+            if let (true, Some(dest)) = (prefs.backup_after_indexing, prefs.backup_destination.clone()) {
+                let options = family_archive_core::backup::BackupOptions {
+                    include_key: prefs.backup_include_key,
+                    include_thumbnails: true,
+                    keep: prefs.backup_keep,
+                };
+                match family_archive_core::backup::create(
+                    &paths,
+                    std::path::Path::new(&dest),
+                    &options,
+                ) {
+                    Ok(report) => {
+                        let mut prefs = prefs;
+                        prefs.last_backup_at = Some(family_archive_core::util::now_iso8601());
+                        let _ = family_archive_core::settings::save(&paths, &prefs);
+                        eprintln!("automatic backup written to {}", report.bundle);
+                    }
+                    // A failed backup must not be reported as a failed index
+                    // run: the indexing succeeded and the catalogue is intact.
+                    Err(e) => eprintln!("automatic backup failed: {e}"),
+                }
+            }
+        }
+
         if let Err(e) = result {
             // Surfaced to the UI through progress.json / index.log.
             eprintln!("index run failed: {e}");

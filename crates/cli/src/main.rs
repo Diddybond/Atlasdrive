@@ -947,6 +947,13 @@ fn events_cmd(ctx: &Ctx, action: EventAction) -> Result<()> {
             if r.photos_skipped > 0 {
                 println!("  {} left ungrouped (too few to be a shoot)", r.photos_skipped);
             }
+            if r.photos_imprecise > 0 {
+                println!(
+                    "  {} are dated only to a wide range (scanned prints, most likely) and were",
+                    r.photos_imprecise
+                );
+                println!("    left alone — grouping those by time would invent events, not find them");
+            }
             if r.photos_undated > 0 {
                 println!("  {} have no usable date and cannot be grouped", r.photos_undated);
             }

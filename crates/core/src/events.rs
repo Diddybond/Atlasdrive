@@ -46,6 +46,20 @@ use crate::error::{Error, Result};
 /// morning start).
 pub const DEFAULT_GAP_HOURS: f64 = 10.0;
 
+/// How wide a date estimate may be and still mean "when this was taken".
+///
+/// This guard matters more than the gap threshold. A date estimate is a *range*:
+/// a digital photograph carries an EXIF capture time where earliest and latest
+/// are the same instant, but a scanned print may only be placed as "sometime
+/// between 1985 and 1989". Clustering on the start of a four-year range would
+/// clump hundreds of unrelated prints into one fabricated event, and would do it
+/// silently — the photographs would look grouped, and the grouping would mean
+/// nothing.
+///
+/// Two days rather than one, so a photograph dated only to a calendar day still
+/// groups, while anything vaguer is set aside and reported instead of guessed at.
+pub const MAX_DATE_SPAN_HOURS: f64 = 48.0;
+
 /// Below this many photographs a cluster is not worth proposing as an event.
 ///
 /// Stray shots — a test frame, a photograph of a parking sign — would otherwise
@@ -94,6 +108,10 @@ pub struct ProposeReport {
     pub photos_skipped: u64,
     /// Photographs with no usable date, which cannot be clustered at all.
     pub photos_undated: u64,
+    /// Photographs whose date is only known to within a wide range — a scanned
+    /// print placed in a decade, say. Grouping these by time would invent
+    /// events rather than find them.
+    pub photos_imprecise: u64,
 }
 
 pub struct EventRepo<'a> {
@@ -114,7 +132,7 @@ impl<'a> EventRepo<'a> {
         // The best date available: a correction the owner made outranks an
         // estimate, which is what `is_user_confirmed` records.
         let mut stmt = self.conn.prepare(
-            "SELECT f.id, de.earliest_date
+            "SELECT f.id, de.earliest_date, de.latest_date
                FROM files f
                JOIN date_estimates de ON de.file_id = f.id
               WHERE f.status = 'complete'
@@ -122,9 +140,28 @@ impl<'a> EventRepo<'a> {
                 AND NOT EXISTS (SELECT 1 FROM event_files ef WHERE ef.file_id = f.id)
               ORDER BY de.earliest_date",
         )?;
-        let rows: Vec<(String, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        let candidates: Vec<(String, String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<std::result::Result<_, _>>()?;
+
+        // Set aside anything whose date is only known to within a wide range.
+        // See MAX_DATE_SPAN_HOURS: these are reported, never guessed at.
+        let max_span = (MAX_DATE_SPAN_HOURS * 3600.0) as i64;
+        let mut rows: Vec<(String, String)> = Vec::with_capacity(candidates.len());
+        for (file_id, earliest, latest) in candidates {
+            let span = match (parse_epoch(&earliest), latest.as_deref().and_then(parse_epoch)) {
+                (Some(a), Some(b)) => b - a,
+                // No latest bound recorded: treat the earliest as exact, which
+                // is how a plain EXIF timestamp is stored.
+                (Some(_), None) => 0,
+                _ => 0,
+            };
+            if span > max_span {
+                report.photos_imprecise += 1;
+                continue;
+            }
+            rows.push((file_id, earliest));
+        }
 
         report.photos_undated = self.conn.query_row(
             "SELECT count(*) FROM files f
@@ -509,6 +546,15 @@ mod tests {
             rusqlite::params![id, when],
         )
         .unwrap();
+        // The full-text index is populated by the pipeline rather than by a
+        // trigger, so a fixture that skips it is not searchable — which is
+        // exactly what caught this test out the first time.
+        conn.execute(
+            "INSERT INTO files_fts (file_id, filename, relative_path, tags, ocr_text, description)
+             VALUES (?1, ?1, ?1, 'photograph', '', '')",
+            [id],
+        )
+        .unwrap();
     }
 
     fn shoot(conn: &Connection, prefix: &str, day: &str, start_hour: u32, count: usize) {
@@ -778,6 +824,163 @@ mod tests {
         // A blank client is stored as absent rather than as an empty string.
         repo.name_event(&event.id, "Wedding", Some("  ")).unwrap();
         assert!(repo.list(None).unwrap()[0].client.is_none());
+    }
+
+    /// The failure this guard exists to prevent: a drive of scanned prints,
+    /// each dated only to a span of years, silently forming one fabricated
+    /// "event" that means nothing.
+    #[test]
+    fn prints_dated_only_to_a_decade_are_not_invented_into_an_event() {
+        let conn = catalogue();
+        // A real shoot, precisely dated.
+        shoot(&conn, "wed", "2026-05-30", 12, 10);
+        // Twenty scanned prints, each placed only within the late 1980s.
+        for i in 0..20 {
+            let id = format!("print{i:03}");
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, status, analysis_version, created_at, updated_at)
+                 VALUES (?1,'d1','rt1',?1,?1,1,0,'complete',1,'now','now')",
+                [&id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO date_estimates (file_id, earliest_date, latest_date, confidence,
+                                             method_version, evidence_json, is_user_confirmed,
+                                             created_at, updated_at)
+                 VALUES (?1, '1985-01-01T00:00:00', '1989-12-31T00:00:00', 0.3, 1, '[]', 0,
+                         'now', 'now')",
+                [&id],
+            )
+            .unwrap();
+        }
+
+        let repo = EventRepo::new(&conn);
+        let report = repo.propose(DEFAULT_GAP_HOURS).unwrap();
+
+        assert_eq!(report.proposed, 1, "only the real shoot becomes an event");
+        assert_eq!(report.photos_grouped, 10);
+        assert_eq!(
+            report.photos_imprecise, 20,
+            "vaguely dated prints must be set aside and reported, not grouped"
+        );
+
+        // And none of them ended up in the wedding.
+        let event = repo.list(None).unwrap().remove(0);
+        let members = repo.files(&event.id).unwrap();
+        assert_eq!(members.len(), 10);
+        assert!(members.iter().all(|m| !m.starts_with("print")));
+    }
+
+    /// A photograph dated to a single day is still precise enough to group —
+    /// the guard must not throw away ordinary EXIF-dated work.
+    #[test]
+    fn a_date_known_to_the_day_still_groups() {
+        let conn = catalogue();
+        for i in 0..8 {
+            let id = format!("day{i:03}");
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, status, analysis_version, created_at, updated_at)
+                 VALUES (?1,'d1','rt1',?1,?1,1,0,'complete',1,'now','now')",
+                [&id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO date_estimates (file_id, earliest_date, latest_date, confidence,
+                                             method_version, evidence_json, is_user_confirmed,
+                                             created_at, updated_at)
+                 VALUES (?1, '1999-07-04T00:00:00', '1999-07-04T23:59:59', 0.7, 1, '[]', 0,
+                         'now', 'now')",
+                [&id],
+            )
+            .unwrap();
+        }
+        let report = EventRepo::new(&conn).propose(DEFAULT_GAP_HOURS).unwrap();
+        assert_eq!(report.proposed, 1);
+        assert_eq!(report.photos_imprecise, 0);
+    }
+
+    /// Events are only useful if you can search inside them.
+    #[test]
+    fn an_event_and_a_client_can_be_searched_within() {
+        use crate::search::{SearchFilters, SearchRepo};
+
+        let conn = catalogue();
+        shoot(&conn, "wed", "2026-05-30", 12, 10);
+        shoot(&conn, "eng", "2026-02-14", 11, 10);
+        // A third shoot for someone else entirely.
+        shoot(&conn, "other", "2026-08-01", 10, 10);
+
+        let repo = EventRepo::new(&conn);
+        repo.propose(DEFAULT_GAP_HOURS).unwrap();
+        let events = repo.list(None).unwrap();
+        assert_eq!(events.len(), 3);
+
+        // Two of the three are for one client.
+        let wedding = events.iter().find(|e| e.earliest_date.as_deref().unwrap().starts_with("2026-05-30")).unwrap();
+        let engagement = events.iter().find(|e| e.earliest_date.as_deref().unwrap().starts_with("2026-02-14")).unwrap();
+        let unrelated = events.iter().find(|e| e.earliest_date.as_deref().unwrap().starts_with("2026-08-01")).unwrap();
+        repo.name_event(&wedding.id, "Wedding", Some("Aimee & Kent")).unwrap();
+        repo.name_event(&engagement.id, "Engagement", Some("Aimee & Kent")).unwrap();
+        repo.name_event(&unrelated.id, "Corporate", Some("Someone Else")).unwrap();
+
+        let search = SearchRepo::new(&conn);
+
+        // One event.
+        let in_wedding = search
+            .text_search("photograph", &SearchFilters {
+                event_id: Some(wedding.id.clone()),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(in_wedding.len(), 10);
+
+        // Every shoot for one client, across events.
+        let for_client = search
+            .text_search("photograph", &SearchFilters {
+                client: Some("Aimee & Kent".into()),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap_or_default();
+        // Filenames differ per shoot, so query on something both share.
+        let both: Vec<_> = search
+            .text_search("photograph", &SearchFilters {
+                client: Some("aimee & kent".into()),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(both.len(), 20, "both shoots for the client, case-insensitively");
+        assert!(
+            both.iter().all(|r| !r.filename.starts_with("other")),
+            "the other client's shoot must not leak in"
+        );
+        let _ = for_client;
+    }
+
+    /// A client name with an apostrophe must not break the query.
+    #[test]
+    fn a_name_with_an_apostrophe_is_handled() {
+        use crate::search::{SearchFilters, SearchRepo};
+
+        let conn = catalogue();
+        shoot(&conn, "a", "2026-05-30", 12, 10);
+        let repo = EventRepo::new(&conn);
+        repo.propose(DEFAULT_GAP_HOURS).unwrap();
+        let event = repo.list(None).unwrap().remove(0);
+        repo.name_event(&event.id, "O'Brien wedding", Some("Sean O'Brien")).unwrap();
+
+        let hits = SearchRepo::new(&conn)
+            .text_search("photograph", &SearchFilters {
+                client: Some("Sean O'Brien".into()),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 10);
     }
 
     #[test]

@@ -46,6 +46,9 @@ pub struct SearchFilters {
     pub online_only: bool,
     pub include_offline: bool,
     pub person_id: Option<String>,
+    /// Restrict to one event, or to every event shot for one client.
+    pub event_id: Option<String>,
+    pub client: Option<String>,
     pub scanned_only: bool,
     pub limit: usize,
 }
@@ -400,6 +403,30 @@ fn push_filter_sql(sql: &mut String, filters: &SearchFilters) {
     if filters.online_only {
         sql.push_str(" AND d.status = 'online'");
     }
+    // Event and client identifiers come from the catalogue rather than from
+    // typed input, but they still reach here as strings, so they are escaped
+    // rather than interpolated raw.
+    if let Some(ev) = &filters.event_id {
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM event_files ef WHERE ef.file_id = f.id
+                           AND ef.event_id = '{}')",
+            escape_sql(ev)
+        ));
+    }
+    if let Some(client) = &filters.client {
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM event_files ef
+                            JOIN events e ON e.id = ef.event_id
+                           WHERE ef.file_id = f.id
+                             AND e.client = '{}' COLLATE NOCASE)",
+            escape_sql(client)
+        ));
+    }
+}
+
+/// Single-quote escaping for values interpolated into the filter clauses.
+fn escape_sql(s: &str) -> String {
+    s.replace('\'', "''")
 }
 
 /// Escape an FTS query into a safe phrase match to avoid syntax injection.

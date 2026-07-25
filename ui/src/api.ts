@@ -20,6 +20,7 @@ export interface ProposeReport {
   photos_grouped: number;
   photos_skipped: number;
   photos_undated: number;
+  photos_imprecise: number;
 }
 
 export interface Settings {
@@ -555,7 +556,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         { id: "ev-wedding", name: null, client: null, earliest_date: "2026-05-30T13:02:00", latest_date: "2026-05-31T01:30:00", status: "proposed", photo_count: 758 },
         { id: "ev-crown", name: null, client: null, earliest_date: "2026-03-14T09:15:00", latest_date: "2026-03-14T16:40:00", status: "proposed", photo_count: 212 },
       ];
-      return Promise.resolve({ proposed: 2, photos_grouped: 970, photos_skipped: 6, photos_undated: 3 } as unknown as T);
+      return Promise.resolve({ proposed: 2, photos_grouped: 970, photos_skipped: 6, photos_undated: 3, photos_imprecise: 41 } as unknown as T);
     }
     case "list_events": {
       const want = args?.status as string | undefined;
