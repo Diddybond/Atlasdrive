@@ -1105,3 +1105,34 @@ outstanding work when photographs have been deleted from a drive since.
 using this catalogue's own measured throughput once it has any, falling back to
 0.30 files/sec. Phrased as a duration to plan around rather than a warning —
 hours below a day, days above it — because the drive stays connected either way.
+
+## D-046: A run holds the Mac awake, via a child process
+
+**Status:** settled.
+
+**Context.** A drive is plugged in and left for a night or two. Nothing in
+AtlasDrive stopped macOS sleeping, so an unattended run could simply stop —
+leaving a part-indexed drive in the morning with no indication that sleep was
+the reason. `pmset` confirmed the machine was only being kept awake incidentally
+by unrelated apps.
+
+**Decision.** An index run holds `/usr/bin/caffeinate -i -m -s` open for its
+duration. Three assertions, and the middle one is the one most easily forgotten:
+idle system sleep, **disk idle sleep** — which is what stops the external drive
+being read from spinning down — and system sleep on mains power. Display sleep
+is deliberately left alone: the screen going dark overnight is wanted.
+
+**Why a child process rather than IOKit.** The failure mode is the reason. The
+assertion belongs to a process AtlasDrive owns, so if AtlasDrive crashes the
+assertion dies with it and the Mac is free to sleep again. Binding
+`IOPMAssertionCreateWithName` directly would risk leaving a machine permanently
+awake after a crash. It is also consistent with the app's existing use of
+`sips`, `codesign` and `osascript`, and needs no FFI.
+
+**Never fatal.** A machine that will not hold the assertion indexes more slowly,
+not wrongly, so `StayAwake::hold` reports rather than refuses. The message says
+so without alarm: "If it sleeps, indexing pauses and continues when you wake it
+— nothing is lost", which is true because the queue is durable.
+
+Verified on a real run: `pmset -g assertions` showed `PreventDiskIdle 1` and
+`PreventUserIdleSystemSleep 1` held for the duration and released after.

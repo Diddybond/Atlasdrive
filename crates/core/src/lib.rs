@@ -13,6 +13,7 @@
 //! layout mirrors the architecture layers in `docs/03_ARCHITECTURE.md`.
 
 pub mod ai;
+pub mod awake;
 pub mod backup;
 pub mod bitrot;
 pub mod compare;

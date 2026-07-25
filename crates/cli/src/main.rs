@@ -652,6 +652,13 @@ fn build_pipeline<'a>(
 }
 
 fn index_cmd(ctx: &Ctx, args: IndexArgs) -> Result<()> {
+    // A drive is left connected for a night or two; if the Mac sleeps, the run
+    // stops and nothing says why. Released when this function returns.
+    let awake = family_archive_core::awake::StayAwake::hold(
+        format!("indexing drive {}", args.drive),
+    );
+    eprintln!("{}", awake.describe());
+
     let archive = ctx.open_archive()?;
     let queue = ctx.open_queue()?;
     let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create()?;

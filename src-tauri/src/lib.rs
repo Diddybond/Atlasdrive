@@ -699,6 +699,15 @@ fn start_index(
                 logger: Logger::new(paths.index_log()),
                 cancel,
             };
+            // Held for the whole run. A drive is plugged in and left for a
+            // night or two; if the Mac sleeps, indexing stops and the morning
+            // shows a part-indexed drive with no clue why. Dropped
+            // automatically when this closure ends, however it ends.
+            let _awake = family_archive_core::awake::StayAwake::hold(
+                format!("indexing drive {drive}"),
+            );
+            eprintln!("{}", _awake.describe());
+
             let mut opts = IndexOptions::new(drive, path);
             opts.mode = if dry_run { IndexMode::DryRun } else { IndexMode::Normal };
             opts.resume = resume;
