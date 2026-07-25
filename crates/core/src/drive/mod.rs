@@ -43,6 +43,10 @@ pub struct RegisterParams {
     pub filesystem_type: Option<String>,
     pub physical_location: Option<String>,
     pub categories: Vec<String>,
+    /// The folder chosen to index. Kept because otherwise the only record of
+    /// what to scan is `scan_runs.scan_root`, which does not exist until a scan
+    /// has run — leaving a freshly registered drive with nothing to scan.
+    pub registered_root: Option<String>,
 }
 
 /// Recognition outcome when a drive is inspected.
@@ -95,8 +99,9 @@ impl<'a> DriveRepo<'a> {
         self.conn.execute(
             "INSERT INTO drives
              (id, drive_number, friendly_name, volume_uuid, volume_name, capacity_bytes,
-              filesystem_type, physical_location, categories, status, first_seen_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'offline',?10)",
+              filesystem_type, physical_location, categories, status, first_seen_at,
+              registered_root)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'offline',?10,?11)",
             params![
                 id,
                 p.drive_number,
@@ -108,6 +113,7 @@ impl<'a> DriveRepo<'a> {
                 p.physical_location,
                 categories,
                 now,
+                p.registered_root,
             ],
         )?;
         self.audit(&id, "registered", None)?;
@@ -366,6 +372,18 @@ impl<'a> DriveRepo<'a> {
             }
         }
         Ok(drives)
+    }
+
+    /// The folder chosen when this drive was registered, if it is still known.
+    pub fn registered_root(&self, drive_number: i64) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT registered_root FROM drives WHERE drive_number = ?1",
+                [drive_number],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten()
     }
 
     /// Drives exactly as stored, without consulting what is mounted.

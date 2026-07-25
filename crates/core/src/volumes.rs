@@ -198,6 +198,21 @@ pub fn mounted_drive_numbers(conn: &rusqlite::Connection) -> std::collections::H
         .unwrap_or_default()
 }
 
+/// The mount point of the volume belonging to a registered drive, if it is
+/// plugged in.
+///
+/// A last resort for finding something to scan: drives registered before the
+/// `registered_root` column existed have neither that nor a scan root, and
+/// telling their owner to register them again would be a poor answer when the
+/// disk is sitting right there, matched by name.
+pub fn mount_point_for_drive(conn: &rusqlite::Connection, drive_number: i64) -> Option<String> {
+    connected(Some(conn))
+        .ok()?
+        .into_iter()
+        .find(|v| v.registered_as == Some(drive_number))
+        .map(|v| v.path)
+}
+
 /// Where photographs most likely live on a freshly picked volume.
 ///
 /// Offered as a starting point, never imposed: scanning the whole disk works,
@@ -416,6 +431,28 @@ mod tests {
             volumes.iter().filter_map(|v| v.registered_as).collect();
         assert!(mounted.contains(&2), "a mounted drive must read as connected");
         assert!(!mounted.contains(&9), "an unmounted drive must not");
+    }
+
+    /// The fallback that lets a drive registered before registered_root existed
+    /// still be scanned, without asking its owner to register it again.
+    #[test]
+    fn finds_the_mount_point_of_a_registered_drive() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute(
+            "INSERT INTO drives (id, drive_number, volume_name, status, first_seen_at)
+             VALUES ('d2', 2, 'Late 25 A', 'offline', 'now')",
+            [],
+        )
+        .unwrap();
+
+        // Only resolves for a drive whose volume is actually mounted.
+        let resolved = mount_point_for_drive(&conn, 2);
+        let mounted = connected(None).unwrap().into_iter().any(|v| v.name == "Late 25 A");
+        assert_eq!(resolved.is_some(), mounted, "should resolve only when plugged in");
+        if let Some(path) = resolved {
+            assert!(Path::new(&path).is_dir(), "{path}");
+        }
+        assert!(mount_point_for_drive(&conn, 99).is_none(), "unknown drive resolves to nothing");
     }
 
     #[test]

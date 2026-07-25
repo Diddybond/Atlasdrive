@@ -102,7 +102,23 @@ const ARCHIVE_MIGRATIONS: &[Migration] = &[
         name: "events",
         sql: ARCHIVE_V4,
     },
+    Migration {
+        version: 5,
+        name: "registered_root",
+        sql: ARCHIVE_V5,
+    },
 ];
+
+/// The folder chosen when a drive was registered.
+///
+/// Without it the app could not scan a drive it had just been told about: the
+/// only record of what to scan was `scan_runs.scan_root`, which does not exist
+/// until a scan has run. Registering a drive and then pressing scan was
+/// therefore circular, and the interface could only say "start a scan from Scan
+/// activity" — where the same information was missing.
+const ARCHIVE_V5: &str = r#"
+ALTER TABLE drives ADD COLUMN registered_root TEXT;
+"#;
 
 /// Events, and the clients they were shot for.
 ///

@@ -5,6 +5,7 @@ export function DrivesScreen() {
   const [coverage, setCoverage] = useState<Record<number, DriveCoverage>>({});
   const [volumes, setVolumes] = useState<Volume[]>([]);
   const [registerNote, setRegisterNote] = useState<string | null>(null);
+  const [driveNotes, setDriveNotes] = useState<Record<number, string>>({});
   const [folders, setFolders] = useState<string[]>([]);
   const [drives, setDrives] = useState<Drive[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -16,14 +17,20 @@ export function DrivesScreen() {
   const [editing, setEditing] = useState<string | null>(null);
   const [contents, setContents] = useState<Record<number, DriveContents>>({});
   const [rescanning, setRescanning] = useState<number | null>(null);
-  const [rescanNote, setRescanNote] = useState<string | null>(null);
 
+  /// Scan a drive, or check an already-scanned one for new photographs.
+  ///
+  /// The outcome is shown against the drive it concerns. It used to go to a
+  /// note at the top of the page, far enough from the button that pressing it
+  /// looked like nothing had happened.
   async function rescan(drive: Drive) {
     setRescanning(drive.drive_number);
+    setDriveNotes((n) => ({ ...n, [drive.drive_number]: "" }));
     try {
-      setRescanNote(await api.rescanDrive(drive.drive_number));
+      const message = await api.rescanDrive(drive.drive_number);
+      setDriveNotes((n) => ({ ...n, [drive.drive_number]: message }));
     } catch (err) {
-      setRescanNote(String(err));
+      setDriveNotes((n) => ({ ...n, [drive.drive_number]: String(err) }));
     } finally {
       setRescanning(null);
     }
@@ -225,12 +232,6 @@ export function DrivesScreen() {
         </p>
       )}
 
-      {rescanNote && (
-        <p className="search-note" role="status">
-          {rescanNote}
-        </p>
-      )}
-
       <ul className="drive-list">
         {drives.map((d) => (
           <li key={d.id} className="card drive-card">
@@ -312,9 +313,17 @@ export function DrivesScreen() {
                   <button
                     onClick={() => void rescan(d)}
                     disabled={rescanning === d.drive_number}
-                    aria-label={`Check Drive ${d.drive_number} for new photographs`}
+                    aria-label={
+                      coverage[d.drive_number] && coverage[d.drive_number].discovered === 0
+                        ? `Scan Drive ${d.drive_number}`
+                        : `Check Drive ${d.drive_number} for new photographs`
+                    }
                   >
-                    {rescanning === d.drive_number ? "Checking…" : "Check for new photographs"}
+                    {rescanning === d.drive_number
+                      ? "Starting…"
+                      : coverage[d.drive_number] && coverage[d.drive_number].discovered === 0
+                        ? "Scan this drive"
+                        : "Check for new photographs"}
                   </button>
                   <button
                     className="ghost"
@@ -324,6 +333,11 @@ export function DrivesScreen() {
                     Edit location &amp; categories
                   </button>
                 </>
+              )}
+              {driveNotes[d.drive_number] && (
+                <p className="drive-note" role="status">
+                  {driveNotes[d.drive_number]}
+                </p>
               )}
             </div>
           </li>

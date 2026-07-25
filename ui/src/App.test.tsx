@@ -725,3 +725,41 @@ describe("Read-only drives", () => {
     expect(identity!.checked).toBe(false);
   });
 });
+
+describe("Scanning a drive from the Drives screen", () => {
+  async function openDrives() {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/Never indexed/)).toBeDefined();
+    });
+  }
+
+  it("offers to scan a drive that has never been indexed", async () => {
+    await openDrives();
+    // The never-scanned drive must offer a first scan, not a check for new
+    // photographs -- and must not send you to another screen to do it.
+    expect(screen.getByRole("button", { name: /^Scan Drive 22$/ })).toBeDefined();
+  });
+
+  it("offers to check an already-indexed drive for new photographs", async () => {
+    await openDrives();
+    expect(
+      screen.getByRole("button", { name: /Check Drive 14 for new photographs/ }),
+    ).toBeDefined();
+  });
+
+  it("shows the outcome against the drive it concerns", async () => {
+    await openDrives();
+    fireEvent.click(screen.getByRole("button", { name: /^Scan Drive 22$/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Looking for new photographs on Drive 22/)).toBeDefined();
+    });
+    // Inside that drive's card, not floating at the top of the page.
+    const note = screen.getByText(/Looking for new photographs on Drive 22/);
+    expect(note.closest(".drive-card")).not.toBeNull();
+    const card = note.closest(".drive-card")!;
+    expect(card.textContent).toContain("Scanned prints");
+  });
+});

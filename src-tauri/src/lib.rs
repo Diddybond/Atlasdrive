@@ -105,6 +105,10 @@ fn register_drive(
             drive_number: number,
             friendly_name: name.clone(),
             volume_name: vol.file_name().map(|s| s.to_string_lossy().to_string()),
+            // Remembered so the drive can be scanned straight after
+            // registering; without it there is nothing to scan until a scan has
+            // already run.
+            registered_root: Some(path.clone()),
             ..Default::default()
         })
         .map_err(map_err)?;
@@ -526,10 +530,17 @@ fn rescan_drive(state: State<AppState>, drive_number: i64) -> Result<String, Str
             |r| r.get(0),
         )
         .ok();
-    let Some(root) = scan_root else {
-        return Err(format!(
-            "Drive {drive_number} has not been scanned yet — start a scan from Scan activity."
-        ));
+    // Falling back to the folder chosen at registration is what lets a drive be
+    // scanned for the first time from the Drives screen. Before this the only
+    // record of what to scan appeared *after* the first scan, so the button
+    // could only refer the owner elsewhere — to a screen that knew no more.
+    let root = match scan_root.or_else(|| DriveRepo::new(&archive).registered_root(drive_number)) {
+        Some(r) => r,
+        None => {
+            return Err(format!(
+                "AtlasDrive does not know which folder to scan for Drive {drive_number}.                  Register it again and choose the drive from the list."
+            ))
+        }
     };
     if !std::path::Path::new(&root).is_dir() {
         return Err(format!(

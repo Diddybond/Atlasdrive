@@ -1247,3 +1247,38 @@ by reading output or by looking at the screen. Where a rule carries safety
 weight, it belongs in one place, and the boundary that crosses languages is
 where to be most suspicious: a green Rust test says nothing about what
 TypeScript decided to do instead.
+
+## D-050: A drive can be scanned from the screen that shows it
+
+**Status:** settled. Reported as "nothing happens when I click check for new
+photographs".
+
+**It was not nothing.** The command returned "Drive 2 has not been scanned yet
+— start a scan from Scan activity", and the interface printed it at the top of
+the page, far from the button that produced it. A response detached from the
+action it answers is indistinguishable from no response.
+
+**And the advice was circular.** Registering a drive discarded the folder that
+had just been chosen — only `volume_name` was kept. The sole record of what to
+scan was `scan_runs.scan_root`, which does not exist until a scan has run. So a
+freshly registered drive could not be scanned from anywhere, and the referral to
+Scan activity pointed at a screen that knew no more than the one giving it.
+
+**Decision.**
+
+*Migration v5 adds `drives.registered_root`*, set from the folder chosen at
+registration. The chain now closes: pick a drive, register it, scan it.
+
+*The button says what it will do.* "Scan this drive" when nothing has been
+indexed, "Check for new photographs" once something has. The same control doing
+two different jobs should not claim to do only one of them.
+
+*The outcome appears against the drive it concerns*, inside that drive's card.
+The page-level note is gone.
+
+*Three fallbacks, in order:* the last scan's root, the folder recorded at
+registration, then — for drives registered before the column existed — the mount
+point of the matching volume, if it is plugged in. Asking someone to register a
+disk again when it is sitting connected in front of them is a poor answer where
+a better one is available. Only when all three fail does it say so, and then it
+asks for the drive to be connected rather than naming a screen.
