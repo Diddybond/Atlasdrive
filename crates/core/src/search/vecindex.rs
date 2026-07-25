@@ -55,7 +55,7 @@ const SCALE: f32 = 127.0;
 
 /// Bumped when the on-disk layout changes, so an old file is rejected rather
 /// than misread.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 const MAGIC: &[u8; 8] = b"ATLASVX1";
 
@@ -80,6 +80,13 @@ pub struct VectorIndex {
     norms: Vec<f32>,
     /// Identifies the rows this was built from; see module docs.
     fingerprint: u64,
+    /// The newest `created_at` this index has seen.
+    ///
+    /// Embeddings are written with a timestamp and never rewritten, so anything
+    /// newer than this is an addition that can simply be appended. Without it,
+    /// indexing one more photograph would rebuild the whole partition — 147MB
+    /// re-read and re-quantised after every scan of a twenty-drive archive.
+    watermark: String,
 }
 
 impl VectorIndex {
@@ -133,6 +140,7 @@ impl VectorIndex {
         }
 
         let fingerprint = fingerprint(conn, model_id, model_version)?;
+        let watermark = watermark(conn, model_id, model_version)?;
         Ok(Self {
             model_id: model_id.to_string(),
             model_version: model_version.to_string(),
@@ -141,6 +149,7 @@ impl VectorIndex {
             data,
             norms,
             fingerprint,
+            watermark,
         })
     }
 
@@ -159,32 +168,121 @@ impl VectorIndex {
             return Vec::new();
         }
 
-        let mut scored: Vec<(u32, i32)> = Vec::with_capacity(self.ids.len());
+        // Score as cosine, not as the raw dot product.
+        //
+        // Quantising to i8 leaves each row's norm slightly off SCALE, and those
+        // differences are not uniform — so ordering by the integer dot product
+        // is *not* the same as ordering by cosine. Ranking on the raw sum and
+        // then reporting a normalised score produced visibly out-of-order
+        // results on real photographs (88.6, 88.1, 87.8, 87.5, 87.7). One
+        // division per row is nothing against a 768-term dot product.
+        let mut scored: Vec<(u32, f32)> = Vec::with_capacity(self.ids.len());
         for (i, chunk) in self.data.chunks_exact(self.dim).enumerate() {
             // i8 * i8 accumulates safely in i32: 768 * 127 * 127 fits easily.
             let mut acc: i32 = 0;
             for (a, b) in chunk.iter().zip(q.iter()) {
                 acc += (*a as i32) * (*b as i32);
             }
-            scored.push((i as u32, acc));
+            let denom = self.norms[i] * q_norm;
+            let sim = if denom > f32::EPSILON { acc as f32 / denom } else { 0.0 };
+            scored.push((i as u32, sim));
         }
 
         let take = limit.min(scored.len());
-        // Only the head needs to be ordered; sorting the whole set would cost
-        // more than the scan that produced it.
+        // Only the head needs ordering; sorting the whole set would cost more
+        // than the scan that produced it.
         let nth = take.saturating_sub(1).min(scored.len() - 1);
-        scored.select_nth_unstable_by(nth, |a, b| b.1.cmp(&a.1));
+        scored.select_nth_unstable_by(nth, |a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
         scored.truncate(take);
-        scored.sort_unstable_by_key(|(_, score)| std::cmp::Reverse(*score));
+        scored.sort_unstable_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         scored
             .into_iter()
-            .map(|(i, acc)| {
-                let denom = self.norms[i as usize] * q_norm;
-                let sim = if denom > f32::EPSILON { acc as f32 / denom } else { 0.0 };
-                (self.ids[i as usize].clone(), sim)
-            })
+            .map(|(i, sim)| (self.ids[i as usize].clone(), sim))
             .collect()
+    }
+
+    /// Append embeddings added since this index was built.
+    ///
+    /// Returns the number appended, or `None` when the catalogue has changed in
+    /// a way appending cannot express — a deletion, a re-analysis, a model
+    /// version change — and the caller must rebuild. Detecting that is a
+    /// subtraction: if the live row count does not equal what this index holds
+    /// plus what is being appended, something went away.
+    pub fn append_new(&mut self, conn: &Connection) -> Result<Option<usize>> {
+        let live: i64 = conn.query_row(
+            "SELECT count(*) FROM visual_embeddings ve
+               JOIN files f ON f.id = ve.file_id
+              WHERE ve.model_id = ?1 AND ve.model_version = ?2 AND f.status = 'complete'",
+            rusqlite::params![&self.model_id, &self.model_version],
+            |r| r.get(0),
+        )?;
+
+        // `>=` rather than `>` because several embeddings can share a second;
+        // anything already held is skipped below.
+        let mut stmt = conn.prepare(
+            "SELECT ve.file_id, ve.vector, ve.created_at
+               FROM visual_embeddings ve
+               JOIN files f ON f.id = ve.file_id
+              WHERE ve.model_id = ?1 AND ve.model_version = ?2 AND f.status = 'complete'
+                AND ve.created_at >= ?3
+              ORDER BY ve.file_id",
+        )?;
+        let rows: Vec<(String, Vec<u8>, String)> = stmt
+            .query_map(
+                rusqlite::params![&self.model_id, &self.model_version, &self.watermark],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let held: std::collections::HashSet<&str> =
+            self.ids.iter().map(|s| s.as_str()).collect();
+        let additions: Vec<&(String, Vec<u8>, String)> =
+            rows.iter().filter(|(id, _, _)| !held.contains(id.as_str())).collect();
+
+        // If the sums do not add up, rows were removed or replaced. Appending
+        // would leave the index describing a catalogue that no longer exists.
+        if live != self.ids.len() as i64 + additions.len() as i64 {
+            return Ok(None);
+        }
+        if additions.is_empty() {
+            self.fingerprint = fingerprint(conn, &self.model_id, &self.model_version)?;
+            return Ok(Some(0));
+        }
+
+        let mut appended = 0usize;
+        let mut newest = self.watermark.clone();
+        for (file_id, blob, created_at) in additions {
+            let vector = super::decode_vector(blob);
+            if vector.is_empty() {
+                continue;
+            }
+            // A different width means a different space; refuse rather than
+            // silently mixing them.
+            if self.dim != 0 && vector.len() != self.dim {
+                return Ok(None);
+            }
+            if self.dim == 0 {
+                self.dim = vector.len();
+            }
+            let q = quantise(&vector);
+            self.norms.push(l2(&q));
+            self.data.extend_from_slice(&q);
+            self.ids.push(file_id.clone());
+            if created_at.as_str() > newest.as_str() {
+                newest = created_at.clone();
+            }
+            appended += 1;
+        }
+
+        self.watermark = newest;
+        self.fingerprint = fingerprint(conn, &self.model_id, &self.model_version)?;
+        Ok(Some(appended))
     }
 
     /// Whether this index still describes the catalogue's current contents.
@@ -207,6 +305,7 @@ impl VectorIndex {
         buf.extend_from_slice(&(self.ids.len() as u64).to_le_bytes());
         write_str(&mut buf, &self.model_id);
         write_str(&mut buf, &self.model_version);
+        write_str(&mut buf, &self.watermark);
         for id in &self.ids {
             write_str(&mut buf, id);
         }
@@ -265,6 +364,7 @@ impl VectorIndex {
 
         let model_id = read_str(&bytes, &mut at)?;
         let model_version = read_str(&bytes, &mut at)?;
+        let watermark = read_str(&bytes, &mut at)?;
 
         let mut ids = Vec::with_capacity(count);
         for _ in 0..count {
@@ -284,7 +384,7 @@ impl VectorIndex {
         need(at, expected, bytes.len())?;
         let data: Vec<i8> = bytes[at..at + expected].iter().map(|b| *b as i8).collect();
 
-        Ok(Self { model_id, model_version, dim, ids, data, norms, fingerprint })
+        Ok(Self { model_id, model_version, dim, ids, data, norms, fingerprint, watermark })
     }
 
     /// Load a saved index, rebuilding it when absent or stale, and save it back.
@@ -294,12 +394,20 @@ impl VectorIndex {
         model_id: &str,
         model_version: &str,
     ) -> Result<Self> {
-        if let Ok(index) = Self::load(path) {
-            if index.model_id == model_id
-                && index.model_version == model_version
-                && index.is_current(conn)
-            {
-                return Ok(index);
+        if let Ok(mut index) = Self::load(path) {
+            if index.model_id == model_id && index.model_version == model_version {
+                if index.is_current(conn) {
+                    return Ok(index);
+                }
+                // Out of date, but usually only because more photographs were
+                // indexed. Appending those is far cheaper than re-reading and
+                // re-quantising the whole partition.
+                if let Ok(Some(appended)) = index.append_new(conn) {
+                    if appended > 0 {
+                        let _ = index.save(path);
+                    }
+                    return Ok(index);
+                }
             }
         }
         let index = Self::build(conn, model_id, model_version)?;
@@ -332,6 +440,20 @@ fn quantise(v: &[f32]) -> Vec<i8> {
 /// L2 norm of a quantised vector.
 fn l2(q: &[i8]) -> f32 {
     (q.iter().map(|x| (*x as i32) * (*x as i32)).sum::<i32>() as f32).sqrt()
+}
+
+/// The newest embedding timestamp in a partition.
+fn watermark(conn: &Connection, model_id: &str, model_version: &str) -> Result<String> {
+    let newest: Option<String> = conn
+        .query_row(
+            "SELECT max(ve.created_at) FROM visual_embeddings ve
+               JOIN files f ON f.id = ve.file_id
+              WHERE ve.model_id = ?1 AND ve.model_version = ?2 AND f.status = 'complete'",
+            rusqlite::params![model_id, model_version],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    Ok(newest.unwrap_or_default())
 }
 
 /// Identify the row set an index was built from.
@@ -404,7 +526,7 @@ mod tests {
             let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
             conn.execute(
                 "INSERT INTO visual_embeddings (file_id, model_id, model_version, dim, vector, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'now')",
+                 VALUES (?1, ?2, ?3, ?4, ?5, '2026-01-01T00:00:00Z')",
                 rusqlite::params![id, model.0, model.1, v.len() as i64, blob],
             )
             .unwrap();
@@ -546,6 +668,34 @@ mod tests {
         }
     }
 
+    /// Results must come back in descending order of similarity. Ranking on
+    /// the raw integer dot product did not guarantee this, because quantised
+    /// norms differ per row — it showed up on real photographs as 88.6, 88.1,
+    /// 87.8, 87.5, 87.7.
+    #[test]
+    fn results_are_ordered_by_similarity() {
+        let dim = 768;
+        let vecs = vectors(300, dim, 21);
+        let owned: Vec<(&str, Vec<f32>)> =
+            vecs.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+        let conn = seeded(&owned, ("apple-vision", "1.0.0"));
+        let index = VectorIndex::build(&conn, "apple-vision", "1.0.0").unwrap();
+
+        for query in [&vecs[0].1, &vecs[100].1, &vecs[299].1] {
+            let hits = index.search(query, 25);
+            assert_eq!(hits.len(), 25);
+            for pair in hits.windows(2) {
+                assert!(
+                    pair[0].1 >= pair[1].1,
+                    "out of order: {} ({}) before {} ({})",
+                    pair[0].0, pair[0].1, pair[1].0, pair[1].1
+                );
+            }
+            // And every score is a legitimate cosine.
+            assert!(hits.iter().all(|(_, s)| *s >= -1.0001 && *s <= 1.0001));
+        }
+    }
+
     /// Model partitions must not bleed into each other: a 768-dimension Vision
     /// embedding and a 65-dimension heuristic one describe different spaces.
     #[test]
@@ -642,7 +792,7 @@ mod tests {
         let blob: Vec<u8> = [0.5f32; 32].iter().flat_map(|x| x.to_le_bytes()).collect();
         conn.execute(
             "INSERT INTO visual_embeddings (file_id, model_id, model_version, dim, vector, created_at)
-             VALUES ('zzz','apple-vision','1.0.0',32,?1,'now')",
+             VALUES ('zzz','apple-vision','1.0.0',32,?1,'2026-06-01T00:00:00Z')",
             [blob],
         )
         .unwrap();
@@ -650,6 +800,91 @@ mod tests {
         assert!(!index.is_current(&conn), "must notice the catalogue moved on");
         let rebuilt = VectorIndex::load_or_build(&conn, &path, "apple-vision", "1.0.0").unwrap();
         assert_eq!(rebuilt.len(), 21, "must have rebuilt rather than served stale");
+    }
+
+    /// The point of the watermark: scanning another drive must not re-read and
+    /// re-quantise the whole partition.
+    #[test]
+    fn new_photographs_are_appended_rather_than_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let vecs = vectors(40, 64, 5);
+        let owned: Vec<(&str, Vec<f32>)> =
+            vecs.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+        let conn = seeded(&owned, ("apple-vision", "1.0.0"));
+
+        let path = dir.path().join("v.idx");
+        let index = VectorIndex::load_or_build(&conn, &path, "apple-vision", "1.0.0").unwrap();
+        assert_eq!(index.len(), 40);
+
+        // A later scan brings in ten more, with a newer timestamp.
+        for i in 40..50 {
+            let id = format!("z{i:05}");
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, status, analysis_version, created_at, updated_at)
+                 VALUES (?1,'d1','rt1',?1,?1,1,0,'complete',1,'now','now')",
+                [&id],
+            )
+            .unwrap();
+            let v: Vec<f32> = (0..64).map(|j| ((i * j) as f32).sin()).collect();
+            let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+            conn.execute(
+                "INSERT INTO visual_embeddings (file_id, model_id, model_version, dim, vector, created_at)
+                 VALUES (?1,'apple-vision','1.0.0',64,?2,'2099-01-01T00:00:00Z')",
+                rusqlite::params![id, blob],
+            )
+            .unwrap();
+        }
+
+        let mut reloaded = VectorIndex::load(&path).unwrap();
+        assert!(!reloaded.is_current(&conn));
+        let appended = reloaded.append_new(&conn).unwrap();
+        assert_eq!(appended, Some(10), "only the new photographs are read");
+        assert_eq!(reloaded.len(), 50);
+        assert!(reloaded.is_current(&conn), "appending must bring it up to date");
+
+        // And it answers correctly afterwards, including for the new rows.
+        let q: Vec<f32> = (0..64).map(|j| ((45 * j) as f32).sin()).collect();
+        assert_eq!(reloaded.search(&q, 1)[0].0, "z00045");
+    }
+
+    /// Appending cannot express a deletion, so it must refuse rather than leave
+    /// the index describing photographs that are gone.
+    #[test]
+    fn a_deletion_forces_a_rebuild_instead_of_an_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let vecs = vectors(20, 32, 9);
+        let owned: Vec<(&str, Vec<f32>)> =
+            vecs.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+        let conn = seeded(&owned, ("apple-vision", "1.0.0"));
+        let path = dir.path().join("v.idx");
+        VectorIndex::load_or_build(&conn, &path, "apple-vision", "1.0.0").unwrap();
+
+        conn.execute("DELETE FROM visual_embeddings WHERE file_id = 'f00003'", []).unwrap();
+
+        let mut index = VectorIndex::load(&path).unwrap();
+        assert_eq!(index.append_new(&conn).unwrap(), None, "must refuse to append");
+
+        // load_or_build recovers by rebuilding, and the deleted row is gone.
+        let rebuilt = VectorIndex::load_or_build(&conn, &path, "apple-vision", "1.0.0").unwrap();
+        assert_eq!(rebuilt.len(), 19);
+        assert!(rebuilt.is_current(&conn));
+    }
+
+    /// Appending nothing is not a rebuild, and must not pretend to be one.
+    #[test]
+    fn an_unchanged_catalogue_appends_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let vecs = vectors(15, 16, 2);
+        let owned: Vec<(&str, Vec<f32>)> =
+            vecs.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+        let conn = seeded(&owned, ("apple-vision", "1.0.0"));
+        let path = dir.path().join("v.idx");
+        VectorIndex::load_or_build(&conn, &path, "apple-vision", "1.0.0").unwrap();
+
+        let mut index = VectorIndex::load(&path).unwrap();
+        assert_eq!(index.append_new(&conn).unwrap(), Some(0));
+        assert_eq!(index.len(), 15);
     }
 
     /// A damaged or half-written index file must be refused, not misread.
@@ -868,7 +1103,7 @@ pub(crate) mod tests_support {
             let blob: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
             conn.execute(
                 "INSERT INTO visual_embeddings (file_id, model_id, model_version, dim, vector, created_at)
-                 VALUES (?1, 'apple-vision', '1.0.0', 4, ?2, 'now')",
+                 VALUES (?1, 'apple-vision', '1.0.0', 4, ?2, '2026-01-01T00:00:00Z')",
                 rusqlite::params![id, blob],
             )
             .unwrap();
@@ -933,6 +1168,7 @@ mod bench {
             data,
             norms,
             fingerprint: 0,
+            watermark: String::new(),
         };
 
         let query: Vec<f32> = (0..dim).map(|i| (i as f32 * 0.01).sin()).collect();

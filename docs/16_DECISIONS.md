@@ -977,3 +977,68 @@ worse than no fixture, because it produces confident green ticks.
 snake_case identifiers the verifier emits and mangles prose reused in the same
 slot ("After A 3.5-Hour Pause"). Capitalisation is now opt-in via
 `.check-name.identifier`, applied where identifiers actually appear.
+
+## D-042: Index updates append; and ranking is by cosine, not by the raw sum
+
+**Status:** settled.
+
+**Two changes, one found by the other.**
+
+**Appending.** The index fingerprint was count plus maximum file id, so indexing
+one more photograph invalidated the whole partition and rebuilt 147MB from
+SQLite — after every scan of a twenty-drive archive. Embeddings carry a
+`created_at` and are never rewritten, so the index now records a watermark and
+appends anything newer. `append_new` returns `None` when the catalogue changed
+in a way appending cannot express — a deletion, a re-analysis, a model version
+change — and the caller rebuilds. Detecting that is a subtraction: if the live
+row count does not equal what the index holds plus what is being appended,
+something went away.
+
+**Ranking.** Verifying the above on real photographs printed 88.6, 88.1, 87.8,
+**87.5, 87.7** — not descending. The scan ranked on the raw integer dot product
+and only normalised when reporting. Quantising to `i8` leaves each row's norm
+slightly off `SCALE`, and those deviations are not uniform, so ordering by the
+integer sum is not the same as ordering by cosine. Scoring is now cosine
+throughout. One division per row costs nothing against a 768-term dot product:
+the 200,000-vector benchmark moved from 24.0ms to 24.7ms.
+
+This is the same mistake as the 1.013 self-similarity in D-036 — the score was
+corrected there and the *ranking* was left on the old basis. Worth recording as
+a pattern: fixing how a number is displayed is not the same as fixing what it is
+used for.
+
+**A fixture bug it exposed.** Test fixtures wrote `'now'` as a literal
+`created_at`. That is not a timestamp, and as a bare word it sorts after every
+ISO date, which made the watermark meaningless. Fixtures now use real
+timestamps. Second time in this session a fixture has quietly tested the
+opposite of its name; both were found by reading output rather than by a failing
+assertion.
+
+## D-043: Tests never touch the real Keychain
+
+**Status:** settled.
+
+**Context.** `keystore_is_stable` passed a temporary directory to
+`default_keystore` and looked properly isolated. On macOS that function ignores
+the directory and returns the Keychain, so the test was reading and writing the
+developer's own key store. It hung the entire suite for thirty minutes waiting
+on an authorisation dialog, and it explains the wildly inconsistent suite times
+seen throughout this session — five seconds one run, two hundred and thirty the
+next.
+
+**Decision.** `FileKeyStore` now compiles on every platform, not only where
+there is no Keychain, and the key-store tests exercise it directly.
+`default_keystore` is unchanged and still returns the Keychain in real use.
+
+**Consequence.** The suite runs in under six seconds and cannot block on a
+dialog. Two further tests were added while the isolation was there to make them
+cheap: that a key can be *replaced* (which restore depends on, and which had no
+coverage) and that the key file is not readable by other users.
+
+**The pattern, third time in this session.** A fixture whose name and behaviour
+disagree is worse than no fixture: `shoot` contained hour-long gaps while
+claiming to be continuous; `'now'` was used as a timestamp and sorts after every
+ISO date; and this passed a directory that was silently discarded. All three
+produced confident green ticks over the wrong thing, and none was found by a
+failing assertion — they were found by reading output and by sampling a hung
+process.

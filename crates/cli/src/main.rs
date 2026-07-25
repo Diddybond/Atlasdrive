@@ -84,6 +84,17 @@ enum Command {
         #[command(subcommand)]
         action: EventAction,
     },
+    /// Photographs that look like a given one.
+    ///
+    /// This is what the visual index is for. Text queries go through Vision's
+    /// labels and OCR instead — see docs/16_DECISIONS.md, D-040.
+    Similar {
+        /// File id, as shown by `atlasdrive search`.
+        #[arg(long)]
+        file: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
     /// Reclaim disk space: re-encode legacy PNG thumbnails and compact the
     /// database. Safe to run at any time; changes nothing you can see.
     Compact,
@@ -421,6 +432,28 @@ fn run(cli: Cli) -> Result<()> {
         Command::Date { file, from, to, clear } => date_cmd(&ctx, &file, &from, to.as_deref(), clear),
         Command::Backup { action } => backup_cmd(&ctx, action),
         Command::Events { action } => events_cmd(&ctx, action),
+        Command::Similar { file, limit } => {
+            let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
+            let repo = SearchRepo::with_index_dir(&archive, ctx.paths.cache_dir());
+            let hits = repo.similar_to(
+                &file,
+                &SearchFilters { limit, include_offline: true, ..Default::default() },
+            )?;
+            if hits.is_empty() {
+                println!("No visually similar photographs found for {file}.");
+                return Ok(());
+            }
+            println!("Photographs that look like {file}:");
+            for r in hits {
+                println!(
+                    "  {:>5.1}%  Drive {:>3}  {}",
+                    r.score * 100.0,
+                    r.drive_number,
+                    r.relative_path
+                );
+            }
+            Ok(())
+        }
         Command::Compact => compact_cmd(&ctx),
         Command::Report { redacted } => report_cmd(&ctx, redacted),
     }

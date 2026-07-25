@@ -90,12 +90,18 @@ impl KeyStore for KeychainKeyStore {
 // Developer / non-macOS fallback
 // ---------------------------------------------------------------------------
 
-#[cfg(not(target_os = "macos"))]
+/// File-backed key storage.
+///
+/// The real store on platforms without a Keychain, and the store the tests use
+/// everywhere. Compiled on macOS too, deliberately: `default_keystore` ignores
+/// the directory it is handed there and returns the Keychain, so a test that
+/// passes a temporary directory looks isolated while actually reading and
+/// writing the developer's own Keychain — and blocking the whole suite on an
+/// authorisation dialog if macOS decides to ask.
 pub struct FileKeyStore {
     pub keys_dir: std::path::PathBuf,
 }
 
-#[cfg(not(target_os = "macos"))]
 impl KeyStore for FileKeyStore {
     fn get_or_create(&self) -> Result<MasterKey> {
         use std::io::Write;
@@ -143,13 +149,46 @@ impl KeyStore for FileKeyStore {
 mod tests {
     use super::*;
 
+    /// The property that matters: a store returns the same key twice.
+    ///
+    /// Exercised against `FileKeyStore` rather than `default_keystore`. On
+    /// macOS the default is the Keychain, which is the developer's own and
+    /// which can block on an authorisation dialog — this test hung the entire
+    /// suite for half an hour that way.
     #[test]
     fn keystore_is_stable() {
         let dir = tempfile::tempdir().unwrap();
-        let ks = default_keystore(dir.path().join("keys"));
+        let ks = FileKeyStore { keys_dir: dir.path().join("keys") };
         let k1 = ks.get_or_create().unwrap();
         let k2 = ks.get_or_create().unwrap();
-        // Same key returned on second call (persisted).
         assert_eq!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    /// Restore has to be able to put a key back, or a catalogue restored onto
+    /// new hardware cannot decrypt its own face data.
+    #[test]
+    fn a_key_can_be_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let ks = FileKeyStore { keys_dir: dir.path().join("keys") };
+        let original = ks.get_or_create().unwrap();
+
+        let replacement = MasterKey::generate(1);
+        assert_ne!(original.as_bytes(), replacement.as_bytes());
+        ks.put(&replacement).unwrap();
+
+        assert_eq!(ks.get_or_create().unwrap().as_bytes(), replacement.as_bytes());
+    }
+
+    /// The key file must not be world-readable.
+    #[cfg(unix)]
+    #[test]
+    fn the_key_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let ks = FileKeyStore { keys_dir: keys.clone() };
+        ks.get_or_create().unwrap();
+        let mode = std::fs::metadata(keys.join("master.key")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "key file is readable by others: {mode:o}");
     }
 }
