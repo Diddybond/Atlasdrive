@@ -325,6 +325,37 @@ have forced one full model pass per capability.
 - The worker ships as a Tauri resource. Tauri rewrites `../vision/bin/x` to
   `Resources/_up_/vision/bin/x`, so the lookup checks that layout explicitly.
 
+## D-025: The catalogue answers "what is on this drive?" and "which drive do I need?"
+
+**Status:** Settled
+
+**Context:** D-003 promised an offline catalogue, and search did return each
+photograph's drive number. But two questions a person actually asks were not
+answerable: *what is stored on Drive 5?* had no view at all, and *which drive
+holds my bike photos?* meant reading drive numbers off a list of files.
+
+**Decision:** A dedicated `inventory` module, answering both from `archive.db`
+alone. Nothing in it touches a volume, so it behaves identically whether a drive
+is connected, in a drawer, or in another house.
+
+- `drive_contents` — per drive: photograph count, date span, the subject tags it
+  mostly contains, how many have readable text, and where the user said the
+  physical disk is kept. `summary()` renders one actionable sentence.
+- `drives_matching` + `where_to_look` — search results rolled up by drive, most
+  matches first, producing "Found on Drives 1, 5 and 6. Drive 5 has the most (9).
+  Connect Drive 5 (Drawer 2) to open the originals."
+
+The grouping takes search *results* rather than re-querying, so it always agrees
+with the list on screen — including the visual leg of a natural-language search,
+which no SQL query here could reproduce.
+
+Person tags are excluded from drive summaries. Naming people is the user's
+business (D-007), and a drive inventory is not the place to surface it.
+
+**Consequences:** The product's core promise is now directly answerable rather
+than inferable. Surfaced as `atlasdrive drive contents`, a banner above search
+results, and the drive cards in the interface.
+
 ## New decision template
 
 ```markdown

@@ -28,7 +28,26 @@ describe("AtlasDrive UI", () => {
     await waitFor(() => {
       expect(screen.getByText("beach_1998.jpg")).toBeDefined();
     });
-    expect(screen.getByText(/Drive 14/)).toBeDefined();
+    // The drive badge on the result card. "Drive 14" also appears in the
+    // which-drive banner, so this has to be the badge specifically.
+    expect(screen.getAllByText("Drive 14").length).toBeGreaterThan(0);
+  });
+
+  it("says which drive to connect before listing the photographs", async () => {
+    render(<App />);
+    // "visual" matches every mock result, which spans three drives — one
+    // connected, two not.
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "visual" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Found on Drives 7, 14 and 22/)).toBeDefined();
+    });
+    // The disconnected drives are named with where they are kept, so the user
+    // knows which physical disk to go and fetch.
+    expect(screen.getByText(/Connect Drive 7 \(Drawer 2\), Drive 22 \(Box A\)/)).toBeDefined();
+    // Per-drive counts are shown.
+    expect(screen.getAllByText(/1 photograph$/).length).toBeGreaterThan(0);
   });
 
   it("explains which visual terms the local encoder understood", async () => {

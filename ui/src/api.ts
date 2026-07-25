@@ -29,12 +29,48 @@ export interface SearchResult {
   score: number;
 }
 
+export interface DriveMatch {
+  drive_number: number;
+  drive_name?: string | null;
+  online: boolean;
+  physical_location?: string | null;
+  match_count: number;
+  examples: string[];
+}
+
+export interface TagCount {
+  tag: string;
+  count: number;
+}
+
+/// What is stored on a drive — readable with the drive disconnected.
+export interface DriveContents {
+  drive_number: number;
+  drive_name?: string | null;
+  status: string;
+  online: boolean;
+  physical_location?: string | null;
+  categories: string[];
+  last_scan_at?: string | null;
+  photo_count: number;
+  missing_count: number;
+  earliest_date?: string | null;
+  latest_date?: string | null;
+  top_tags: TagCount[];
+  with_text_count: number;
+  people_count: number;
+}
+
 export interface SearchResponse {
   results: SearchResult[];
   /// Terms the local text encoder recognised in the query.
   understood: string[];
   /// True when the query had no visual meaning and only text was searched.
   text_only: boolean;
+  /// Which drives hold the matches, most matches first.
+  drives: DriveMatch[];
+  /// One line answering "which drive do I need to connect?".
+  where_to_look: string;
 }
 
 export interface Progress {
@@ -92,6 +128,8 @@ export const api = {
   prepareReview: (limit: number) => call<ClusterSummary[]>("prepare_review", { limit }),
   doctor: () => call<Record<string, string>>("doctor"),
   exportDiagnostics: () => call<string>("export_diagnostics"),
+  driveContents: (driveNumber?: number) =>
+    call<DriveContents[]>("drive_contents", { driveNumber }),
   updateDriveDetails: (input: {
     driveNumber: number;
     physicalLocation?: string;
@@ -138,7 +176,36 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       // The real backend embeds the query locally; the mock just echoes any
       // term it happens to know so the UI's explanation line is exercised.
       const understood = ["beach", "portrait", "old"].filter((t) => q.includes(t));
-      const response: SearchResponse = { results, understood, text_only: understood.length === 0 };
+      const byDrive = new Map<number, DriveMatch>();
+      for (const r of results) {
+        const e = byDrive.get(r.drive_number) ?? {
+          drive_number: r.drive_number,
+          drive_name: r.drive_name ?? null,
+          online: r.online,
+          physical_location:
+            mockDrives.find((d) => d.drive_number === r.drive_number)?.physical_location ?? null,
+          match_count: 0,
+          examples: [],
+        };
+        e.match_count += 1;
+        if (e.examples.length < 3) e.examples.push(r.filename);
+        byDrive.set(r.drive_number, e);
+      }
+      const drives = [...byDrive.values()].sort((a, b) => b.match_count - a.match_count);
+      const numbers = drives.map((d) => d.drive_number).sort((a, b) => a - b);
+      const list =
+        numbers.length === 1
+          ? `Drive ${numbers[0]}`
+          : `Drives ${numbers.slice(0, -1).join(", ")} and ${numbers[numbers.length - 1]}`;
+      const offline = drives.filter((d) => !d.online);
+      let where = drives.length === 0 ? "Not found on any indexed drive." : `Found on ${list}.`;
+      if (drives.length > 1) where += ` Drive ${drives[0].drive_number} has the most (${drives[0].match_count}).`;
+      if (offline.length > 0) {
+        where += ` Connect ${offline
+          .map((d) => (d.physical_location ? `Drive ${d.drive_number} (${d.physical_location})` : `Drive ${d.drive_number}`))
+          .join(", ")} to open the originals.`;
+      }
+      const response: SearchResponse = { results, understood, text_only: understood.length === 0, drives, where_to_look: where };
       return Promise.resolve(response as unknown as T);
     }
     case "start_index":
@@ -196,6 +263,30 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     }
     case "clear_date_override":
       return Promise.resolve(undefined as unknown as T);
+    case "drive_contents": {
+      const contents: DriveContents[] = mockDrives.map((d) => ({
+        drive_number: d.drive_number,
+        drive_name: d.friendly_name ?? null,
+        status: d.status,
+        online: d.status === "online",
+        physical_location: d.physical_location ?? null,
+        categories: d.categories ?? [],
+        last_scan_at: d.last_scan_at ?? null,
+        photo_count: d.image_count ?? 0,
+        missing_count: 0,
+        earliest_date: "1998-01-01",
+        latest_date: "2011-12-31",
+        top_tags: [
+          { tag: "beach", count: 900 },
+          { tag: "wedding", count: 120 },
+          { tag: "dog", count: 80 },
+        ],
+        with_text_count: 12,
+        people_count: 340,
+      }));
+      const n = args?.driveNumber as number | undefined;
+      return Promise.resolve((n ? contents.filter((c) => c.drive_number === n) : contents) as unknown as T);
+    }
     case "export_diagnostics":
       return Promise.resolve(
         "~/Library/Application Support/AtlasDrive/reports/diagnostics-sample.json" as unknown as T,

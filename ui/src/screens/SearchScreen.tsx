@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, SearchResult } from "../api";
+import { api, DriveMatch, SearchResult } from "../api";
 
 export function SearchScreen() {
   const [query, setQuery] = useState("");
@@ -7,6 +7,8 @@ export function SearchScreen() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [understood, setUnderstood] = useState<string[]>([]);
   const [textOnly, setTextOnly] = useState(false);
+  const [drives, setDrives] = useState<DriveMatch[]>([]);
+  const [whereToLook, setWhereToLook] = useState("");
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
   const [revealed, setRevealed] = useState<Record<string, string>>({});
@@ -50,6 +52,8 @@ export function SearchScreen() {
       setResults(r.results);
       setUnderstood(r.understood);
       setTextOnly(r.text_only);
+      setDrives(r.drives);
+      setWhereToLook(r.where_to_look);
       setSearched(true);
     } finally {
       setLoading(false);
@@ -96,6 +100,29 @@ export function SearchScreen() {
         <p className="search-note" role="status">
           No visual terms recognised in that wording — searched names, folders and tags only.
         </p>
+      )}
+
+      {searched && drives.length > 0 && (
+        <div className="card where-to-look" role="status">
+          <h2>{whereToLook}</h2>
+          <ul className="drive-hits">
+            {drives.map((d) => (
+              <li key={d.drive_number}>
+                <span className="drive-badge">Drive {d.drive_number}</span>
+                <span className="drive-hit-count">
+                  {d.match_count} photograph{d.match_count === 1 ? "" : "s"}
+                </span>
+                {d.drive_name && <span className="drive-hit-name">{d.drive_name}</span>}
+                <span className={d.online ? "status online" : "status offline"}>
+                  {d.online ? "Connected" : "Disconnected"}
+                </span>
+                {!d.online && d.physical_location && (
+                  <span className="drive-hit-where">Kept in {d.physical_location}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {searched && results.length === 0 && (

@@ -126,6 +126,21 @@ struct SearchResponse {
     understood: Vec<String>,
     /// True when the query carried no visual meaning and only text was searched.
     text_only: bool,
+    /// Which drives hold the matches, most matches first.
+    drives: Vec<family_archive_core::inventory::DriveMatch>,
+    /// One line answering "which drive do I need to connect?".
+    where_to_look: String,
+}
+
+/// What is stored on each drive — answerable with every drive unplugged.
+#[tauri::command]
+fn drive_contents(
+    state: State<AppState>,
+    drive_number: Option<i64>,
+) -> Result<Vec<family_archive_core::inventory::DriveContents>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::inventory::drive_contents(&archive, drive_number).map_err(map_err)
 }
 
 #[tauri::command]
@@ -172,7 +187,12 @@ fn search_catalogue(
             });
         }
     }
-    Ok(SearchResponse { results, understood, text_only })
+    // Answer "which drive do I need?" alongside the photographs themselves.
+    let mut drives = family_archive_core::inventory::drives_matching(&results);
+    family_archive_core::inventory::locate_matches(&archive, &mut drives).map_err(map_err)?;
+    let where_to_look = family_archive_core::inventory::where_to_look(&drives);
+
+    Ok(SearchResponse { results, understood, text_only, drives, where_to_look })
 }
 
 /// Start (or resume) an index run in the background and return immediately.
@@ -485,7 +505,8 @@ pub fn run() {
             reveal_in_finder,
             update_drive_details,
             set_date_override,
-            clear_date_override
+            clear_date_override,
+            drive_contents
         ])
         .run(tauri::generate_context!())
         .expect("error while running AtlasDrive");

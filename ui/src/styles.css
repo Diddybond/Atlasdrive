@@ -278,3 +278,12 @@ h2 {
   .content { padding: 20px; }
   .check-row { grid-template-columns: 1fr; gap: 2px; }
 }
+
+/* "Which drive do I need?" — the answer leads the results, because finding the
+   physical disk is the task; the photographs are how you confirm it. */
+.where-to-look h2 { margin-bottom: 10px; }
+.drive-hits { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.drive-hits li { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.drive-hit-count { font-weight: 600; font-variant-numeric: tabular-nums; }
+.drive-hit-name { color: var(--ink-soft); }
+.drive-hit-where { color: var(--offline); font-size: 0.85rem; font-weight: 600; }

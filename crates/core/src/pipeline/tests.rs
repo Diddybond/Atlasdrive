@@ -740,6 +740,67 @@ fn render_text_image(path: &Path, word: &str) {
     img.save(path).unwrap();
 }
 
+/// The catalogue must answer "what is on this drive?" and "which drive do I
+/// need?" with the drive physically gone. This is the product's core promise, so
+/// the test removes the volume entirely rather than just marking it offline.
+#[test]
+fn the_catalogue_describes_a_drive_that_is_no_longer_connected() {
+    use crate::inventory::{drive_contents, drives_matching, locate_matches, where_to_look};
+    use crate::search::{SearchFilters, SearchRepo};
+
+    let (h, opts) = setup(no_disk_floor());
+    pipeline(&h).run(&opts).unwrap();
+
+    // Record where the drive is kept, then unplug it: mark it offline and delete
+    // the volume from disk so nothing can secretly read from it.
+    {
+        let repo = DriveRepo::new(&h.archive);
+        let d = repo.get_by_number(14).unwrap().unwrap();
+        repo.update_details(&d.id, Some("Drawer 2"), Some(&["holidays".into()]))
+            .unwrap();
+        repo.set_status(&d.id, "offline").unwrap();
+    }
+    std::fs::remove_dir_all(&h.drive_dir).unwrap();
+
+    // 1. What is on it?
+    let contents = drive_contents(&h.archive, Some(14)).unwrap();
+    assert_eq!(contents.len(), 1);
+    let c = &contents[0];
+    assert_eq!(c.photo_count, 3, "the catalogue still knows what it holds");
+    assert!(!c.online);
+    assert_eq!(c.physical_location.as_deref(), Some("Drawer 2"));
+    let summary = c.summary();
+    assert!(summary.contains("Drive 14"), "got {summary}");
+    assert!(summary.contains("3 photographs"), "got {summary}");
+    assert!(summary.contains("Disconnected."), "got {summary}");
+    assert!(summary.contains("Kept in Drawer 2."), "got {summary}");
+
+    // 2. Which drive do I need?
+    let repo = SearchRepo::new(&h.archive);
+    let results = repo
+        .text_search(
+            "beach",
+            &SearchFilters { include_offline: true, limit: 50, ..Default::default() },
+        )
+        .unwrap();
+    assert!(!results.is_empty(), "offline search must still find photographs");
+
+    let mut grouped = drives_matching(&results);
+    locate_matches(&h.archive, &mut grouped).unwrap();
+    assert_eq!(grouped[0].drive_number, 14);
+    assert!(!grouped[0].online);
+
+    let line = where_to_look(&grouped);
+    assert!(line.contains("Found on Drive 14"), "got {line}");
+    assert!(
+        line.contains("Connect Drive 14 (Drawer 2)"),
+        "the user must be told which physical disk to fetch; got {line}"
+    );
+
+    // Every drive can be inventoried at once, too.
+    assert_eq!(drive_contents(&h.archive, None).unwrap().len(), 1);
+}
+
 #[test]
 fn rerun_is_idempotent() {
     let (h, opts) = setup(no_disk_floor());

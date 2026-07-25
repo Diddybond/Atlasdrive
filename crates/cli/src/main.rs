@@ -111,6 +111,12 @@ enum DriveAction {
         #[arg(long)]
         category: Vec<String>,
     },
+    /// What is stored on a drive — works with the drive disconnected.
+    Contents {
+        /// Limit to one drive; omit to inventory every registered drive.
+        #[arg(long)]
+        number: Option<i64>,
+    },
     /// List registered drives.
     List,
 }
@@ -294,6 +300,38 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
             );
             Ok(())
         }
+        DriveAction::Contents { number } => {
+            let all = family_archive_core::inventory::drive_contents(&archive, number)?;
+            if all.is_empty() {
+                println!("No drives registered yet.");
+                return Ok(());
+            }
+            for c in all {
+                println!("{}", c.summary());
+                if !c.top_tags.is_empty() {
+                    let shown: Vec<String> = c
+                        .top_tags
+                        .iter()
+                        .map(|t| format!("{} ({})", t.tag, t.count))
+                        .collect();
+                    println!("   What's in the pictures: {}", shown.join(", "));
+                }
+                if c.with_text_count > 0 {
+                    println!("   {} with readable text", c.with_text_count);
+                }
+                if c.missing_count > 0 {
+                    println!(
+                        "   {} catalogued file(s) were not found on the last scan",
+                        c.missing_count
+                    );
+                }
+                println!(
+                    "   Last scanned: {}",
+                    c.last_scan_at.unwrap_or_else(|| "never".into())
+                );
+            }
+            Ok(())
+        }
         DriveAction::List => {
             for d in repo.list()? {
                 println!(
@@ -425,6 +463,21 @@ fn search_cmd(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         println!("No results for \"{}\".", args.query);
         return Ok(());
     }
+
+    // Lead with the answer to "which drive do I need?", then the photographs.
+    let mut grouped = family_archive_core::inventory::drives_matching(&results);
+    family_archive_core::inventory::locate_matches(&archive, &mut grouped)?;
+    println!("{}", family_archive_core::inventory::where_to_look(&grouped));
+    for g in &grouped {
+        println!(
+            "  Drive {:>3}  {} photograph(s){}",
+            g.drive_number,
+            g.match_count,
+            if g.online { "" } else { " — disconnected" }
+        );
+    }
+    println!();
+
     for r in results {
         let status = if r.online { "online" } else { "OFFLINE" };
         let date = r

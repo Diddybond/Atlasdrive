@@ -22,6 +22,7 @@ pub mod drive;
 pub mod error;
 pub mod faces;
 pub mod integrity;
+pub mod inventory;
 pub mod logging;
 pub mod net;
 pub mod pipeline;

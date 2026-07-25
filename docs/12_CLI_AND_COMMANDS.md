@@ -75,6 +75,30 @@ atlasdrive drive set --number 14 --physical-location "Drawer 2" \
 `--category` replaces the existing list. Passing an empty
 `--physical-location ""` clears it; omitting a flag leaves that field alone.
 
+## What is on a drive
+
+```bash
+atlasdrive drive contents            # every registered drive
+atlasdrive drive contents --number 5 # just one
+```
+
+Reads only the local catalogue, so it works with every drive unplugged:
+
+```text
+Drive 5 — Holidays: 8,891 photographs, 1998–2011. Mostly beach, wedding, dog.
+Disconnected. Kept in Drawer 2.
+   What's in the pictures: beach (900), wedding (120), dog (80)
+   12 with readable text
+   Last scanned: 2026-06-30T09:12:00Z
+```
+
+Search leads with the same idea — which physical disk to fetch:
+
+```text
+Found on Drives 1, 5 and 6. Drive 5 has the most (9).
+Connect Drive 5 (Drawer 2), Drive 6 (Loft box 3) to open the originals.
+```
+
 ## Correcting a date
 
 ```bash

@@ -6,7 +6,7 @@
   drive details, date override)
 - Current completion score: **100/100** under `docs/15_DEFINITION_OF_DONE.md`
 - Critical gates passing: **10/10**
-- Latest test result: 109 core + 10 UI passing;
+- Latest test result: 115 core + 11 UI passing;
   clippy clean across the workspace and `src-tauri`, including test targets
 - Current files being changed: none (clean checkpoint)
 - Runtime safety status: all safety boundaries implemented and tested; the
@@ -24,6 +24,19 @@ it.
 What this changed in practice: searching "bicycle" now finds bicycles, and a word
 visible only as pixels inside a photograph is findable. Abstract images honestly
 report "no recognisable subject" instead of inventing one.
+
+## The catalogue answers the two real questions
+
+Both from `archive.db` alone, with every drive unplugged (D-025):
+
+- **"What is on Drive 5?"** — `atlasdrive drive contents`, and the drive cards in
+  the app. Photograph count, date span, the subjects it mostly contains, how many
+  have readable text, and where the physical disk is kept.
+- **"Which drive do I need?"** — search leads with
+  "Found on Drives 1, 5 and 6. Drive 5 has the most (9). Connect Drive 5
+  (Drawer 2) to open the originals."
+
+Proven end to end by deleting a drive's volume from disk and querying it anyway.
 
 ## The one thing that is not done
 

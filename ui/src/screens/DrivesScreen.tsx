@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, Drive } from "../api";
+import { api, Drive, DriveContents } from "../api";
 
 export function DrivesScreen() {
   const [drives, setDrives] = useState<Drive[]>([]);
@@ -10,9 +10,13 @@ export function DrivesScreen() {
   const [writeManifest, setWriteManifest] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  const [contents, setContents] = useState<Record<number, DriveContents>>({});
 
   async function load() {
     setDrives(await api.listDrives());
+    // What is actually stored on each drive, readable with them all unplugged.
+    const all = await api.driveContents();
+    setContents(Object.fromEntries(all.map((c) => [c.drive_number, c])));
   }
 
   async function saveDetails(e: React.FormEvent<HTMLFormElement>, drive: Drive) {
@@ -112,6 +116,28 @@ export function DrivesScreen() {
               </p>
               {d.categories && d.categories.length > 0 && (
                 <p className="drive-meta subtle">What's on it: {d.categories.join(", ")}</p>
+              )}
+              {contents[d.drive_number] && (
+                <p className="drive-meta subtle">
+                  {contents[d.drive_number].earliest_date && contents[d.drive_number].latest_date && (
+                    <>
+                      {contents[d.drive_number].earliest_date!.slice(0, 4)}–
+                      {contents[d.drive_number].latest_date!.slice(0, 4)}
+                      {" · "}
+                    </>
+                  )}
+                  {contents[d.drive_number].top_tags.length > 0 ? (
+                    <>
+                      Pictures of{" "}
+                      {contents[d.drive_number].top_tags
+                        .slice(0, 5)
+                        .map((t) => `${t.tag} (${t.count})`)
+                        .join(", ")}
+                    </>
+                  ) : (
+                    <>Nothing recognised yet — scan this drive to find out what is on it</>
+                  )}
+                </p>
               )}
               <p className="drive-meta subtle">
                 Last scanned: {d.last_scan_at ?? "never"}
