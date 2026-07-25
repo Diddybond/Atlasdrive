@@ -1357,3 +1357,42 @@ fixture defects earlier in this session survived. The browser mock now
 simulates a run at 0.22 files/sec, the speed measured on the real drive, and the
 dashboard computed 13.3/min and 10h 6m against it — matching the 0.222 files/sec
 and 10.4 hours measured independently from the catalogue.
+
+## D-053: The scan dashboard shows what is happening, from the catalogue
+
+**Status:** settled.
+
+**Context.** The counter and finish time of D-052 answered "when will it be
+done" but not "what is it doing". A ten-hour run showing six numbers is
+technically informative and feels like nothing is happening.
+
+**Decision.** Scan activity now carries a read-activity chart, a running total
+of what has been found, a file-type breakdown, and a live feed of the
+photographs just read — each with the subject Vision recognised, how many faces
+it holds, and its size.
+
+**Everything is counted from the catalogue, not tracked in memory.** The figures
+therefore survive the app being closed mid-run and cannot drift from what was
+actually written. `inventory::scan_stats` is a handful of index-backed counts
+against one drive, called once a poll.
+
+**Two rates, because they answer different questions.** Photographs per minute
+tells you when it will finish. Megabytes per second tells you how hard the drive
+is working — and photographs range from 2MB to 80MB, so a count alone says
+little about that. Both are measured in the interface from the updates it is
+already receiving, so neither can disagree with what is on screen.
+
+**No charting library.** A hundred numbers drawn as an SVG polyline is a few
+lines and no dependency. The y-axis is scaled to the data with 35% headroom:
+without it a steady rate — which indexing often is for long stretches — drew a
+line at the very top and a fill beneath, reading as a solid block rather than a
+chart.
+
+**The mock varies.** A fixture running at a perfectly constant rate is what
+produced that solid block in the first place, and it would equally have hidden a
+broken rate or a nonsense finish time. It now wanders the way real throughput
+does.
+
+The newest feed row fades in on opacity alone. An earlier version slid in on a
+transform and was caught mid-animation on nearly every poll, which read as a
+clipped, broken row. A live display must never look broken at rest.

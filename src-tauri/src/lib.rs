@@ -132,11 +132,14 @@ fn register_drive(
                 let read_only = e.to_string().contains("Read-only")
                     || e.to_string().contains("os error 30");
                 note = Some(if read_only {
-                    "Registered. This drive is read-only, so the identity file was not saved —                      AtlasDrive will recognise it by name and contents instead. Nothing else                      changes."
+                    "Registered. This drive is read-only, so the identity file was not saved \
+                     — AtlasDrive will recognise it by name and contents instead. Nothing else \
+                     changes."
                         .to_string()
                 } else {
                     format!(
-                        "Registered, but the identity file could not be saved ({e}).                          AtlasDrive will recognise this drive by name and contents instead."
+                        "Registered, but the identity file could not be saved ({e}). \
+                         AtlasDrive will recognise this drive by name and contents instead."
                     )
                 });
                 let _ = repo.audit(&drive.id, "manifest_skipped", None);
@@ -1056,6 +1059,23 @@ fn likely_photo_folders(path: String) -> Vec<String> {
 // Coverage and estimates
 // ---------------------------------------------------------------------------
 
+/// What a scan has produced so far, for the live dashboard.
+///
+/// Counted from the catalogue each time rather than tracked in memory, so the
+/// figures survive the app being closed mid-run and cannot drift from what was
+/// actually written.
+#[tauri::command]
+fn scan_stats(
+    state: State<AppState>,
+    drive_number: i64,
+    recent: Option<usize>,
+) -> Result<family_archive_core::inventory::ScanStats, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::inventory::scan_stats(&archive, drive_number, recent.unwrap_or(12))
+        .map_err(map_err)
+}
+
 /// How completely each drive has been indexed, least complete first.
 #[tauri::command]
 fn drive_coverage(
@@ -1353,6 +1373,7 @@ pub fn run() {
             connected_volumes,
             likely_photo_folders,
             drive_coverage,
+            scan_stats,
             estimate_index,
             similar_photographs,
             propose_events,

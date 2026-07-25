@@ -756,3 +756,183 @@ mod coverage_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Live scan statistics
+// ---------------------------------------------------------------------------
+
+/// What a scan has produced so far, for the live dashboard.
+///
+/// Every figure here is counted from the catalogue rather than tracked in
+/// memory, so it survives the app being closed and reopened mid-run and cannot
+/// drift from what was actually written. The queries are all index-backed
+/// counts; this is called once a second while a scan runs.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ScanStats {
+    pub drive_number: i64,
+    /// Photographs catalogued from this drive.
+    pub files: i64,
+    /// Bytes of original photograph read, for a genuine throughput figure
+    /// rather than one inferred from file counts.
+    pub bytes: i64,
+    pub faces: i64,
+    pub tags: i64,
+    pub people_recognised: i64,
+    /// Counts by file extension, largest first.
+    pub by_extension: Vec<(String, i64)>,
+    /// The most recently catalogued photographs, newest first.
+    pub recent: Vec<RecentFile>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecentFile {
+    pub file_id: String,
+    pub filename: String,
+    pub relative_path: String,
+    pub size_bytes: i64,
+    pub faces: i64,
+    /// The strongest label Vision gave it, when it gave one — what the
+    /// photograph is *of*, which is the interesting part of a live feed.
+    pub top_tag: Option<String>,
+}
+
+/// Statistics for one drive's catalogue as it stands right now.
+pub fn scan_stats(conn: &Connection, drive_number: i64, recent_limit: usize) -> Result<ScanStats> {
+    let mut stats = ScanStats { drive_number, ..Default::default() };
+
+    let drive_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM drives WHERE drive_number = ?1",
+            [drive_number],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(drive_id) = drive_id else { return Ok(stats) };
+
+    (stats.files, stats.bytes) = conn.query_row(
+        "SELECT count(*), COALESCE(sum(size_bytes), 0) FROM files
+          WHERE drive_id = ?1 AND status = 'complete'",
+        [&drive_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+
+    stats.faces = conn
+        .query_row(
+            "SELECT count(*) FROM faces fa JOIN files f ON f.id = fa.file_id
+              WHERE f.drive_id = ?1",
+            [&drive_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    stats.tags = conn
+        .query_row(
+            "SELECT count(*) FROM file_tags ft JOIN files f ON f.id = ft.file_id
+              WHERE f.drive_id = ?1",
+            [&drive_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    stats.people_recognised = conn
+        .query_row(
+            "SELECT count(DISTINCT c.person_id)
+               FROM face_clusters c
+               JOIN faces fa ON fa.cluster_id = c.id
+               JOIN files f ON f.id = fa.file_id
+              WHERE f.drive_id = ?1 AND c.person_id IS NOT NULL",
+            [&drive_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    {
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(lower(extension), '?') AS ext, count(*) AS n
+               FROM files WHERE drive_id = ?1 AND status = 'complete'
+              GROUP BY ext ORDER BY n DESC",
+        )?;
+        let rows = stmt.query_map([&drive_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        stats.by_extension = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    }
+
+    {
+        // Ordered by rowid rather than a timestamp: several photographs land in
+        // the same second, and rowid preserves the order they were actually
+        // written in.
+        let mut stmt = conn.prepare(
+            "SELECT f.id, f.filename, f.relative_path, f.size_bytes,
+                    (SELECT count(*) FROM faces fa WHERE fa.file_id = f.id),
+                    (SELECT t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+                      WHERE ft.file_id = f.id
+                      ORDER BY ft.confidence DESC LIMIT 1)
+               FROM files f
+              WHERE f.drive_id = ?1 AND f.status = 'complete'
+              ORDER BY f.rowid DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![&drive_id, recent_limit as i64], |r| {
+            Ok(RecentFile {
+                file_id: r.get(0)?,
+                filename: r.get(1)?,
+                relative_path: r.get(2)?,
+                size_bytes: r.get(3)?,
+                faces: r.get(4)?,
+                top_tag: r.get(5)?,
+            })
+        })?;
+        stats.recent = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    }
+
+    Ok(stats)
+}
+
+#[cfg(test)]
+mod scan_stats_tests {
+    use super::*;
+    use crate::db::{self, SchemaKind};
+
+    #[test]
+    fn reports_what_a_scan_has_produced() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute(
+            "INSERT INTO drives (id, drive_number, status, first_seen_at)
+             VALUES ('d1', 3, 'online', 'now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO roots (id, drive_id, relative_root, created_at)
+             VALUES ('rt1','d1','','now')",
+            [],
+        )
+        .unwrap();
+        for (i, ext) in ["jpg", "jpg", "jpg", "psd", "png"].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, extension,
+                                    size_bytes, source_mtime_ns, status, analysis_version,
+                                    created_at, updated_at)
+                 VALUES (?1,'d1','rt1',?2,?2,?3,?4,0,'complete',1,'now','now')",
+                rusqlite::params![format!("f{i}"), format!("shot{i}.{ext}"), ext, 1_000_000],
+            )
+            .unwrap();
+        }
+
+        let stats = scan_stats(&conn, 3, 3).unwrap();
+        assert_eq!(stats.files, 5);
+        assert_eq!(stats.bytes, 5_000_000);
+        // Largest group first, so a breakdown reads without sorting by eye.
+        assert_eq!(stats.by_extension[0], ("jpg".to_string(), 3));
+        // The feed shows the newest, capped at what was asked for.
+        assert_eq!(stats.recent.len(), 3);
+        assert_eq!(stats.recent[0].filename, "shot4.png");
+    }
+
+    /// A drive that has not been scanned must give zeroes, not an error — the
+    /// dashboard asks for these before anything exists.
+    #[test]
+    fn an_unscanned_drive_reports_nothing_rather_than_failing() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        let stats = scan_stats(&conn, 99, 10).unwrap();
+        assert_eq!(stats.files, 0);
+        assert!(stats.by_extension.is_empty());
+        assert!(stats.recent.is_empty());
+    }
+}

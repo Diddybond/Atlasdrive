@@ -347,6 +347,48 @@ h2 {
    the row and the group stops reading as a set of equals. */
 .stats dd { white-space: nowrap; }
 
+/* Read-activity chart. Scaled to its own data so a slow drive still shows a
+   shape rather than a flat line along the bottom. */
+.activity { margin-top: 16px; }
+.activity h3 { margin: 0; font-size: 0.95rem; }
+.sparkline { width: 100%; height: 64px; display: block; margin-top: 6px; }
+.spark-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.spark-fill { fill: rgba(61, 169, 252, 0.14); stroke: none; }
+
+.scan-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.scan-grid h3 { font-size: 0.95rem; margin: 18px 0 8px; }
+
+.type-bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.type-bars li { display: grid; grid-template-columns: 52px 1fr 52px; align-items: center; gap: 10px; font-size: 0.85rem; }
+.type-name { font-weight: 700; font-size: 0.75rem; letter-spacing: 0.04em; color: var(--ink-soft); }
+.type-bar { background: var(--line); border-radius: 999px; height: 8px; overflow: hidden; }
+.type-fill { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.type-count { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+
+/* The live feed: newest at the top, capped so it never grows the page. */
+.feed { list-style: none; margin: 10px 0 0; padding: 0; max-height: 320px; overflow-y: auto; }
+.feed li {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 0.85rem;
+}
+/* A new row fades in. Opacity only, and briefly: a row sliding in gets caught
+   mid-transform on almost every poll, which reads as clipped rather than
+   arriving. It must never look broken at rest. */
+.feed li:first-child { animation: feed-in 0.5s ease-out; }
+@keyframes feed-in { from { opacity: 0.35; } to { opacity: 1; } }
+.feed-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.feed-meta { display: flex; gap: 8px; align-items: center; flex: none; color: var(--ink-soft); }
+.feed-tag { background: rgba(61, 169, 252, 0.14); color: var(--link); border-radius: 999px; padding: 2px 8px; font-size: 0.78rem; }
+.feed-faces { font-size: 0.78rem; }
+.feed-size { font-variant-numeric: tabular-nums; font-size: 0.78rem; }
+
+/* A quiet pulse, so "live" is visible without being a distraction overnight. */
+.live-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); display: inline-block; animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .live-dot, .feed li:first-child { animation: none; }
+}
+
 .now-doing { margin: 10px 0 0; font-size: 0.85rem; color: var(--ink-soft); }
 .now-doing .filename {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

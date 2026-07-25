@@ -195,6 +195,26 @@ export interface Progress {
   status: string;
 }
 
+export interface RecentFile {
+  file_id: string;
+  filename: string;
+  relative_path: string;
+  size_bytes: number;
+  faces: number;
+  top_tag?: string | null;
+}
+
+export interface ScanStats {
+  drive_number: number;
+  files: number;
+  bytes: number;
+  faces: number;
+  tags: number;
+  people_recognised: number;
+  by_extension: [string, number][];
+  recent: RecentFile[];
+}
+
 export interface VerifierCheck {
   name: string;
   status: "Pass" | "Warn" | "Fail" | "Halt";
@@ -305,6 +325,8 @@ export const api = {
   cancelIndex: () => call<void>("cancel_index"),
   isIndexing: () => call<boolean>("is_indexing"),
   getProgress: () => call<Progress | null>("get_progress"),
+  scanStats: (driveNumber: number, recent?: number) =>
+    call<ScanStats>("scan_stats", { driveNumber, recent }),
   runVerifier: () => call<VerifierCheck[]>("run_verifier"),
   prepareReview: (limit: number) => call<ClusterSummary[]>("prepare_review", { limit }),
   doctor: () => call<Record<string, string>>("doctor"),
@@ -433,7 +455,11 @@ let mockBackupSeq = 0;
 
 // A scan that started a little while ago and is still going, at roughly the
 // speed measured on a real NTFS drive.
+// Varied rather than constant: photographs differ in size and in how many
+// faces they contain, so real throughput wanders. A perfectly flat mock would
+// have hidden the chart drawing a solid block instead of a line.
 const MOCK_FILES_PER_SEC = 0.22;
+const mockJitter = () => 1 + Math.sin(Date.now() / 9000) * 0.28;
 const mockRunStarted = Date.now() - 20 * 60 * 1000;
 
 let mockEvents: ArchiveEvent[] = [];
@@ -510,7 +536,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       // exercised rather than assumed. A frozen mock would have let a broken
       // estimate look perfectly healthy.
       const elapsedSec = (Date.now() - mockRunStarted) / 1000;
-      const done = Math.min(8333, Math.floor(elapsedSec * MOCK_FILES_PER_SEC));
+      const done = Math.min(8333, Math.floor(elapsedSec * MOCK_FILES_PER_SEC * mockJitter()));
       return Promise.resolve({
         runId: "mock-run",
         driveNumber: 2,
@@ -524,6 +550,33 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         currentBatch: Math.floor(done / 64) + 1,
         lastCompletedFile: `Weddings/2019/IMG_${String(4000 + done).padStart(4, "0")}.jpg`,
         status: done >= 8333 ? "complete" : "running",
+      } as unknown as T);
+    }
+    case "scan_stats": {
+      // Derived from the same simulated clock as get_progress, so the feed and
+      // the counter cannot tell different stories.
+      const done = Math.min(8333, Math.floor(((Date.now() - mockRunStarted) / 1000) * MOCK_FILES_PER_SEC));
+      const subjects = ["bride", "confetti", "speech", "cake", "dance floor", "church", "bouquet"];
+      return Promise.resolve({
+        drive_number: 2,
+        files: done,
+        bytes: done * 14_500_000,
+        faces: Math.floor(done * 1.6),
+        tags: Math.floor(done * 9.1),
+        people_recognised: Math.min(4, Math.floor(done / 400)),
+        by_extension: [
+          ["jpg", Math.floor(done * 0.94)],
+          ["psd", Math.floor(done * 0.04)],
+          ["png", Math.floor(done * 0.02)],
+        ].filter(([, n]) => (n as number) > 0) as [string, number][],
+        recent: Array.from({ length: Math.min(12, done) }, (_, i) => ({
+          file_id: `f${done - i}`,
+          filename: `IMG_${String(4000 + done - i).padStart(4, "0")}.jpg`,
+          relative_path: `Weddings/2019/IMG_${String(4000 + done - i).padStart(4, "0")}.jpg`,
+          size_bytes: 12_000_000 + ((done - i) % 7) * 900_000,
+          faces: (done - i) % 5,
+          top_tag: subjects[(done - i) % subjects.length],
+        })),
       } as unknown as T);
     }
     case "run_verifier":

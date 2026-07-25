@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, Progress } from "../api";
+import { api, Progress, ScanStats } from "../api";
 
 // The scan screen only ever *observes*. Indexing is started deliberately from
 // the Drives screen or the CLI — visiting this tab must never begin a scan.
@@ -28,6 +28,13 @@ export function ScanScreen() {
   // arriving cannot drift from what is on screen.
   const samples = useRef<Sample[]>([]);
   const [rate, setRate] = useState<number | null>(null);
+  const [stats, setStats] = useState<ScanStats | null>(null);
+  // Recent throughput readings, for the activity chart. Kept as a plain array
+  // rather than a charting library: a hundred numbers drawn as an SVG polyline
+  // is a few lines of code and no dependency.
+  const [history, setHistory] = useState<number[]>([]);
+  const byteSamples = useRef<Sample[]>([]);
+  const [mbPerSec, setMbPerSec] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,7 +58,31 @@ export function ScanScreen() {
         const first = history[0];
         const last = history[history.length - 1];
         const seconds = (last.at - first.at) / 1000;
-        setRate(seconds >= 20 && last.done > first.done ? (last.done - first.done) / seconds : null);
+        const fps = seconds >= 20 && last.done > first.done ? (last.done - first.done) / seconds : null;
+        setRate(fps);
+        if (fps !== null) setHistory((h) => [...h, fps * 60].slice(-120));
+      }
+
+      if (live && live.status === "running") {
+        const s = await api.scanStats(live.driveNumber, 12);
+        if (cancelled) return;
+        setStats(s);
+
+        // Read throughput in megabytes, from bytes of original actually
+        // catalogued. Photographs vary from 2MB to 80MB, so a count per minute
+        // says little about how hard the drive is working.
+        const now = Date.now();
+        const bs = byteSamples.current;
+        if (bs.length === 0 || bs[bs.length - 1].done !== s.bytes) {
+          bs.push({ at: now, done: s.bytes });
+        }
+        while (bs.length > 2 && now - bs[0].at > RATE_WINDOW_MS) bs.shift();
+        const bSeconds = (bs[bs.length - 1].at - bs[0].at) / 1000;
+        setMbPerSec(
+          bSeconds >= 20 && bs[bs.length - 1].done > bs[0].done
+            ? (bs[bs.length - 1].done - bs[0].done) / bSeconds / 1_048_576
+            : null,
+        );
       }
       // Keep polling only while a run is actually in flight.
       if (live && live.status === "running") {
@@ -149,10 +180,16 @@ export function ScanScreen() {
           </div>
         </dl>
 
-        {running && progress.lastCompletedFile && (
-          <p className="now-doing" role="status">
-            Just finished <span className="filename">{progress.lastCompletedFile}</span>
-          </p>
+        {running && history.length > 3 && (
+          <div className="activity">
+            <div className="row-between">
+              <h3>Read activity</h3>
+              <span className="check-detail">
+                {mbPerSec !== null ? `${mbPerSec.toFixed(1)} MB/s` : "measuring…"}
+              </span>
+            </div>
+            <Sparkline values={history} />
+          </div>
         )}
 
         {running && (
@@ -172,8 +209,105 @@ export function ScanScreen() {
           the app stops immediately and writes a safety report.
         </p>
       </div>
+
+      {stats && stats.files > 0 && (
+        <div className="scan-grid">
+          <div className="card">
+            <h2>What it has found</h2>
+            <dl className="stats">
+              <div><dt>Faces</dt><dd>{stats.faces.toLocaleString()}</dd></div>
+              <div><dt>Tags applied</dt><dd>{stats.tags.toLocaleString()}</dd></div>
+              <div><dt>People known</dt><dd>{stats.people_recognised.toLocaleString()}</dd></div>
+              <div><dt>Read so far</dt><dd>{gb(stats.bytes)}</dd></div>
+            </dl>
+
+            <h3>File types</h3>
+            <ul className="type-bars">
+              {stats.by_extension.slice(0, 5).map(([ext, n]) => (
+                <li key={ext}>
+                  <span className="type-name">{ext.toUpperCase()}</span>
+                  <span className="type-bar">
+                    <span
+                      className="type-fill"
+                      style={{ width: `${Math.max(2, (n / Math.max(1, stats.files)) * 100)}%` }}
+                    />
+                  </span>
+                  <span className="type-count">
+                    {((n / Math.max(1, stats.files)) * 100).toFixed(1)}%
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="card">
+            <div className="row-between">
+              <h2>Live feed</h2>
+              {running && <span className="live-dot" aria-label="Live" role="img" />}
+            </div>
+            <p className="check-detail">The photographs it has just read, newest first.</p>
+            <ul className="feed">
+              {stats.recent.map((f) => (
+                <li key={f.file_id}>
+                  <span className="feed-name" title={f.relative_path}>
+                    {f.filename}
+                  </span>
+                  <span className="feed-meta">
+                    {f.top_tag && <span className="feed-tag">{f.top_tag}</span>}
+                    {f.faces > 0 && (
+                      <span className="feed-faces">
+                        {f.faces} {f.faces === 1 ? "face" : "faces"}
+                      </span>
+                    )}
+                    <span className="feed-size">{mb(f.size_bytes)}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
     </section>
   );
+}
+
+/// A throughput chart, drawn as a plain SVG polyline.
+///
+/// A charting library would be a dependency and a bundle for one line on one
+/// screen. The y-axis is scaled to the data rather than fixed, so a slow drive
+/// still shows its shape instead of a flat line along the bottom.
+function Sparkline({ values }: { values: number[] }) {
+  const w = 600;
+  const h = 64;
+  // Headroom above the peak, so a perfectly steady rate draws a line across
+  // the upper third rather than filling the box to the brim and reading as a
+  // solid block. Indexing is often steady for long stretches.
+  const peak = Math.max(...values, 1) * 1.35;
+  const step = w / Math.max(1, values.length - 1);
+  const points = values
+    .map((v, i) => `${(i * step).toFixed(1)},${(h - (v / peak) * (h - 6) - 3).toFixed(1)}`)
+    .join(" ");
+  return (
+    <svg
+      className="sparkline"
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label={`Read activity, currently ${values[values.length - 1].toFixed(0)} photographs per minute`}
+    >
+      <polyline className="spark-line" points={points} />
+      <polyline className="spark-fill" points={`0,${h} ${points} ${w},${h}`} />
+    </svg>
+  );
+}
+
+function mb(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  return `${Math.round(bytes / 1024 ** 2)} MB`;
+}
+
+function gb(bytes: number): string {
+  return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
 }
 
 /// "4h 20m", "18m", "45s" — the unit someone would use out loud.

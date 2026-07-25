@@ -784,13 +784,26 @@ describe("Scan progress dashboard", () => {
     expect(bar.getAttribute("aria-valuemax")).toBe("100");
   });
 
-  it("says what it is working on and that it is safe to walk away", async () => {
+  it("says it is safe to walk away", async () => {
     await openScan();
     await waitFor(() => {
-      expect(screen.getByText(/Just finished/)).toBeDefined();
+      expect(screen.getByText(/stay awake until the scan finishes/)).toBeDefined();
     });
-    expect(screen.getByText(/stay awake until the scan finishes/)).toBeDefined();
     expect(screen.getByText(/interrupting it loses nothing/)).toBeDefined();
+  });
+
+  it("shows a live feed of the photographs it has just read", async () => {
+    await openScan();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Live feed", level: 2 })).toBeDefined();
+    });
+    // Real rows, newest first, with what each photograph is of.
+    const rows = document.querySelectorAll(".feed li");
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0].textContent).toMatch(/IMG_\d+\.jpg/);
+    // And the running total of what has been found alongside it.
+    expect(screen.getByRole("heading", { name: "What it has found", level: 2 })).toBeDefined();
+    expect(screen.getByText("Faces")).toBeDefined();
   });
 
   it("waits for real evidence before quoting a speed", async () => {
