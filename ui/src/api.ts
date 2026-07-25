@@ -248,8 +248,10 @@ export const api = {
   listDrives: () => call<Drive[]>("list_drives"),
   registerDrive: (input: { number: number; path: string; name?: string; writeManifest: boolean }) =>
     call<Drive>("register_drive", input),
-  search: (query: string, opts: { drive?: number; includeOffline: boolean }) =>
-    call<SearchResponse>("search_catalogue", { query, ...opts }),
+  search: (
+    query: string,
+    opts: { drive?: number; includeOffline: boolean; eventId?: string; client?: string },
+  ) => call<SearchResponse>("search_catalogue", { query, ...opts }),
   // Starts a background run and returns immediately; poll getProgress().
   startIndex: (input: { drive: number; path: string; dryRun: boolean; resume: boolean }) =>
     call<void>("start_index", input),
@@ -259,6 +261,8 @@ export const api = {
   runVerifier: () => call<VerifierCheck[]>("run_verifier"),
   prepareReview: (limit: number) => call<ClusterSummary[]>("prepare_review", { limit }),
   doctor: () => call<Record<string, string>>("doctor"),
+  similarPhotographs: (fileId: string, limit?: number) =>
+    call<SearchResult[]>("similar_photographs", { fileId, limit }),
   proposeEvents: (gapHours?: number) => call<ProposeReport>("propose_events", { gapHours }),
   listEvents: (status?: string) => call<ArchiveEvent[]>("list_events", { status }),
   nextEventProposal: () => call<ArchiveEvent | null>("next_event_proposal"),
@@ -384,6 +388,17 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(d as unknown as T);
     }
     case "search_catalogue": {
+      // Honour the event/client scope, or a test asserting that scoping works
+      // would pass against a mock that ignores it.
+      if (args?.eventId || args?.client) {
+        return Promise.resolve({
+          results: mockResults.slice(0, 1),
+          understood: ["scoped"],
+          text_only: true,
+          drives: [{ drive_number: 14, drive_name: "AtlasDrive A", online: true, count: 1 }],
+          where_to_look: "Found on Drive 14.",
+        } as unknown as T);
+      }
       const q = String(args?.query ?? "").toLowerCase();
       const includeOffline = Boolean(args?.includeOffline);
       let results = mockResults.filter((r) => q === "" || r.filename.toLowerCase().includes(q) || r.matched.join(" ").includes(q) || r.relative_path.toLowerCase().includes(q));
@@ -551,6 +566,10 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     }
     case "doctor":
       return Promise.resolve({ keystore: "file-fallback-dev", archive_integrity: "ok", ai_offline: "true" } as unknown as T);
+    case "similar_photographs":
+      return Promise.resolve(
+        mockResults.filter((r) => r.file_id !== args?.fileId) as unknown as T,
+      );
     case "propose_events": {
       mockEvents = [
         { id: "ev-wedding", name: null, client: null, earliest_date: "2026-05-30T13:02:00", latest_date: "2026-05-31T01:30:00", status: "proposed", photo_count: 758 },

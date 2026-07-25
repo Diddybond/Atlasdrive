@@ -568,12 +568,43 @@ fn drive_contents(
     family_archive_core::inventory::drive_contents(&archive, drive_number).map_err(map_err)
 }
 
+/// Photographs that look like this one.
+///
+/// This is what the vector index is for. Text queries deliberately do not use
+/// it: Apple Vision has no text encoder, so a typed query cannot be placed in
+/// the same space as the photographs, and the only local text encoder available
+/// matches on colour rather than meaning. Text search goes through Vision's
+/// classification labels and OCR instead. See D-040.
 #[tauri::command]
+fn similar_photographs(
+    state: State<AppState>,
+    file_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<family_archive_core::search::SearchResult>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let repo = family_archive_core::search::SearchRepo::with_index_dir(&archive, paths.cache_dir());
+    repo.similar_to(
+        &file_id,
+        &SearchFilters {
+            limit: limit.unwrap_or(24),
+            include_offline: true,
+            ..Default::default()
+        },
+    )
+    .map_err(map_err)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn search_catalogue(
     state: State<AppState>,
     query: String,
     drive: Option<i64>,
     include_offline: bool,
+    // Restrict to one event, or to every shoot for one client.
+    event_id: Option<String>,
+    client: Option<String>,
 ) -> Result<SearchResponse, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
@@ -587,6 +618,8 @@ fn search_catalogue(
         drive_number: drive,
         online_only: !include_offline,
         include_offline,
+        event_id,
+        client,
         limit: 100,
         ..Default::default()
     };
@@ -1189,6 +1222,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            similar_photographs,
             propose_events,
             list_events,
             next_event_proposal,

@@ -1,8 +1,15 @@
 import { useState } from "react";
 import { useEffect } from "react";
 import { api, DriveMatch, SearchResult, TagCount } from "../api";
+import type { SearchContext } from "../App";
 
-export function SearchScreen() {
+export function SearchScreen({
+  context,
+  onClearContext,
+}: {
+  context?: SearchContext | null;
+  onClearContext?: () => void;
+}) {
   const [query, setQuery] = useState("");
   const [includeOffline, setIncludeOffline] = useState(true);
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -19,8 +26,36 @@ export function SearchScreen() {
   useEffect(() => {
     void api.catalogueTags(60).then(setTags);
   }, []);
+
+  // Arriving from Events with a filter should show that shoot immediately —
+  // landing on an empty search box having just asked to see something would be
+  // a dead end.
+  useEffect(() => {
+    if (context) void search(query || "photograph");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [context?.eventId, context?.client]);
+  const [similarTo, setSimilarTo] = useState<string | null>(null);
   const [correcting, setCorrecting] = useState<string | null>(null);
   const [dateError, setDateError] = useState<string | null>(null);
+
+  /// Find photographs that look like this one.
+  ///
+  /// Distinct from a text search, and labelled as such: this asks the visual
+  /// index, which is the one thing it is genuinely good at.
+  async function findSimilar(fileId: string, filename: string) {
+    setLoading(true);
+    setSimilarTo(filename);
+    try {
+      const hits = await api.similarPhotographs(fileId, 24);
+      setResults(hits);
+      setUnderstood([]);
+      setDrives([]);
+      setWhereToLook("");
+      setSearched(true);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function reveal(fileId: string) {
     const message = await api.revealInFinder(fileId);
@@ -60,9 +95,14 @@ export function SearchScreen() {
   /// same operation as typing it.
   async function search(term: string) {
     setQuery(term);
+    setSimilarTo(null);
     setLoading(true);
     try {
-      const r = await api.search(term, { includeOffline });
+      const r = await api.search(term, {
+        includeOffline,
+        eventId: context?.eventId,
+        client: context?.client,
+      });
       setResults(r.results);
       setUnderstood(r.understood);
       setTextOnly(r.text_only);
@@ -92,6 +132,30 @@ export function SearchScreen() {
         Search by what a photo shows, who is in it, or where it lives — even while the drive is
         disconnected.
       </p>
+
+      {similarTo && (
+        <p className="scope-bar" role="status" aria-label="Result scope">
+          Photographs that look like <strong>{similarTo}</strong>
+          <button className="ghost" onClick={() => void search(query)}>
+            Back to search
+          </button>
+        </p>
+      )}
+
+      {context && (
+        <p className="scope-bar" role="status" aria-label="Search scope">
+          Searching within <strong>{context.label}</strong>
+          <button
+            className="ghost"
+            onClick={() => {
+              onClearContext?.();
+              void search(query);
+            }}
+          >
+            Search everything instead
+          </button>
+        </p>
+      )}
 
       <form className="search-bar" onSubmit={run} role="search">
         <input
@@ -234,6 +298,13 @@ export function SearchScreen() {
               <p className="matched">
                 Matched: {r.matched.join(", ")} · {(r.score * 100).toFixed(0)}% match
               </p>
+              <button
+                className="ghost"
+                onClick={() => void findSimilar(r.file_id, r.filename)}
+                aria-label={`Find photographs that look like ${r.filename}`}
+              >
+                More like this
+              </button>
               {r.online ? (
                 <button
                   className="ghost"

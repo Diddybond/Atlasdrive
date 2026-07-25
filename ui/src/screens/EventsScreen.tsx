@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, ArchiveEvent } from "../api";
+import type { SearchContext } from "../App";
 
 /// A proposal is described by its size until someone names it.
 function describe(e: ArchiveEvent): string {
@@ -45,7 +46,11 @@ function when(e: ArchiveEvent): string | null {
   return `${day(start)}, ${time(start)} → ${short(end)} ${time(end)}`;
 }
 
-export function EventsScreen() {
+export function EventsScreen({
+  onSearchWithin,
+}: {
+  onSearchWithin?: (context: SearchContext) => void;
+}) {
   const [events, setEvents] = useState<ArchiveEvent[]>([]);
   const [proposal, setProposal] = useState<ArchiveEvent | null>(null);
   const [clients, setClients] = useState<[string, number][]>([]);
@@ -198,9 +203,13 @@ export function EventsScreen() {
           <ul className="tag-cloud">
             {clients.map(([c, n]) => (
               <li key={c}>
-                <span className="tag-chip">
+                <button
+                  className="tag-chip"
+                  onClick={() => onSearchWithin?.({ client: c, label: `everything for ${c}` })}
+                  title={`Show every photograph shot for ${c}`}
+                >
                   {c} <span className="tag-count">{n}</span>
-                </span>
+                </button>
               </li>
             ))}
           </ul>
@@ -223,9 +232,21 @@ export function EventsScreen() {
                   {when(e) ? ` · ${when(e)}` : ""}
                   {e.client ? ` · ${e.client}` : ""}
                 </span>
-                <button className="ghost" onClick={() => void api.forgetEvent(e.id).then(refresh)}>
-                  Remove
-                </button>
+                <span>
+                  {onSearchWithin && (
+                    <button
+                      className="ghost"
+                      onClick={() =>
+                        onSearchWithin({ eventId: e.id, label: describe(e) })
+                      }
+                    >
+                      Show photographs
+                    </button>
+                  )}{" "}
+                  <button className="ghost" onClick={() => void api.forgetEvent(e.id).then(refresh)}>
+                    Remove
+                  </button>
+                </span>
               </li>
             ))}
           </ul>

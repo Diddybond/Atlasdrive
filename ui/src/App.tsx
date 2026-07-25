@@ -18,8 +18,24 @@ const NAV: { id: Section; label: string; hint: string }[] = [
   { id: "settings", label: "Settings", hint: "Diagnostics and safety" },
 ];
 
+/// A filter handed from one screen to another — Events sending you to Search
+/// with "just this shoot" already applied.
+export interface SearchContext {
+  eventId?: string;
+  client?: string;
+  label: string;
+}
+
 export function App() {
   const [section, setSection] = useState<Section>("search");
+  const [context, setContext] = useState<SearchContext | null>(null);
+
+  /// Jumping to Search with a filter is the only cross-screen navigation in
+  /// the app, so it is a callback rather than a router.
+  function searchWithin(next: SearchContext) {
+    setContext(next);
+    setSection("search");
+  }
 
   return (
     <div className="app">
@@ -58,11 +74,13 @@ export function App() {
       </nav>
 
       <main className="content" aria-live="polite">
-        {section === "search" && <SearchScreen />}
+        {section === "search" && (
+          <SearchScreen context={context} onClearContext={() => setContext(null)} />
+        )}
         {section === "drives" && <DrivesScreen />}
         {section === "review" && <ReviewScreen />}
         {section === "scan" && <ScanScreen />}
-        {section === "events" && <EventsScreen />}
+        {section === "events" && <EventsScreen onSearchWithin={searchWithin} />}
         {section === "settings" && <SettingsScreen />}
       </main>
     </div>

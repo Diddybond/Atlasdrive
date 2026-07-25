@@ -452,3 +452,86 @@ describe("Events", () => {
     });
   });
 });
+
+describe("Searching within an event", () => {
+  async function namedEvent() {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Events/ }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Find events" })).toBeDefined();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Find events" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Save" })).toBeDefined();
+    });
+    fireEvent.change(screen.getByLabelText(/What was it/), {
+      target: { value: "Crown Parents 2026" },
+    });
+    fireEvent.change(screen.getByLabelText(/Client/), { target: { value: "Crown School" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(screen.getByText("Crown Parents 2026")).toBeDefined();
+    });
+  }
+
+  it("jumps to Search scoped to the event, and says so", async () => {
+    await namedEvent();
+    fireEvent.click(screen.getByRole("button", { name: "Show photographs" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Search", level: 1 })).toBeDefined();
+    });
+    // The scope has to be visible, or a short list reads as a small archive.
+    const scope = await screen.findByRole("status", { name: "Search scope" });
+    expect(scope.textContent).toContain("Crown Parents 2026");
+    expect(screen.getByRole("button", { name: /Search everything instead/ })).toBeDefined();
+  });
+
+  it("can drop the scope and search the whole archive again", async () => {
+    await namedEvent();
+    fireEvent.click(screen.getByRole("button", { name: "Show photographs" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Search everything instead/ })).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Search everything instead/ }));
+    await waitFor(() => {
+      expect(screen.queryByText(/Searching within/)).toBeNull();
+    });
+  });
+
+  it("a client chip scopes to every shoot for those people", async () => {
+    await namedEvent();
+    fireEvent.click(screen.getByRole("button", { name: /Crown School/ }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Search", level: 1 })).toBeDefined();
+    });
+    const scope = await screen.findByRole("status", { name: "Search scope" });
+    expect(scope.textContent).toContain("everything for Crown School");
+  });
+});
+
+describe("More like this", () => {
+  it("finds visually similar photographs and says that is what it did", async () => {
+    render(<App />);
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "beach" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await waitFor(() => {
+      expect(screen.getByText("beach_1998.jpg")).toBeDefined();
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /look like beach_1998\.jpg/ }),
+    );
+
+    // The banner must say these are visual matches, not text matches — the
+    // distinction is the whole point of the feature.
+    const scope = await screen.findByRole("status", { name: "Result scope" });
+    expect(scope.textContent).toContain("look like");
+    expect(scope.textContent).toContain("beach_1998.jpg");
+    // The photograph itself is not among its own results — it appears once, in
+    // the banner naming what was asked for, and not again in the list below.
+    expect(screen.getAllByText("beach_1998.jpg")).toHaveLength(1);
+  });
+});

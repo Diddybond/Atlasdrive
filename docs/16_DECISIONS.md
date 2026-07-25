@@ -905,3 +905,46 @@ grouped, and a date known to the day still is.
 the one drive available, where the flaw could not appear. Thresholds and
 assumptions validated on a single homogeneous drive should be treated as
 unvalidated until they have met the archive's variety.
+
+## D-040: Text search goes through labels and OCR; the vector index serves image similarity
+
+**Status:** settled. The owner delegated this decision explicitly.
+
+**Context.** Image embeddings are `apple-vision 1.0.0` (768-dim feature prints).
+Text queries were being embedded by `local-heuristic 0.2.0` (65-dim). Those are
+different spaces, so `vector_search` was querying a partition holding zero rows
+and the visual leg of text search contributed nothing. Search still worked well,
+because Vision's classification labels and OCR text are indexed into FTS — which
+is what actually answers "wedding dress".
+
+**The option rejected.** Backfilling `local-heuristic` image embeddings would
+have made the visual leg fire. It was rejected because it would have made search
+*worse* while looking like a feature. The local text encoder renders a query
+into a small grid of colour and brightness features; matching "wedding dress"
+against that returns photographs containing white regions. That is colour
+matching wearing the costume of semantics, and it would have injected noise into
+rankings that a 1,303-label classifier already answers well.
+`natural_language_search` ignoring a zero-coverage visual query (D-017) is
+precisely the valve that has been keeping results good, and this would have
+opened it.
+
+**Decision.** Text search goes through Vision labels, OCR and filename in FTS,
+and that is the intended design rather than a fallback. Apple's Vision framework
+has no text encoder, so no typed query can be placed in the photographs' space;
+that is a property of the framework, not a gap to be filled with a worse
+encoder.
+
+The vector index is instead put to the use feature prints are actually designed
+for: **image-to-image similarity**. Given one photograph, find the others from
+the same set-up, pose and light — which is a real working need when culling a
+shoot, and which makes the 24ms index earn its keep. Exposed as "More like this"
+on every search result.
+
+**Consequence.** `SearchRepo::similar_to` no longer takes a model id from its
+caller; it discovers which engine embedded the photograph. Requiring callers to
+name the model is what let the mismatch go unnoticed in the first place, so
+removing that requirement removes the class of bug. A test asserts the discovery
+works and that an unembedded file yields nothing rather than an error.
+
+Also fixed here: `similar_to` removed the query photograph from its own results
+*after* applying the limit, so asking for five similar photographs returned four.

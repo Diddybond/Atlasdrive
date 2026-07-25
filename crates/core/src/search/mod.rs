@@ -197,6 +197,59 @@ impl<'a> SearchRepo<'a> {
         Ok(out)
     }
 
+    /// Photographs that look like this one.
+    ///
+    /// # Why this exists, and why text search does not use the vector index
+    ///
+    /// Apple's Vision framework produces image feature prints and has no text
+    /// encoder, so there is no way to place a typed query in the same space as
+    /// the photographs. The only local text encoder available renders a query
+    /// into a small grid of colour and brightness features — matching "wedding
+    /// dress" against that returns photographs containing white regions, which
+    /// is colour matching wearing the costume of semantics. Wiring it in would
+    /// have injected noise into rankings that Vision's classification labels
+    /// already answer well, so text search deliberately goes through those
+    /// labels and OCR instead (see D-040).
+    ///
+    /// Image-to-image similarity is the thing feature prints *are* for, and it
+    /// is what this index earns its keep on: given one photograph, find the
+    /// others from the same set-up, the same pose, the same light.
+    pub fn similar_to(
+        &self,
+        file_id: &str,
+        filters: &SearchFilters,
+    ) -> Result<Vec<SearchResult>> {
+        // Whichever model actually embedded this photograph; no assumption that
+        // it is Vision, so this keeps working if the engine changes.
+        let row: Option<(String, String, Vec<u8>)> = self
+            .conn
+            .query_row(
+                "SELECT model_id, model_version, vector
+                   FROM visual_embeddings WHERE file_id = ?1
+                  ORDER BY dim DESC LIMIT 1",
+                [file_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok();
+        let Some((model_id, model_version, blob)) = row else {
+            return Ok(Vec::new());
+        };
+        let vector = decode_vector(&blob);
+        if vector.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // A photograph is always its own nearest neighbour, and that is not a
+        // result anybody asked for. Ask for one extra and drop it, or a request
+        // for five similar photographs quietly returns four.
+        let limit = filters.limit_or(100);
+        let widened = SearchFilters { limit: limit + 1, ..filters.clone() };
+        let mut hits = self.vector_search(&vector, &model_id, &model_version, &widened)?;
+        hits.retain(|r| r.file_id != file_id);
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
     /// The exhaustive path: score every embedding straight from SQLite.
     ///
     /// Kept as the fallback rather than deleted, because it is the definition
@@ -279,31 +332,6 @@ impl<'a> SearchRepo<'a> {
         merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         merged.truncate(filters.limit_or(100));
         Ok(merged)
-    }
-
-    /// Similar-image search from an already-indexed file.
-    pub fn similar_to(
-        &self,
-        file_id: &str,
-        model_id: &str,
-        model_version: &str,
-        filters: &SearchFilters,
-    ) -> Result<Vec<SearchResult>> {
-        let blob: Option<Vec<u8>> = self
-            .conn
-            .query_row(
-                "SELECT vector FROM visual_embeddings WHERE file_id=?1 AND model_id=?2 AND model_version=?3",
-                params![file_id, model_id, model_version],
-                |r| r.get(0),
-            )
-            .ok();
-        let Some(blob) = blob else {
-            return Ok(Vec::new());
-        };
-        let vector = decode_vector(&blob);
-        let mut results = self.vector_search(&vector, model_id, model_version, filters)?;
-        results.retain(|r| r.file_id != file_id);
-        Ok(results)
     }
 
     fn load_result(&self, file_id: &str) -> Result<Option<SearchResult>> {

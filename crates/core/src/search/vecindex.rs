@@ -761,6 +761,49 @@ mod repo_integration {
         assert_eq!(indexed[0].file_id, exhaustive[0].file_id);
     }
 
+    /// The feature the index actually earns its keep on: given one photograph,
+    /// find the others from the same set-up.
+    #[test]
+    fn finds_photographs_that_look_like_a_given_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = two_drive_catalogue(30, 10);
+        let repo = SearchRepo::with_index_dir(&conn, dir.path());
+
+        // Query from well inside drive 1's cluster. Index 0 would be a poor
+        // choice: both fixtures start pointing along +y, so d1-f0000 and
+        // d2-f0000 normalise to the same direction and are genuinely identical.
+        // The clusters only separate as the index grows, which is also true of
+        // real photographs — two shots of a plain wall look alike whatever
+        // shoot they came from.
+        let hits = repo
+            .similar_to("d1-f0010", &SearchFilters { limit: 5, ..Default::default() })
+            .unwrap();
+
+        assert_eq!(hits.len(), 5, "asking for five must return five, not four");
+        // A photograph is not a result for itself.
+        assert!(hits.iter().all(|r| r.file_id != "d1-f0010"));
+        // Its nearest neighbours are its own neighbours in the cluster.
+        assert!(
+            hits.iter().all(|r| r.file_id.starts_with("d1-")),
+            "expected neighbours from the same cluster, got {:?}",
+            hits.iter().map(|r| &r.file_id).collect::<Vec<_>>()
+        );
+        assert_eq!(hits[0].file_id, "d1-f0011", "the closest is the adjacent one");
+    }
+
+    /// No caller should have to know which engine embedded a photograph — that
+    /// assumption is what let the text/image model mismatch go unnoticed.
+    #[test]
+    fn similarity_discovers_the_model_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = two_drive_catalogue(10, 5);
+        let repo = SearchRepo::with_index_dir(&conn, dir.path());
+
+        assert!(!repo.similar_to("d1-f0000", &SearchFilters::default()).unwrap().is_empty());
+        // A file with no embedding at all yields nothing, rather than erroring.
+        assert!(repo.similar_to("does-not-exist", &SearchFilters::default()).unwrap().is_empty());
+    }
+
     /// The index file is written on first use and reused after.
     #[test]
     fn the_index_is_persisted_and_reused() {
