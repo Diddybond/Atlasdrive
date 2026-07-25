@@ -246,6 +246,20 @@ fn face_model_partition(archive: &rusqlite::Connection) -> (String, String) {
         })
 }
 
+/// Faces awaiting a yes/no for a person, most confident first.
+#[tauri::command]
+fn pending_suggestions(
+    state: State<AppState>,
+    person_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<faces::SuggestedFace>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive)
+        .pending_suggestions(&person_id, limit.unwrap_or(200))
+        .map_err(map_err)
+}
+
 /// Accept every outstanding proposal for a person.
 #[tauri::command]
 fn confirm_suggestions(state: State<AppState>, person_id: String) -> Result<usize, String> {
@@ -896,7 +910,8 @@ pub fn run() {
             confirm_suggestions,
             reject_suggestions,
             resolve_suggestion,
-            photo_thumbnail
+            photo_thumbnail,
+            pending_suggestions
         ])
         .run(tauri::generate_context!())
         .expect("error while running AtlasDrive");

@@ -109,6 +109,14 @@ export interface GalleryFace {
   group_size: number;
 }
 
+export interface SuggestedFace {
+  face_id: string;
+  cluster_id: string;
+  /// Similarity to that person's closest confirmed face, 0–1.
+  score: number;
+  group_size: number;
+}
+
 export interface PersonFolder {
   drive_number: number;
   drive_name?: string | null;
@@ -196,6 +204,8 @@ export const api = {
   photosOfPerson: (personId: string) => call<PersonPhoto[]>("photos_of_person", { personId }),
   photoThumbnail: (fileId: string, maxEdge?: number) =>
     call<string | null>("photo_thumbnail", { fileId, maxEdge }),
+  pendingSuggestions: (personId: string, limit?: number) =>
+    call<SuggestedFace[]>("pending_suggestions", { personId, limit }),
   confirmSuggestions: (personId: string) => call<number>("confirm_suggestions", { personId }),
   rejectSuggestions: (personId: string) => call<number>("reject_suggestions", { personId }),
   resolveSuggestion: (clusterId: string, isThem: boolean) =>
@@ -363,17 +373,22 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       if (face) face.person_name = name;
       let person = mockPeople.find((p) => p.display_name.toLowerCase() === name.toLowerCase());
       if (!person) {
-        person = { id: `p-${mockPeople.length + 1}`, display_name: name, confirmed_faces: 0, suggested_faces: 0 };
+        person = { id: `p-${mockPeople.length + 1}`, display_name: name, confirmed_faces: 0, suggested_faces: 2 };
         mockPeople.push(person);
       }
       person.confirmed_faces += face ? face.group_size : 1;
-      return Promise.resolve({ person, suggested: 0 } as unknown as T);
+      return Promise.resolve({ person, suggested: 2 } as unknown as T);
     }
     case "photo_thumbnail": {
       const seed = String(args?.fileId ?? "").length * 47;
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="90"><rect width="120" height="90" fill="hsl(${seed % 360},40%,70%)"/></svg>`;
       return Promise.resolve(`data:image/svg+xml;base64,${btoa(svg)}` as unknown as T);
     }
+    case "pending_suggestions":
+      return Promise.resolve([
+        { face_id: "fa-2", cluster_id: "c-d4e5f6", score: 0.94, group_size: 12 },
+        { face_id: "fa-3", cluster_id: "c-x1", score: 0.89, group_size: 3 },
+      ] as unknown as T);
     case "confirm_suggestions":
     case "reject_suggestions":
       return Promise.resolve(0 as unknown as T);

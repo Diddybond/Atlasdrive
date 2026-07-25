@@ -102,7 +102,12 @@ pub struct NamedPerson {
 ///
 /// Note the honest limit this number encodes: those same-person scores came
 /// from one event, where lighting and clothing are shared. See D-026.
-pub const PERSON_MATCH_THRESHOLD: f32 = 0.82;
+///
+/// Raised from 0.82 to 0.88 after seeing it in use: sweeping 2,126 real faces at
+/// 0.82 proposed 637 of them across just two people, which turns "awaiting
+/// confirmation" into a chore rather than a help. A missed match costs one
+/// manual naming; a bad one costs the user's trust in every other suggestion.
+pub const PERSON_MATCH_THRESHOLD: f32 = 0.88;
 
 /// Longest edge of a stored face crop, in pixels.
 ///
@@ -121,6 +126,17 @@ pub struct GalleryFace {
     pub person_name: Option<String>,
     pub cluster_status: Option<String>,
     /// How many faces are grouped with this one.
+    pub group_size: i64,
+}
+
+/// A face the app believes is a named person, awaiting a yes or no.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestedFace {
+    pub face_id: String,
+    pub cluster_id: String,
+    /// Similarity to that person's closest confirmed face, 0–1.
+    pub score: f32,
+    /// How many faces come with it if accepted.
     pub group_size: i64,
 }
 
@@ -294,6 +310,9 @@ impl<'a> FaceRepo<'a> {
                LEFT JOIN people p       ON p.id = c.person_id
               WHERE f.is_false_detection = 0 AND f.is_ignored = 0
                 AND (c.status IS NULL OR c.status <> 'rejected')
+                -- Proposals live in the review queue, not the gallery: a guess
+                -- must never look like a name the user gave.
+                AND (c.person_id IS NULL OR c.status = 'confirmed')
               ORDER BY f.quality DESC
               LIMIT ?1",
         )?;
@@ -598,15 +617,10 @@ impl<'a> FaceRepo<'a> {
     pub fn suggest_face_is_person(&self, face_id: &str, person_id: &str, score: f32) -> Result<()> {
         let cluster_id = new_uuid();
         self.conn.execute(
-            "INSERT INTO face_clusters (id, label, status, person_id, algorithm_version, created_at, updated_at)
-             VALUES (?1, ?2, 'unnamed', ?3, ?4, ?5, ?5)",
-            params![
-                cluster_id,
-                format!("suggested ({:.0}% match)", score * 100.0),
-                person_id,
-                CLUSTER_ALGO_VERSION,
-                now_iso8601()
-            ],
+            "INSERT INTO face_clusters
+               (id, status, person_id, suggestion_score, algorithm_version, created_at, updated_at)
+             VALUES (?1, 'unnamed', ?2, ?3, ?4, ?5, ?5)",
+            params![cluster_id, person_id, score, CLUSTER_ALGO_VERSION, now_iso8601()],
         )?;
         self.conn.execute(
             "UPDATE faces SET cluster_id=?2 WHERE id=?1",
@@ -717,15 +731,10 @@ impl<'a> FaceRepo<'a> {
                         self.conn.execute(
                             "UPDATE face_clusters
                                 SET person_id = ?2,
-                                    label = ?3,
+                                    suggestion_score = ?3,
                                     updated_at = ?4
                               WHERE id = ?1 AND status <> 'confirmed'",
-                            params![
-                                c,
-                                person_id,
-                                format!("suggested ({:.0}% match)", best * 100.0),
-                                now_iso8601()
-                            ],
+                            params![c, person_id, best, now_iso8601()],
                         )?;
                     }
                     proposed += 1;
@@ -737,6 +746,37 @@ impl<'a> FaceRepo<'a> {
             }
         }
         Ok(proposed)
+    }
+
+    /// Faces proposed as a person, most confident first.
+    ///
+    /// Leading with the strongest matches means the obvious yeses go quickly and
+    /// the user can stop the moment the guesses start looking doubtful, rather
+    /// than grinding through a queue sorted by nothing.
+    pub fn pending_suggestions(&self, person_id: &str, limit: usize) -> Result<Vec<SuggestedFace>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, c.id, c.suggestion_score,
+                    (SELECT count(*) FROM faces sib WHERE sib.cluster_id = c.id)
+               FROM faces f
+               JOIN face_clusters c ON c.id = f.cluster_id
+               JOIN face_thumbnails t ON t.face_id = f.id
+              WHERE c.person_id = ?1 AND c.status <> 'confirmed'
+                AND f.is_false_detection = 0 AND f.is_ignored = 0
+              GROUP BY c.id
+              ORDER BY c.suggestion_score DESC
+              LIMIT ?2",
+        )?;
+        let out = stmt
+            .query_map(params![person_id, limit as i64], |r| {
+                Ok(SuggestedFace {
+                    face_id: r.get(0)?,
+                    cluster_id: r.get(1)?,
+                    score: r.get::<_, Option<f32>>(2)?.unwrap_or(0.0),
+                    group_size: r.get::<_, Option<i64>>(3)?.unwrap_or(1),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(out)
     }
 
     /// Accept every outstanding proposal for a person.

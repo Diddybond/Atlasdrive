@@ -92,7 +92,20 @@ const ARCHIVE_MIGRATIONS: &[Migration] = &[
         name: "face_thumbnails",
         sql: ARCHIVE_V2,
     },
+    Migration {
+        version: 3,
+        name: "suggestion_score",
+        sql: ARCHIVE_V3,
+    },
 ];
+
+/// How strongly a proposed group matched the person it was proposed as.
+///
+/// Stored rather than rendered into the label, so the review queue can put the
+/// most confident guesses first and the user can stop when they get doubtful.
+const ARCHIVE_V3: &str = r#"
+ALTER TABLE face_clusters ADD COLUMN suggestion_score REAL;
+"#;
 
 /// Small encrypted crops of each detected face.
 ///

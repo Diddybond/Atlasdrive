@@ -1,10 +1,15 @@
 import { useEffect, useState } from "react";
-import { api, ExportSummary, GalleryFace, NamedPerson, PersonFolder } from "../api";
+import { api, ExportSummary, GalleryFace, NamedPerson, PersonFolder, SuggestedFace } from "../api";
 
-/// Browsing faces, not names.
+/// People, in three clearly separate parts.
 ///
-/// The gallery leads because you often do not know who someone is — you
-/// recognise them. A name is only ever attached when you type one.
+/// The first version of this screen mixed them, and a face the app *guessed*
+/// looked identical to a name the user *gave*. Those are different things and
+/// must never share a presentation. So:
+///
+///   1. People you have named — facts, plus the actions for one person.
+///   2. Faces that might be someone — guesses, asked as questions.
+///   3. Faces nobody has claimed — the gallery to browse and name.
 export function ReviewScreen() {
   const [faces, setFaces] = useState<GalleryFace[]>([]);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
@@ -13,50 +18,73 @@ export function ReviewScreen() {
   const [name, setName] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [gathering, setGathering] = useState<NamedPerson | null>(null);
+
+  // Reviewing one person's proposals.
+  const [reviewing, setReviewing] = useState<NamedPerson | null>(null);
+  const [queue, setQueue] = useState<SuggestedFace[]>([]);
+
+  // Per-person actions, shown only for the person being managed.
+  const [managing, setManaging] = useState<string | null>(null);
+  const [folders, setFolders] = useState<PersonFolder[]>([]);
   const [destination, setDestination] = useState("");
   const [exported, setExported] = useState<ExportSummary | null>(null);
-  const [folders, setFolders] = useState<Record<string, PersonFolder[]>>({});
-  const [renaming, setRenaming] = useState<NamedPerson | null>(null);
   const [newName, setNewName] = useState("");
 
-  async function showFolders(person: NamedPerson) {
-    setFolders({ ...folders, [person.id]: await api.personFolders(person.id) });
-  }
-
-  async function forget(person: NamedPerson) {
-    await api.forgetPerson(person.id);
-    setStatus(
-      `Removed ${person.display_name}. Their faces are kept and are unnamed again.`,
+  async function loadThumbs(ids: string[], into: Record<string, string>) {
+    const loaded = { ...into };
+    await Promise.all(
+      ids.map(async (id) => {
+        if (loaded[id]) return;
+        const src = await api.faceThumbnail(id);
+        if (src) loaded[id] = src;
+      }),
     );
-    await load();
-  }
-
-  async function rename(person: NamedPerson) {
-    if (!newName.trim()) return;
-    await api.renamePerson(person.id, newName.trim());
-    setRenaming(null);
-    setNewName("");
-    await load();
+    return loaded;
   }
 
   async function load() {
     const gallery = await api.faceGallery(200);
     setFaces(gallery);
     setPeople(await api.listPeople());
-    // Fetch crops individually so a large gallery paints as it arrives.
-    const loaded: Record<string, string> = {};
-    await Promise.all(
-      gallery.map(async (f) => {
-        const src = await api.faceThumbnail(f.face_id);
-        if (src) loaded[f.face_id] = src;
-      }),
-    );
-    setThumbs(loaded);
+    setThumbs(await loadThumbs(gallery.map((f) => f.face_id), {}));
   }
   useEffect(() => {
     void load();
   }, []);
+
+  async function openReview(person: NamedPerson) {
+    setReviewing(person);
+    setManaging(null);
+    const pending = await api.pendingSuggestions(person.id, 200);
+    setQueue(pending);
+    setThumbs(await loadThumbs(pending.map((s) => s.face_id), thumbs));
+  }
+
+  /// Answer one proposal and drop it from the queue immediately, so the next
+  /// face lands in the same place — this is a fast, repetitive task.
+  async function answer(s: SuggestedFace, isThem: boolean) {
+    await api.resolveSuggestion(s.cluster_id, isThem);
+    setQueue((q) => q.filter((x) => x.cluster_id !== s.cluster_id));
+    setPeople(await api.listPeople());
+  }
+
+  async function answerAll(person: NamedPerson, isThem: boolean) {
+    setBusy(true);
+    try {
+      const n = isThem
+        ? await api.confirmSuggestions(person.id)
+        : await api.rejectSuggestions(person.id);
+      setQueue([]);
+      setStatus(
+        isThem
+          ? `Confirmed ${n} group${n === 1 ? "" : "s"} as ${person.display_name}.`
+          : `Cleared ${n} guess${n === 1 ? "" : "es"}. Those faces are unnamed again.`,
+      );
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function tag() {
     if (!selected || !name.trim()) return;
@@ -66,8 +94,8 @@ export function ReviewScreen() {
       const who = result.person.display_name;
       setStatus(
         result.suggested > 0
-          ? `Tagged as ${who}. ${result.suggested} other face${result.suggested === 1 ? "" : "s"} look like ${who} — check the ones marked "Is this ${who}?" below.`
-          : `Tagged as ${who}. AtlasDrive will suggest ${who} when it sees a similar face on a later scan.`,
+          ? `Tagged as ${who}. ${result.suggested} other face${result.suggested === 1 ? "" : "s"} might also be ${who} — review them above.`
+          : `Tagged as ${who}.`,
       );
       setSelected(null);
       setName("");
@@ -77,36 +105,14 @@ export function ReviewScreen() {
     }
   }
 
-  /// Take a wrong name off a face without deleting the face or the person.
-  async function untag() {
-    if (!selected?.cluster_id) return;
-    setBusy(true);
-    try {
-      await api.resolveSuggestion(selected.cluster_id, false);
-      setStatus("Name removed. The face is unnamed again.");
-      setSelected(null);
-      await load();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function gather(person: NamedPerson) {
-    if (!destination.trim()) return;
-    setBusy(true);
-    try {
-      setExported(await api.copyPersonPhotos(person.id, destination.trim()));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const unnamed = faces.filter((f) => !f.person_name);
 
   return (
     <section aria-labelledby="review-heading">
       <h1 id="review-heading">People</h1>
       <p className="lede">
-        Every face AtlasDrive has found. You do not need to know who anyone is to browse — click a
-        face you recognise and give it a name. Nothing is ever named automatically.
+        AtlasDrive groups faces that look alike and can guess who they are, but it never puts a name
+        to anyone on its own.
       </p>
 
       {status && (
@@ -115,25 +121,226 @@ export function ReviewScreen() {
         </p>
       )}
 
-      {faces.length === 0 ? (
-        <p className="empty">
-          No faces yet. Scan a drive and any faces found will appear here.
-        </p>
+      {/* 1. Facts. */}
+      {people.length > 0 && (
+        <div className="card">
+          <h2>People you have named</h2>
+          <ul className="people-list">
+            {people.map((p) => (
+              <li key={p.id} className="person-row">
+                <span className="person-name">{p.display_name}</span>
+                <span className="person-counts">
+                  {p.confirmed_faces} photograph{p.confirmed_faces === 1 ? "" : "s"}
+                </span>
+                {p.suggested_faces > 0 && (
+                  <button
+                    onClick={() => void openReview(p)}
+                    aria-label={`Review ${p.suggested_faces} possible matches for ${p.display_name}`}
+                  >
+                    Review {p.suggested_faces} possible
+                  </button>
+                )}
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setManaging(managing === p.id ? null : p.id);
+                    setReviewing(null);
+                    setNewName(p.display_name);
+                    setExported(null);
+                    setFolders([]);
+                  }}
+                  aria-label={`More actions for ${p.display_name}`}
+                >
+                  {managing === p.id ? "Done" : "Manage"}
+                </button>
+
+                {managing === p.id && (
+                  <div className="person-manage">
+                    <label>
+                      Name
+                      <input
+                        aria-label={`New name for ${p.display_name}`}
+                        value={newName}
+                        onChange={(e) => setNewName(e.target.value)}
+                      />
+                    </label>
+                    <div className="review-actions">
+                      <button
+                        onClick={async () => {
+                          await api.renamePerson(p.id, newName.trim());
+                          setStatus(`Renamed to ${newName.trim()}.`);
+                          await load();
+                        }}
+                        disabled={!newName.trim() || newName === p.display_name}
+                      >
+                        Save name
+                      </button>
+                      <button
+                        className="ghost"
+                        onClick={async () => setFolders(await api.personFolders(p.id))}
+                        aria-label={`Show where ${p.display_name}'s photographs are`}
+                      >
+                        Where are they?
+                      </button>
+                      <button
+                        className="ghost"
+                        onClick={async () => {
+                          await api.forgetPerson(p.id);
+                          setStatus(
+                            `Removed ${p.display_name}. Their faces are kept and are unnamed again.`,
+                          );
+                          setManaging(null);
+                          await load();
+                        }}
+                        aria-label={`Remove ${p.display_name}`}
+                      >
+                        Remove person
+                      </button>
+                    </div>
+
+                    {folders.length > 0 && (
+                      <ul className="folder-list">
+                        {folders.map((f) => (
+                          <li key={`${f.drive_number}-${f.relative_folder}`}>
+                            <span className="drive-badge">Drive {f.drive_number}</span>
+                            <span className="folder-path">{f.relative_folder}</span>
+                            <span className="person-counts">{f.photo_count} photographs</span>
+                            {f.online && f.absolute_path ? (
+                              <button
+                                className="ghost"
+                                onClick={() => void api.openFolder(f.absolute_path!)}
+                                aria-label={`Open ${f.relative_folder} in Finder`}
+                              >
+                                Open folder
+                              </button>
+                            ) : (
+                              <span className="drive-hit-where">
+                                Connect Drive {f.drive_number} to open
+                              </span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    <label>
+                      Copy their photographs into
+                      <input
+                        placeholder="/Users/you/Desktop/Aimee"
+                        value={destination}
+                        onChange={(e) => setDestination(e.target.value)}
+                      />
+                    </label>
+                    <button
+                      onClick={async () =>
+                        setExported(await api.copyPersonPhotos(p.id, destination.trim()))
+                      }
+                      disabled={!destination.trim()}
+                      aria-label={`Gather ${p.display_name}'s photographs`}
+                    >
+                      Copy photographs
+                    </button>
+                    {exported && (
+                      <p className="check-detail" role="status">
+                        Copied {exported.copied} photograph{exported.copied === 1 ? "" : "s"} to{" "}
+                        {exported.destination}.
+                        {exported.skipped_offline > 0 && (
+                          <>
+                            {" "}
+                            {exported.skipped_offline} more are on Drive{" "}
+                            {exported.drives_to_connect.join(", ")} — connect and run this again.
+                          </>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* 2. Guesses — asked as questions, never shown as names. */}
+      {reviewing && (
+        <div className="card">
+          <div className="row-between">
+            <h2>Is this {reviewing.display_name}?</h2>
+            <button className="ghost" onClick={() => setReviewing(null)}>
+              Close
+            </button>
+          </div>
+          {queue.length === 0 ? (
+            <p className="empty">Nothing left to review for {reviewing.display_name}.</p>
+          ) : (
+            <>
+              <p className="drive-meta subtle">
+                Strongest matches first — stop whenever they start looking wrong.
+              </p>
+              <ul className="suggestion-list">
+                {queue.map((s) => (
+                  <li key={s.cluster_id} className="suggestion">
+                    {thumbs[s.face_id] ? (
+                      <img src={thumbs[s.face_id]} alt="" width={96} height={96} />
+                    ) : (
+                      <span className="face-cell-empty" aria-hidden>
+                        🙂
+                      </span>
+                    )}
+                    <span className="person-counts">
+                      {(s.score * 100).toFixed(0)}% match
+                      {s.group_size > 1 && <> · {s.group_size} photographs</>}
+                    </span>
+                    <button
+                      onClick={() => void answer(s, true)}
+                      aria-label={`Yes, this is ${reviewing.display_name}`}
+                    >
+                      Yes
+                    </button>
+                    <button
+                      className="ghost"
+                      onClick={() => void answer(s, false)}
+                      aria-label={`No, this is not ${reviewing.display_name}`}
+                    >
+                      No
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <div className="review-actions">
+                <button onClick={() => void answerAll(reviewing, true)} disabled={busy}>
+                  Yes to all
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => void answerAll(reviewing, false)}
+                  disabled={busy}
+                >
+                  No to all
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* 3. Faces nobody has claimed. */}
+      <h2>
+        {unnamed.length} face{unnamed.length === 1 ? "" : "s"} nobody has named
+      </h2>
+      {unnamed.length === 0 ? (
+        <p className="empty">No faces yet. Scan a drive and any faces found will appear here.</p>
       ) : (
         <ul className="face-grid" aria-label="Faces found">
-          {faces.map((f) => (
+          {unnamed.map((f) => (
             <li key={f.face_id}>
               <button
                 className={selected?.face_id === f.face_id ? "face-cell selected" : "face-cell"}
                 onClick={() => {
                   setSelected(f);
-                  setName(f.person_name ?? "");
+                  setName("");
                 }}
-                aria-label={
-                  f.person_name
-                    ? `${f.person_name}, ${f.group_size} photograph${f.group_size === 1 ? "" : "s"}`
-                    : `Unnamed face, ${f.group_size} photograph${f.group_size === 1 ? "" : "s"}`
-                }
+                aria-label={`Unnamed face, ${f.group_size} photograph${f.group_size === 1 ? "" : "s"}`}
               >
                 {thumbs[f.face_id] ? (
                   <img src={thumbs[f.face_id]} alt="" width={80} height={80} />
@@ -143,8 +350,7 @@ export function ReviewScreen() {
                   </span>
                 )}
                 <span className="face-cell-label">
-                  {f.person_name ?? "Who is this?"}
-                  {f.group_size > 1 && <> · {f.group_size}</>}
+                  Who is this?{f.group_size > 1 && <> · {f.group_size}</>}
                 </span>
               </button>
             </li>
@@ -154,13 +360,7 @@ export function ReviewScreen() {
 
       {selected && (
         <div className="card">
-          <h2>{selected.person_name ? "Change this name" : "Name this face"}</h2>
-          {selected.person_name && (
-            <p className="drive-meta subtle">
-              Currently tagged as {selected.person_name}. Typing a different name moves this group
-              to that person; the faces themselves are never lost.
-            </p>
-          )}
+          <h2>Name this face</h2>
           <label className="review-name">
             Who is this?
             <input
@@ -176,21 +376,13 @@ export function ReviewScreen() {
           </label>
           <p className="drive-meta subtle">
             Naming this confirms {selected.group_size} photograph
-            {selected.group_size === 1 ? "" : "s"} and teaches AtlasDrive to suggest them next time.
+            {selected.group_size === 1 ? "" : "s"}, and AtlasDrive will then ask you about any other
+            faces that look like them.
           </p>
           <div className="review-actions">
             <button onClick={() => void tag()} disabled={!name.trim() || busy}>
-              {busy ? "Saving…" : "Save name"}
+              Save name
             </button>
-            {selected.person_name && (
-              <button
-                className="ghost"
-                onClick={() => void untag()}
-                aria-label={`Remove the name from this face`}
-              >
-                Remove name
-              </button>
-            )}
             <button className="ghost" onClick={() => setSelected(null)}>
               Cancel
             </button>
@@ -198,141 +390,6 @@ export function ReviewScreen() {
         </div>
       )}
 
-      {people.length > 0 && (
-        <div className="card">
-          <h2>People you have named</h2>
-          <ul className="people-list">
-            {people.map((p) => (
-              <li key={p.id}>
-                <span className="person-name">{p.display_name}</span>
-                <span className="person-counts">
-                  {p.confirmed_faces} confirmed
-                  {p.suggested_faces > 0 && <> · {p.suggested_faces} awaiting confirmation</>}
-                </span>
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setGathering(p);
-                    setExported(null);
-                  }}
-                  aria-label={`Gather ${p.display_name}'s photographs`}
-                >
-                  Gather their photographs
-                </button>
-                <button
-                  className="ghost"
-                  onClick={() => void showFolders(p)}
-                  aria-label={`Show where ${p.display_name}'s photographs are`}
-                >
-                  Where are they?
-                </button>
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setRenaming(p);
-                    setNewName(p.display_name);
-                  }}
-                  aria-label={`Rename ${p.display_name}`}
-                >
-                  Rename
-                </button>
-                <button
-                  className="ghost"
-                  onClick={() => void forget(p)}
-                  aria-label={`Remove ${p.display_name}`}
-                >
-                  Remove
-                </button>
-
-                {renaming?.id === p.id && (
-                  <span className="rename-row">
-                    <input
-                      aria-label={`New name for ${p.display_name}`}
-                      value={newName}
-                      onChange={(e) => setNewName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") void rename(p);
-                      }}
-                    />
-                    <button onClick={() => void rename(p)} disabled={!newName.trim()}>
-                      Save
-                    </button>
-                    <button className="ghost" onClick={() => setRenaming(null)}>
-                      Cancel
-                    </button>
-                  </span>
-                )}
-
-                {folders[p.id] && (
-                  <ul className="folder-list">
-                    {folders[p.id].map((f) => (
-                      <li key={`${f.drive_number}-${f.relative_folder}`}>
-                        <span className="drive-badge">Drive {f.drive_number}</span>
-                        <span className="folder-path">{f.relative_folder}</span>
-                        <span className="person-counts">{f.photo_count} photographs</span>
-                        {f.online && f.absolute_path ? (
-                          <button
-                            className="ghost"
-                            onClick={() => void api.openFolder(f.absolute_path!)}
-                            aria-label={`Open ${f.relative_folder} in Finder`}
-                          >
-                            Open folder
-                          </button>
-                        ) : (
-                          <span className="drive-hit-where">
-                            Connect Drive {f.drive_number} to open
-                          </span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {gathering && (
-        <div className="card">
-          <h2>Gather {gathering.display_name}&rsquo;s photographs</h2>
-          <p className="drive-meta subtle">
-            Copies the originals into a folder you choose. Nothing is moved, and nothing is ever
-            written to the drive itself.
-          </p>
-          <label>
-            Copy into
-            <input
-              placeholder="/Users/you/Desktop/Aimee"
-              value={destination}
-              onChange={(e) => setDestination(e.target.value)}
-            />
-          </label>
-          <div className="review-actions">
-            <button onClick={() => void gather(gathering)} disabled={!destination.trim() || busy}>
-              {busy ? "Copying…" : "Copy photographs"}
-            </button>
-            <button className="ghost" onClick={() => setGathering(null)}>
-              Cancel
-            </button>
-          </div>
-          {exported && (
-            <p className="check-detail" role="status">
-              Copied {exported.copied} photograph{exported.copied === 1 ? "" : "s"} to{" "}
-              {exported.destination}.
-              {exported.skipped_offline > 0 && (
-                <>
-                  {" "}
-                  {exported.skipped_offline} more are on Drive{" "}
-                  {exported.drives_to_connect.join(", ")} — connect and run this again.
-                </>
-              )}
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* Typing an existing name reuses that person rather than duplicating. */}
       <datalist id="known-people">
         {people.map((p) => (
           <option key={p.id} value={p.display_name} />

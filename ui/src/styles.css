@@ -326,3 +326,13 @@ h2 {
 /* Result thumbnails come from the local catalogue, so they show with the drive
    unplugged. Cover-crop keeps the grid even across mixed aspect ratios. */
 .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* People: one row per person, with their actions revealed only on demand.
+   Four buttons per row read as clutter; one "Manage" does not. */
+.person-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 0; }
+.person-manage { width: 100%; margin: 8px 0 4px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+
+/* A guess is asked as a question and never styled like a name. */
+.suggestion-list { list-style: none; margin: 12px 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.suggestion { display: flex; align-items: center; gap: 12px; padding: 8px; border: 1px dashed var(--line); border-radius: 10px; }
+.suggestion img { border-radius: 8px; object-fit: cover; }

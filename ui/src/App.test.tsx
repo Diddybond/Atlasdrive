@@ -178,8 +178,11 @@ describe("AtlasDrive UI", () => {
     await waitFor(() => {
       expect(screen.getByText(/Tagged as Aimee/)).toBeDefined();
     });
-    expect(screen.getByText(/suggest Aimee when it sees a similar face/)).toBeDefined();
-    expect(screen.getByText(/34 confirmed/)).toBeDefined();
+    // Naming one face offers the others it thinks are the same person, rather
+    // than silently attaching them.
+    expect(screen.getByText(/might also be Aimee/)).toBeDefined();
+    expect(screen.getByText(/34 photographs/)).toBeDefined();
+    expect(screen.getByRole("button", { name: /Review 2 possible matches for Aimee/ })).toBeDefined();
   });
 
   it("gathers a named person's photographs and says which drive is missing", async () => {
@@ -192,14 +195,15 @@ describe("AtlasDrive UI", () => {
     fireEvent.change(screen.getByLabelText(/Who is this/), { target: { value: "Kent" } });
     fireEvent.click(screen.getByRole("button", { name: "Save name" }));
 
+    // Per-person actions live behind Manage, so the row stays readable.
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Gather Kent's photographs/ })).toBeDefined();
+      expect(screen.getByRole("button", { name: /More actions for Kent/ })).toBeDefined();
     });
-    fireEvent.click(screen.getByRole("button", { name: /Gather Kent's photographs/ }));
-    fireEvent.change(screen.getByLabelText(/Copy into/), {
+    fireEvent.click(screen.getByRole("button", { name: /More actions for Kent/ }));
+    fireEvent.change(screen.getByLabelText(/Copy their photographs into/), {
       target: { value: "/Users/wayne/Desktop/Kent" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Copy photographs" }));
+    fireEvent.click(screen.getByRole("button", { name: /Gather Kent's photographs/ }));
 
     await waitFor(() => {
       expect(screen.getByText(/Copied 1 photograph to/)).toBeDefined();
@@ -219,8 +223,9 @@ describe("AtlasDrive UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save name" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /Show where Margaret's/ })).toBeDefined();
+      expect(screen.getByRole("button", { name: /More actions for Margaret/ })).toBeDefined();
     });
+    fireEvent.click(screen.getByRole("button", { name: /More actions for Margaret/ }));
     fireEvent.click(screen.getByRole("button", { name: /Show where Margaret's/ }));
 
     await waitFor(() => {
@@ -238,21 +243,21 @@ describe("AtlasDrive UI", () => {
     // Operate on whoever is listed first rather than a name this test created —
     // earlier tests share the mock's state, so the gallery may be fully named.
     await waitFor(() => {
-      expect(screen.getAllByRole("button", { name: /^Remove / }).length).toBeGreaterThan(0);
+      expect(screen.getAllByRole("button", { name: /More actions for / }).length).toBeGreaterThan(0);
     });
-    const remove = screen.getAllByRole("button", { name: /^Remove / })[0];
-    const label = remove.getAttribute("aria-label") ?? "";
-    const person = label.replace(/^Remove /, "");
-    const before = screen.getAllByRole("button", { name: /^Remove / }).length;
+    const manage = screen.getAllByRole("button", { name: /More actions for / })[0];
+    const person = (manage.getAttribute("aria-label") ?? "").replace(/^More actions for /, "");
+    const before = screen.getAllByRole("button", { name: /More actions for / }).length;
 
-    fireEvent.click(remove);
+    fireEvent.click(manage);
+    fireEvent.click(screen.getByRole("button", { name: `Remove ${person}` }));
 
     await waitFor(() => {
       expect(screen.getByText(/faces are kept and are unnamed again/)).toBeDefined();
     });
     expect(screen.getByText(new RegExp(`Removed ${person}`))).toBeDefined();
     // One fewer person, and the faces themselves are untouched.
-    expect(screen.queryAllByRole("button", { name: /^Remove / }).length).toBe(before - 1);
+    expect(screen.queryAllByRole("button", { name: /More actions for / }).length).toBe(before - 1);
   });
 
   it("offers to check a drive for photographs added since the last scan", async () => {
