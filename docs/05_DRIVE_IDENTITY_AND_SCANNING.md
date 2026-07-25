@@ -14,7 +14,7 @@ The drive number is the primary human reference. The UUID prevents collisions an
 With permission, create:
 
 ```text
-.family-archive/drive.json
+.atlasdrive/drive.json
 ```
 
 Minimum fields:
@@ -24,10 +24,10 @@ Minimum fields:
   "schemaVersion": 1,
   "driveId": "uuid",
   "driveNumber": 14,
-  "friendlyName": "Family Archive A",
+  "friendlyName": "AtlasDrive A",
   "createdAt": "2026-07-23T23:00:00Z",
   "lastSuccessfulScanAt": null,
-  "appId": "family-archive"
+  "appId": "atlasdrive"
 }
 ```
 
@@ -104,7 +104,7 @@ RAW support should be staged. Initially use embedded previews where safe and cle
 - Stay beneath approved scan roots.
 - Do not follow symlinks outside approved roots.
 - Detect recursive mount points and package boundaries.
-- Skip the app-owned `.family-archive` folder.
+- Skip the app-owned `.atlasdrive` folder.
 - Provide configurable exclusions.
 - Treat inaccessible files as structured failures, not fatal crashes.
 

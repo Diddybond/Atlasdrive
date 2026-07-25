@@ -114,6 +114,26 @@ On resume:
 
 The system should be able to reconstruct operational position from `progress.json` and `index.log`, while the databases remain the detailed source of truth.
 
+## Incremental rescan
+
+`Pipeline::reconcile_rescan` runs after enqueue on every non-dry run:
+
+- A catalogued file whose recorded size or modification time no longer matches
+  the original is marked `changed` and re-queued for full re-analysis.
+- A catalogued file the scan did not find is marked `missing`. Rows are never
+  deleted — the user still needs to know a photograph was once on Drive 14.
+- A file that reappears later is re-analysed and restored to `complete`.
+- A rescan that finds nothing new does nothing at all, so repeated scans stay
+  cheap.
+
+Only the catalogue is written; originals are `stat`ed, never opened for writing.
+`IndexSummary` reports `files_changed` and `files_missing`.
+
+Note the deliberate asymmetry with the safety gate. *Within* a run, a size/mtime
+mismatch means indexing may have damaged the original, and is a hard halt.
+*Between* runs, the same mismatch means the user edited or replaced the
+photograph, and is a re-analysis trigger. See D-021.
+
 ## Dry run
 
 `--dry-run` processes at most 20 files and:

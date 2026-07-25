@@ -1,4 +1,4 @@
-//! `family-archive` command-line interface.
+//! `atlasdrive` command-line interface.
 //!
 //! The GUI calls the same core services; this CLI is for development, testing
 //! and advanced recovery (see `docs/12_CLI_AND_COMMANDS.md`). Exit codes are the
@@ -17,12 +17,12 @@ use family_archive_core::drive::{manifest::DriveManifest, DriveRepo, RegisterPar
 use family_archive_core::error::{exit, Error, Result};
 use family_archive_core::logging::Logger;
 use family_archive_core::pipeline::{IndexMode, IndexOptions, Pipeline};
-use family_archive_core::search::{SearchFilters, SearchRepo};
-use family_archive_core::{db, faces, verifier};
+use family_archive_core::search::{SearchFilters, SearchRepo, VisualQuery};
+use family_archive_core::{db, diagnostics, faces, verifier};
 
 #[derive(Parser)]
 #[command(
-    name = "family-archive",
+    name = "atlasdrive",
     version,
     about = "Private, local-first family photo catalogue across numbered drives."
 )]
@@ -55,6 +55,27 @@ enum Command {
     },
     /// Environment and catalogue diagnostics.
     Doctor,
+    /// Correct the date of a photograph. Your correction always wins.
+    Date {
+        /// File id, as shown by `atlasdrive search`.
+        #[arg(long)]
+        file: String,
+        /// Earliest possible date, YYYY-MM-DD.
+        #[arg(long)]
+        from: String,
+        /// Latest possible date; omit if the date is exact.
+        #[arg(long)]
+        to: Option<String>,
+        /// Remove a previous correction and let the estimate stand again.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Write a privacy-redacted diagnostics bundle safe to share in a bug report.
+    Report {
+        /// Required, and the only supported mode: unredacted export is not offered.
+        #[arg(long)]
+        redacted: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -78,6 +99,17 @@ enum DriveAction {
     Inspect {
         #[arg(long)]
         path: PathBuf,
+    },
+    /// Update where a drive lives and how it is categorised.
+    Set {
+        #[arg(long)]
+        number: i64,
+        /// Where the drive physically is, e.g. "Drawer 2". Pass "" to clear.
+        #[arg(long)]
+        physical_location: Option<String>,
+        /// Replaces the existing categories; repeat for several.
+        #[arg(long)]
+        category: Vec<String>,
     },
     /// List registered drives.
     List,
@@ -114,6 +146,9 @@ struct SearchArgs {
     offline_included: bool,
     #[arg(long, default_value_t = 50)]
     limit: usize,
+    /// Search text and metadata only, skipping the local visual embedding.
+    #[arg(long)]
+    text_only: bool,
 }
 
 #[derive(Parser)]
@@ -186,6 +221,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Verify(args) => verify_cmd(&ctx, args),
         Command::Faces { action } => faces_cmd(&ctx, action),
         Command::Doctor => doctor_cmd(&ctx),
+        Command::Date { file, from, to, clear } => date_cmd(&ctx, &file, &from, to.as_deref(), clear),
+        Command::Report { redacted } => report_cmd(&ctx, redacted),
     }
 }
 
@@ -229,6 +266,34 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
             }
             Ok(())
         }
+        DriveAction::Set {
+            number,
+            physical_location,
+            category,
+        } => {
+            let drive = repo
+                .get_by_number(number)?
+                .ok_or_else(|| Error::InvalidArgs(format!("drive {number} not registered")))?;
+            // An empty --category list means "not specified", not "clear them":
+            // clearing is a separate, explicit act the user can do by passing an
+            // empty string.
+            let categories = (!category.is_empty()).then_some(category.as_slice());
+            repo.update_details(&drive.id, physical_location.as_deref(), categories)?;
+            let updated = repo.get_by_number(number)?.expect("drive still present");
+            println!(
+                "Drive {}: {} · {}",
+                updated.drive_number,
+                updated
+                    .physical_location
+                    .unwrap_or_else(|| "no location recorded".into()),
+                if updated.categories.is_empty() {
+                    "no categories".to_string()
+                } else {
+                    updated.categories.join(", ")
+                }
+            );
+            Ok(())
+        }
         DriveAction::List => {
             for d in repo.list()? {
                 println!(
@@ -238,6 +303,14 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
                     d.status,
                     d.last_scan_at.unwrap_or_else(|| "never scanned".into())
                 );
+                let location = d
+                    .physical_location
+                    .unwrap_or_else(|| "no location recorded".into());
+                if d.categories.is_empty() {
+                    println!("            {location}");
+                } else {
+                    println!("            {location} · {}", d.categories.join(", "));
+                }
             }
             Ok(())
         }
@@ -300,6 +373,13 @@ fn index_cmd(ctx: &Ctx, args: IndexArgs) -> Result<()> {
         summary.batches,
         if summary.dry_run { " (dry-run)" } else { "" }
     );
+    if summary.files_changed > 0 || summary.files_missing > 0 {
+        println!(
+            "Rescan: {} photograph(s) changed since the last scan and were re-read; \
+             {} no longer on this drive and marked missing.",
+            summary.files_changed, summary.files_missing
+        );
+    }
     Ok(())
 }
 
@@ -313,8 +393,34 @@ fn search_cmd(ctx: &Ctx, args: SearchArgs) -> Result<()> {
         limit: args.limit,
         ..Default::default()
     };
-    // Text search over the catalogue (works offline).
-    let results = repo.text_search(&args.query, &filters)?;
+    // Natural-language search: text/metadata plus a locally embedded query.
+    // Everything reads the local catalogue, so this works with drives offline.
+    let mut visual_note = None;
+    let embedded = if args.text_only {
+        None
+    } else {
+        let registry = EngineRegistry::local_default();
+        let engine = registry.engine_for(family_archive_core::ai::Capability::TextEmbedding);
+        let cancel = family_archive_core::ai::CancelToken::new();
+        // A missing text encoder is not an error: text search still works.
+        engine.text_embedding(&args.query, &cancel).ok().map(|q| {
+            if q.meta.confidence == 0.0 {
+                visual_note = Some("No visual terms recognised; searched text and metadata only.");
+            }
+            (q, engine.model_id().to_string(), engine.model_version().to_string())
+        })
+    };
+    let visual = embedded.as_ref().map(|(q, id, version)| VisualQuery {
+        vector: &q.value.vector,
+        model_id: id,
+        model_version: version,
+        coverage: q.meta.confidence,
+    });
+
+    let results = repo.natural_language_search(&args.query, visual, &filters)?;
+    if let Some(note) = visual_note {
+        println!("{note}");
+    }
     if results.is_empty() {
         println!("No results for \"{}\".", args.query);
         return Ok(());
@@ -326,8 +432,14 @@ fn search_cmd(ctx: &Ctx, args: SearchArgs) -> Result<()> {
             .map(|(a, b)| if a == b { a } else { format!("{a}..{b}") })
             .unwrap_or_else(|| "date uncertain".into());
         println!(
-            "Drive {:>3} [{}]  {}  ({})  {}",
-            r.drive_number, status, r.filename, date, r.relative_path
+            "Drive {:>3} [{}]  {}  ({})  {}  [{} {:.0}%]",
+            r.drive_number,
+            status,
+            r.filename,
+            date,
+            r.relative_path,
+            r.matched.join("+"),
+            r.score * 100.0
         );
         if !r.online {
             println!("      -> Connect Drive {} to open the original.", r.drive_number);
@@ -410,8 +522,45 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
     }
 }
 
+fn date_cmd(ctx: &Ctx, file: &str, from: &str, to: Option<&str>, clear: bool) -> Result<()> {
+    let archive = ctx.open_archive()?;
+    let repo = family_archive_core::dates::DateRepo::new(&archive);
+    if clear {
+        repo.clear_user_override(file)?;
+        println!("Correction removed. AtlasDrive's own estimate applies again.");
+        return Ok(());
+    }
+    let est = repo.set_user_override(file, from, to.unwrap_or(from))?;
+    println!("{}", family_archive_core::dates::describe(&est));
+    println!("Your correction is kept even if this photograph is analysed again.");
+    Ok(())
+}
+
+fn report_cmd(ctx: &Ctx, redacted: bool) -> Result<()> {
+    if !redacted {
+        // There is no unredacted export. Refusing loudly is better than quietly
+        // producing one kind of file when the user asked for another.
+        return Err(Error::InvalidArgs(
+            "only --redacted export is supported; AtlasDrive does not produce an \
+             unredacted diagnostics bundle"
+                .into(),
+        ));
+    }
+    let archive = ctx.open_archive()?;
+    let queue = ctx.open_queue()?;
+    let diag = diagnostics::collect(&archive, Some(&queue), &ctx.paths, None)?;
+    let path = diagnostics::write(&ctx.paths, &diag)?;
+    println!("Wrote redacted diagnostics: {}", path.display());
+    println!(
+        "  {} drive(s), {} photograph(s) catalogued, {} complete.",
+        diag.catalogue.drives, diag.catalogue.files_total, diag.catalogue.files_complete
+    );
+    println!("  Contains counts, versions and check outcomes only — no names, paths or dates.");
+    Ok(())
+}
+
 fn doctor_cmd(ctx: &Ctx) -> Result<()> {
-    println!("Family Archive doctor");
+    println!("AtlasDrive doctor");
     println!("  data root: {}", ctx.paths.root.display());
     let ks = keystore::default_keystore(ctx.paths.keys_dir());
     println!("  keystore:  {}", ks.backend_name());

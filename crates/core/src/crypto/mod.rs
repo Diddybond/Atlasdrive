@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn roundtrip_vector() {
         let key = MasterKey::generate(1);
-        let v = vec![0.1f32, -0.5, 3.14, 42.0, -0.0001];
+        let v = vec![0.1f32, -0.5, 3.25, 42.0, -0.0001];
         let sealed = seal_vector(&key, &v).unwrap();
         assert_ne!(sealed.ciphertext, {
             let mut raw = Vec::new();

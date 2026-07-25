@@ -1,6 +1,6 @@
 [package]
 name = "family-archive-core"
-description = "Safety-critical service layer for the Family Archive local photo catalogue."
+description = "Safety-critical service layer for the AtlasDrive local photo catalogue."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

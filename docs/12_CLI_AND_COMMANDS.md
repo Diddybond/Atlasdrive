@@ -5,10 +5,10 @@ The CLI supports development, testing and advanced recovery. The GUI calls the s
 ## Register drive
 
 ```bash
-family-archive drive register \
+atlasdrive drive register \
   --number 14 \
-  --path /Volumes/FamilyArchiveA \
-  --name "Family Archive A"
+  --path /Volumes/AtlasDriveA \
+  --name "AtlasDrive A"
 ```
 
 Options:
@@ -20,7 +20,7 @@ Options:
 ## Inspect drive
 
 ```bash
-family-archive drive inspect --path /Volumes/FamilyArchiveA
+atlasdrive drive inspect --path /Volumes/AtlasDriveA
 ```
 
 Returns identity signals and conflicts without changing the drive.
@@ -28,7 +28,7 @@ Returns identity signals and conflicts without changing the drive.
 ## Index
 
 ```bash
-family-archive index --drive 14 --path /Volumes/FamilyArchiveA
+atlasdrive index --drive 14 --path /Volumes/AtlasDriveA
 ```
 
 Required options and modes:
@@ -44,15 +44,15 @@ Required options and modes:
 ## Search
 
 ```bash
-family-archive search "bike images" --drive 14
-family-archive search "Christmas with Mum" --offline-included
+atlasdrive search "bike images" --drive 14
+atlasdrive search "Christmas with Mum" --offline-included
 ```
 
 ## Verify
 
 ```bash
-family-archive verify --run RUN_ID
-family-archive verify --drive 14 --full
+atlasdrive verify --run RUN_ID
+atlasdrive verify --drive 14 --full
 ```
 
 Verifier exits zero only when all selected critical checks pass.
@@ -60,17 +60,44 @@ Verifier exits zero only when all selected critical checks pass.
 ## Face review preparation
 
 ```bash
-family-archive faces prepare-review --limit 100
+atlasdrive faces prepare-review --limit 100
 ```
 
 This command prepares a bounded candidate batch and stops for human review.
 
+## Drive location and categories
+
+```bash
+atlasdrive drive set --number 14 --physical-location "Drawer 2" \
+  --category holidays --category "scanned prints"
+```
+
+`--category` replaces the existing list. Passing an empty
+`--physical-location ""` clears it; omitting a flag leaves that field alone.
+
+## Correcting a date
+
+```bash
+atlasdrive date --file <FILE_ID> --from 1998-08-12
+atlasdrive date --file <FILE_ID> --from 1985-01-01 --to 1989-12-31
+atlasdrive date --file <FILE_ID> --from x --clear
+```
+
+A correction is stored as user-confirmed and is never overwritten by
+re-analysis. Dates must be `YYYY-MM-DD`; a malformed date is refused rather than
+guessed at.
+
 ## Diagnostics
 
 ```bash
-family-archive doctor
-family-archive report --run RUN_ID --redacted
+atlasdrive doctor
+atlasdrive report --redacted
 ```
+
+`report` writes a bundle containing counts, version numbers and verifier check
+outcomes only. There is no unredacted variant: no filenames, paths, drive names,
+dates, tags, people, OCR text or embeddings are ever included, so the file is
+safe to attach to a bug report without auditing it first.
 
 ## Exit codes
 

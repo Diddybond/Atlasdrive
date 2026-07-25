@@ -1,6 +1,12 @@
 # Setup and Build
 
-Family Archive is a Rust + Tauri + React application. The safety-critical
+> **First-run note on macOS:** the build is not code-signed, so macOS asks for
+> permission the first time AtlasDrive reads its master key from the Keychain,
+> and asks again whenever the binary is rebuilt. Approving it is safe — it is
+> AtlasDrive reading its own key. This also makes `cargo test` slow on the CLI
+> crate (each rebuilt test binary re-prompts). Code signing removes both.
+
+AtlasDrive is a Rust + Tauri + React application. The safety-critical
 service layer, CLI and verifier are pure Rust and build/test on any platform;
 the packaged desktop app targets macOS 12+.
 
@@ -21,7 +27,7 @@ Dependency versions are pinned in `Cargo.toml` (workspace) and
 
 ```text
 crates/core     family-archive-core  — service layer (safety, queue, verifier, AI engine)
-crates/cli      family-archive       — CLI + family-archive-verify binary
+crates/cli      atlasdrive           — CLI + atlasdrive-verify binary
 src-tauri       Tauri v2 desktop backend (macOS packaging; excluded from the workspace)
 ui              React + TypeScript interface
 docs            binding specification
@@ -43,26 +49,26 @@ cargo clippy --workspace    # lint (clean)
 
 ```bash
 # Register a numbered drive
-cargo run -p family-archive-cli --bin family-archive -- \
-  drive register --number 14 --path /Volumes/FamilyArchiveA --name "Family Archive A" --write-manifest
+cargo run -p family-archive-cli --bin atlasdrive -- \
+  drive register --number 14 --path /Volumes/AtlasDriveA --name "AtlasDrive A" --write-manifest
 
 # Preview (processes at most 20 files, writes nothing permanent)
-cargo run -p family-archive-cli --bin family-archive -- \
-  index --drive 14 --path /Volumes/FamilyArchiveA --dry-run
+cargo run -p family-archive-cli --bin atlasdrive -- \
+  index --drive 14 --path /Volumes/AtlasDriveA --dry-run
 
 # Full index
-cargo run -p family-archive-cli --bin family-archive -- \
-  index --drive 14 --path /Volumes/FamilyArchiveA
+cargo run -p family-archive-cli --bin atlasdrive -- \
+  index --drive 14 --path /Volumes/AtlasDriveA
 
 # Search offline
-cargo run -p family-archive-cli --bin family-archive -- \
+cargo run -p family-archive-cli --bin atlasdrive -- \
   search "Christmas" --offline-included
 
 # Independent verifier (exits non-zero on failure)
-cargo run -p family-archive-cli --bin family-archive-verify -- --enforce-disk-floor
+cargo run -p family-archive-cli --bin atlasdrive-verify -- --enforce-disk-floor
 ```
 
-Generated data lives under `~/Library/Application Support/FamilyArchive/` on
+Generated data lives under `~/Library/Application Support/AtlasDrive/` on
 macOS (override with `--home <dir>` or `FAMILY_ARCHIVE_HOME`).
 
 ## Build and test the UI

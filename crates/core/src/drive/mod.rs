@@ -188,6 +188,43 @@ impl<'a> DriveRepo<'a> {
         Ok(())
     }
 
+    /// Update where a drive physically lives and how it is categorised.
+    ///
+    /// These are the user's own notes about a piece of hardware — "Drawer 2",
+    /// "scanned prints" — and they are the only way to find the disk in the real
+    /// world once the app says which drive number holds a photograph. Each field
+    /// is independently optional so updating one never blanks the other, and the
+    /// change is audited like any other drive edit.
+    pub fn update_details(
+        &self,
+        drive_id: &str,
+        physical_location: Option<&str>,
+        categories: Option<&[String]>,
+    ) -> Result<()> {
+        if let Some(loc) = physical_location {
+            let trimmed = loc.trim();
+            self.conn.execute(
+                "UPDATE drives SET physical_location=?2 WHERE id=?1",
+                params![drive_id, (!trimmed.is_empty()).then_some(trimmed)],
+            )?;
+        }
+        if let Some(cats) = categories {
+            // Normalise: trimmed, non-empty, de-duplicated, order preserved.
+            let mut seen = std::collections::HashSet::new();
+            let cleaned: Vec<String> = cats
+                .iter()
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty() && seen.insert(c.to_lowercase()))
+                .collect();
+            self.conn.execute(
+                "UPDATE drives SET categories=?2 WHERE id=?1",
+                params![drive_id, serde_json::to_string(&cleaned)?],
+            )?;
+        }
+        self.audit(drive_id, "details_updated", None)?;
+        Ok(())
+    }
+
     /// Renumber a drive, preserving history in the audit table.
     pub fn renumber(&self, drive_id: &str, new_number: i64) -> Result<()> {
         if new_number <= 0 {
@@ -340,6 +377,68 @@ mod tests {
 
     fn repo_conn() -> Connection {
         open_in_memory(SchemaKind::Archive).unwrap()
+    }
+
+    #[test]
+    fn physical_location_and_categories_round_trip_and_can_be_edited() {
+        let conn = repo_conn();
+        let repo = DriveRepo::new(&conn);
+        let d = repo
+            .register(&RegisterParams {
+                drive_number: 14,
+                friendly_name: Some("Family Archive A".into()),
+                physical_location: Some("Studio shelf B".into()),
+                categories: vec!["family".into(), "scans".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(d.physical_location.as_deref(), Some("Studio shelf B"));
+        assert_eq!(d.categories, vec!["family", "scans"]);
+
+        // Reading it back preserves both.
+        let read = repo.get_by_number(14).unwrap().unwrap();
+        assert_eq!(read.physical_location.as_deref(), Some("Studio shelf B"));
+        assert_eq!(read.categories, vec!["family", "scans"]);
+
+        // Moving the drive updates only the location.
+        repo.update_details(&d.id, Some("Drawer 2"), None).unwrap();
+        let moved = repo.get_by_number(14).unwrap().unwrap();
+        assert_eq!(moved.physical_location.as_deref(), Some("Drawer 2"));
+        assert_eq!(moved.categories, vec!["family", "scans"], "categories untouched");
+
+        // Recategorising updates only the categories, and normalises them.
+        repo.update_details(
+            &d.id,
+            None,
+            Some(&[
+                "  Holidays ".into(),
+                "holidays".into(), // duplicate, different case
+                "".into(),         // blank
+                "negatives".into(),
+            ]),
+        )
+        .unwrap();
+        let recategorised = repo.get_by_number(14).unwrap().unwrap();
+        assert_eq!(recategorised.categories, vec!["Holidays", "negatives"]);
+        assert_eq!(
+            recategorised.physical_location.as_deref(),
+            Some("Drawer 2"),
+            "location untouched"
+        );
+
+        // Clearing the location is possible, and is distinct from leaving it be.
+        repo.update_details(&d.id, Some("  "), None).unwrap();
+        assert!(repo.get_by_number(14).unwrap().unwrap().physical_location.is_none());
+
+        // Every edit is audited.
+        let audits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM drive_audit WHERE event='details_updated'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audits, 3);
     }
 
     #[test]

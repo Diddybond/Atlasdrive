@@ -4,7 +4,7 @@
 //! Safety rules enforced here:
 //!   * Resolve and validate canonical paths; stay beneath the approved root.
 //!   * Never follow symlinks that escape the root.
-//!   * Skip the app-owned `.family-archive` folder.
+//!   * Skip the app-owned `.atlasdrive` folder.
 //!   * Honour configurable exclusion globs.
 //!   * Treat inaccessible files as structured skips, never fatal crashes.
 
@@ -21,7 +21,7 @@ pub const SUPPORTED_EXTENSIONS: &[&str] =
     &["jpg", "jpeg", "png", "tif", "tiff", "webp", "heic", "heif", "bmp", "gif"];
 
 /// The app-owned folder written to drives; never scanned as content.
-pub const APP_MANIFEST_DIR: &str = ".family-archive";
+pub const APP_MANIFEST_DIR: &str = ".atlasdrive";
 
 /// A file discovered by enumeration, with its path relative to the root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,13 +199,13 @@ mod tests {
         touch(&root.join("a.jpg"), b"x");
         touch(&root.join("sub/b.png"), b"x");
         touch(&root.join("notes.txt"), b"x");
-        touch(&root.join(".family-archive/drive.json"), b"{}");
+        touch(&root.join(".atlasdrive/drive.json"), b"{}");
         let files = enumerate(root, &ScanOptions::default()).unwrap();
         let names: Vec<_> = files.iter().map(|f| f.relative_path.clone()).collect();
         assert!(names.contains(&"a.jpg".to_string()));
         assert!(names.contains(&"sub/b.png".to_string()));
         assert!(!names.iter().any(|n| n.contains("notes.txt")));
-        assert!(!names.iter().any(|n| n.contains(".family-archive")));
+        assert!(!names.iter().any(|n| n.contains(".atlasdrive")));
     }
 
     #[test]

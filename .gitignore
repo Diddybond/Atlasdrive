@@ -13,6 +13,11 @@ ui/.vite
 src-tauri/target
 src-tauri/gen
 
+# Generated icon sets for platforms this product does not target. The macOS set
+# is regenerated from icon.png by `cargo tauri icon`.
+src-tauri/icons/android/
+src-tauri/icons/ios/
+
 # Generated runtime data — never commit catalogues, thumbnails, models, photos or secrets
 *.db
 *.db-wal
@@ -23,6 +28,8 @@ index.log
 /appdata
 /reports/*.md
 !reports/.gitkeep
+# ...but completion reports are project records, not runtime output.
+!/reports/completion-*.md
 thumbnails/
 models/*.bin
 models/*.onnx
@@ -68,6 +75,11 @@ Thumbs.db
 # Track the source app icon (the full icon set is generated on macOS via
 # `cargo tauri icon src-tauri/icons/icon.png` and stays ignored).
 !src-tauri/icons/icon.png
+# Brand source art, and the mark the interface actually loads at runtime — both
+# are source assets, not generated output. Without the second one a fresh clone
+# builds a UI with a broken brand image.
+!docs/brand/*.png
+!ui/public/atlasdrive-mark.png
 src-tauri/icons/*.icns
 src-tauri/icons/*.ico
 src-tauri/icons/32x32.png

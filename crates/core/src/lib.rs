@@ -1,6 +1,6 @@
-//! # Family Archive core
+//! # AtlasDrive core
 //!
-//! Safety-critical service layer for the Family Archive local photo catalogue.
+//! Safety-critical service layer for the AtlasDrive local photo catalogue.
 //!
 //! Priority order when specifications disagree (see `AGENTS.md`):
 //!   1. Safety requirements
@@ -16,6 +16,7 @@ pub mod ai;
 pub mod config;
 pub mod crypto;
 pub mod dates;
+pub mod diagnostics;
 pub mod db;
 pub mod drive;
 pub mod error;

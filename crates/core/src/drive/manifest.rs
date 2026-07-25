@@ -1,4 +1,4 @@
-//! The app-owned drive identity manifest (`.family-archive/drive.json`).
+//! The app-owned drive identity manifest (`.atlasdrive/drive.json`).
 //!
 //! Written atomically via a temp file + rename, and only ever inside the
 //! app-owned hidden folder — never elsewhere on the drive (see `docs/05`).
@@ -13,9 +13,9 @@ use crate::scan::APP_MANIFEST_DIR;
 use crate::util::{atomic_write, now_iso8601};
 
 pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
-pub const APP_ID: &str = "family-archive";
+pub const APP_ID: &str = "atlasdrive";
 
-/// Contents of `.family-archive/drive.json`.
+/// Contents of `.atlasdrive/drive.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DriveManifest {
     #[serde(rename = "schemaVersion")]
@@ -59,7 +59,7 @@ impl DriveManifest {
     /// Write the manifest to the volume's app-owned folder, atomically.
     ///
     /// This is the *only* write the application makes to a drive, and it is
-    /// confined to the hidden `.family-archive` folder.
+    /// confined to the hidden `.atlasdrive` folder.
     pub fn write_to_volume(&self, volume_root: &Path) -> Result<PathBuf> {
         let dir = Self::manifest_dir(volume_root);
         std::fs::create_dir_all(&dir)?;
@@ -95,7 +95,7 @@ mod tests {
         let vol = dir.path();
         let m = DriveManifest::new("uuid-1", 14, Some("Family A".into()));
         let path = m.write_to_volume(vol).unwrap();
-        assert!(path.ends_with(".family-archive/drive.json"));
+        assert!(path.ends_with(".atlasdrive/drive.json"));
         let read = DriveManifest::read_from_volume(vol).unwrap().unwrap();
         assert_eq!(read, m);
         assert_eq!(read.drive_number, 14);
@@ -116,12 +116,12 @@ mod tests {
         let m = DriveManifest::new("uuid-1", 3, None);
         m.write_to_volume(vol).unwrap();
         assert_eq!(std::fs::read(vol.join("family.jpg")).unwrap(), b"original");
-        // Only .family-archive was added besides the original.
+        // Only .atlasdrive was added besides the original.
         let entries: Vec<_> = std::fs::read_dir(vol)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
-        assert!(entries.contains(&".family-archive".to_string()));
+        assert!(entries.contains(&".atlasdrive".to_string()));
         assert!(entries.contains(&"family.jpg".to_string()));
         assert_eq!(entries.len(), 2);
     }

@@ -10,16 +10,31 @@
 
 use image::{imageops::FilterType, RgbImage};
 
+use super::text;
 use super::types::*;
 use super::{AiEngine, CancelToken, Capability};
 use crate::error::{Error, Result};
 use crate::util::now_iso8601;
 
 pub const MODEL_ID: &str = "local-heuristic";
-pub const MODEL_VERSION: &str = "0.1.0";
+/// `0.2.0` added the brightness-anchor dimension below. Embeddings are
+/// partitioned by `(model_id, model_version)`, so vectors written by `0.1.0`
+/// are simply a separate partition and are never compared against these.
+pub const MODEL_VERSION: &str = "0.2.0";
 
-/// Fixed embedding dimension. Small, but real similarity structure.
-pub const EMBED_DIM: usize = 64;
+/// Fixed embedding dimension: a 4×4 grid × (R,G,B,brightness), plus one
+/// constant anchor dimension.
+///
+/// The anchor exists because L2 normalisation otherwise discards absolute
+/// brightness entirely — without it a near-black frame and a near-white frame
+/// of the same hue normalise to the *same* direction, so "night" and "snow"
+/// are indistinguishable. Holding one dimension constant means the remaining
+/// dimensions shrink or grow relative to it, and overall lightness survives
+/// normalisation.
+pub const EMBED_DIM: usize = 4 * 4 * 4 + 1;
+
+/// Value of the constant anchor dimension (see [`EMBED_DIM`]).
+const BRIGHTNESS_ANCHOR: f32 = 1.0;
 const FACE_EMBED_DIM: usize = 32;
 
 pub struct LocalHeuristicEngine {
@@ -31,6 +46,7 @@ impl LocalHeuristicEngine {
         Self {
             caps: vec![
                 Capability::VisualEmbedding,
+                Capability::TextEmbedding,
                 Capability::FaceDetection,
                 Capability::FaceEmbedding,
                 Capability::Ocr,
@@ -85,6 +101,22 @@ impl AiEngine for LocalHeuristicEngine {
         Ok(Provenanced::new(emb, self.meta(0.5, ms)))
     }
 
+    fn text_embedding(&self, query: &str, cancel: &CancelToken) -> Result<Provenanced<Embedding>> {
+        if cancel.is_cancelled() {
+            return Err(Error::Other("cancelled".into()));
+        }
+        // The query is rendered into the same 4x4 conceptual frame the image
+        // encoder reduces every photograph to, then embedded by the *identical*
+        // function — so query and image vectors cannot drift into separate
+        // spaces. Confidence carries the lexicon's honest coverage of the query.
+        let (rendered, ms) = timed(|| text::render_query(query));
+        let vector = embed_grid(&rendered.grid);
+        Ok(Provenanced::new(
+            Embedding::new(vector),
+            self.meta(rendered.coverage, ms),
+        ))
+    }
+
     fn detect_faces(&self, img: &RgbImage, _cancel: &CancelToken) -> Result<Provenanced<Vec<FaceDetection>>> {
         let (faces, ms) = timed(|| detect_skin_blobs(img));
         let conf = if faces.is_empty() { 1.0 } else { 0.6 };
@@ -129,7 +161,16 @@ impl AiEngine for LocalHeuristicEngine {
 /// coarse spatial-color map. Similar images produce similar vectors.
 fn embed_image(img: &RgbImage) -> Vec<f32> {
     // 4x4 grid × (R,G,B,brightness) = 64 dims.
-    let small = image::imageops::resize(img, 4, 4, FilterType::Triangle);
+    let small = image::imageops::resize(img, text::GRID, text::GRID, FilterType::Triangle);
+    embed_grid(&small)
+}
+
+/// Embed an already-reduced 4×4 grid. This is the single definition of the
+/// embedding space: both photographs (via [`embed_image`]) and natural-language
+/// queries (via [`text::render_query`]) pass through here, which is what makes
+/// text and image vectors directly comparable.
+fn embed_grid(small: &RgbImage) -> Vec<f32> {
+    debug_assert_eq!(small.dimensions(), (text::GRID, text::GRID));
     let mut v = Vec::with_capacity(EMBED_DIM);
     for p in small.pixels() {
         let r = p[0] as f32 / 255.0;
@@ -141,6 +182,8 @@ fn embed_image(img: &RgbImage) -> Vec<f32> {
         v.push(b);
         v.push(brightness);
     }
+    // Constant anchor: keeps absolute lightness meaningful after normalisation.
+    v.push(BRIGHTNESS_ANCHOR);
     l2_normalize(&mut v);
     v
 }
@@ -432,6 +475,53 @@ mod tests {
         let sim_close = crate::util::cosine_similarity(&vr, &vr2);
         let sim_far = crate::util::cosine_similarity(&vr, &vb);
         assert!(sim_close > sim_far);
+    }
+
+    #[test]
+    fn text_embedding_shares_the_image_embedding_space() {
+        let e = LocalHeuristicEngine::new();
+        let c = CancelToken::new();
+        let img = solid(64, 64, [120, 130, 140]);
+        let image_vec = e.visual_embedding(&img, &c).unwrap();
+        let text_vec = e.text_embedding("beach", &c).unwrap();
+        // Same dimension, same model partition — otherwise vector_search would
+        // be comparing vectors from two different spaces.
+        assert_eq!(text_vec.value.dim, image_vec.value.dim);
+        assert_eq!(text_vec.value.dim, EMBED_DIM);
+        assert_eq!(text_vec.meta.model_id, image_vec.meta.model_id);
+        assert_eq!(text_vec.meta.model_version, image_vec.meta.model_version);
+        assert!(text_vec.value.is_finite());
+    }
+
+    #[test]
+    fn text_query_ranks_the_matching_photograph_first() {
+        let e = LocalHeuristicEngine::new();
+        let c = CancelToken::new();
+        // A "snow" query should sit closer to a bright white frame than to a
+        // dark one — the encoder has to move in the right direction, not just
+        // produce a well-formed vector.
+        let snowy = solid(32, 32, [235, 240, 248]);
+        let night = solid(32, 32, [20, 22, 35]);
+        let q = e.text_embedding("snow", &c).unwrap().value.vector;
+        let sim_snow = crate::util::cosine_similarity(&q, &e.visual_embedding(&snowy, &c).unwrap().value.vector);
+        let sim_night = crate::util::cosine_similarity(&q, &e.visual_embedding(&night, &c).unwrap().value.vector);
+        assert!(sim_snow > sim_night, "snow {sim_snow} should beat night {sim_night}");
+
+        // And the reverse query must flip the ordering.
+        let q2 = e.text_embedding("night", &c).unwrap().value.vector;
+        let sim_snow2 = crate::util::cosine_similarity(&q2, &e.visual_embedding(&snowy, &c).unwrap().value.vector);
+        let sim_night2 = crate::util::cosine_similarity(&q2, &e.visual_embedding(&night, &c).unwrap().value.vector);
+        assert!(sim_night2 > sim_snow2, "night {sim_night2} should beat snow {sim_snow2}");
+    }
+
+    #[test]
+    fn unrecognised_query_reports_zero_confidence() {
+        let e = LocalHeuristicEngine::new();
+        let c = CancelToken::new();
+        let r = e.text_embedding("zzzz qqqq", &c).unwrap();
+        // Callers use this to fall back to text search rather than present a
+        // meaningless visual ranking.
+        assert_eq!(r.meta.confidence, 0.0);
     }
 
     #[test]

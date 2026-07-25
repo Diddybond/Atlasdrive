@@ -1,4 +1,4 @@
-//! Family Archive desktop backend (Tauri v2).
+//! AtlasDrive desktop backend (Tauri v2).
 //!
 //! Thin command layer over `family-archive-core`. The GUI and CLI call the same
 //! service layer, so all safety guarantees live in core, not here. Long-running
@@ -10,14 +10,14 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{Manager, State};
 
-use family_archive_core::ai::{CancelToken, EngineRegistry};
+use family_archive_core::ai::{CancelToken, Capability, EngineRegistry};
 use family_archive_core::config::{AppPaths, Config};
 use family_archive_core::crypto::keystore;
 use family_archive_core::drive::{manifest::DriveManifest, DriveRepo, RegisterParams};
 use family_archive_core::logging::Logger;
 use family_archive_core::pipeline::{IndexMode, IndexOptions, Pipeline};
 use family_archive_core::progress::Progress;
-use family_archive_core::search::{SearchFilters, SearchResult};
+use family_archive_core::search::{SearchFilters, SearchResult, VisualQuery};
 use family_archive_core::verifier::{self, Check};
 use family_archive_core::{db, faces};
 
@@ -47,6 +47,7 @@ struct DriveDto {
     friendly_name: Option<String>,
     status: String,
     physical_location: Option<String>,
+    categories: Vec<String>,
     last_scan_at: Option<String>,
     image_count: i64,
 }
@@ -72,6 +73,7 @@ fn list_drives(state: State<AppState>) -> Result<Vec<DriveDto>, String> {
             friendly_name: d.friendly_name,
             status: d.status,
             physical_location: d.physical_location,
+            categories: d.categories,
             last_scan_at: d.last_scan_at,
             image_count,
         });
@@ -110,9 +112,20 @@ fn register_drive(
         friendly_name: drive.friendly_name,
         status: drive.status,
         physical_location: drive.physical_location,
+        categories: drive.categories,
         last_scan_at: drive.last_scan_at,
         image_count: 0,
     })
+}
+
+/// Search results plus a plain-language note about how the query was handled.
+#[derive(Serialize)]
+struct SearchResponse {
+    results: Vec<SearchResult>,
+    /// Lexicon terms the local text encoder recognised, for explaining a match.
+    understood: Vec<String>,
+    /// True when the query carried no visual meaning and only text was searched.
+    text_only: bool,
 }
 
 #[tauri::command]
@@ -121,7 +134,7 @@ fn search_catalogue(
     query: String,
     drive: Option<i64>,
     include_offline: bool,
-) -> Result<Vec<SearchResult>, String> {
+) -> Result<SearchResponse, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
     let repo = family_archive_core::search::SearchRepo::new(&archive);
@@ -132,7 +145,23 @@ fn search_catalogue(
         limit: 100,
         ..Default::default()
     };
-    let mut results = repo.text_search(&query, &filters).map_err(map_err)?;
+
+    // Embed the query locally so it can be compared against image embeddings.
+    let registry = EngineRegistry::local_default();
+    let engine = registry.engine_for(Capability::TextEmbedding);
+    let embedded = engine.text_embedding(&query, &CancelToken::new()).ok();
+    let visual = embedded.as_ref().map(|q| VisualQuery {
+        vector: &q.value.vector,
+        model_id: engine.model_id(),
+        model_version: engine.model_version(),
+        coverage: q.meta.confidence,
+    });
+    let text_only = embedded.as_ref().is_none_or(|q| q.meta.confidence == 0.0);
+    let understood = family_archive_core::ai::text::render_query(&query).matched_terms;
+
+    let mut results = repo
+        .natural_language_search(&query, visual, &filters)
+        .map_err(map_err)?;
     // Populate a friendly date label from the stored range.
     for r in &mut results {
         if let Some((a, b)) = &r.date_range {
@@ -143,7 +172,7 @@ fn search_catalogue(
             });
         }
     }
-    Ok(results)
+    Ok(SearchResponse { results, understood, text_only })
 }
 
 /// Start (or resume) an index run in the background and return immediately.
@@ -231,8 +260,7 @@ fn run_verifier(state: State<AppState>) -> Result<Vec<Check>, String> {
     let archive = open_archive(&paths)?;
     let queue = open_queue(&paths)?;
     let key = keystore::default_keystore(paths.keys_dir()).get_or_create().ok();
-    let mut config = Config::default();
-    config.free_space_floor_bytes = 0;
+    let config = Config { free_space_floor_bytes: 0, ..Default::default() };
     let ctx = verifier::VerifyContext {
         archive: &archive,
         queue: Some(&queue),
@@ -259,6 +287,138 @@ fn prepare_review(
     let archive = open_archive(&paths)?;
     let repo = faces::FaceRepo::new(&archive);
     repo.prepare_review(limit).map_err(map_err)
+}
+
+/// Record the user's own correction to a photograph's date.
+///
+/// Returns the phrasing to show, e.g. "Taken on 1998-08-12". The correction
+/// outranks the estimator and survives re-analysis.
+#[tauri::command]
+fn set_date_override(
+    state: State<AppState>,
+    file_id: String,
+    earliest: String,
+    latest: Option<String>,
+) -> Result<String, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let repo = family_archive_core::dates::DateRepo::new(&archive);
+    let latest = latest.unwrap_or_else(|| earliest.clone());
+    let est = repo
+        .set_user_override(&file_id, &earliest, &latest)
+        .map_err(map_err)?;
+    Ok(family_archive_core::dates::describe(&est))
+}
+
+/// Remove a correction, letting AtlasDrive's own estimate apply again.
+#[tauri::command]
+fn clear_date_override(state: State<AppState>, file_id: String) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::dates::DateRepo::new(&archive)
+        .clear_user_override(&file_id)
+        .map_err(map_err)
+}
+
+/// Record where a drive physically lives and how it is categorised.
+///
+/// Both fields are optional and independent: omitting one leaves it alone,
+/// rather than blanking it.
+#[tauri::command]
+fn update_drive_details(
+    state: State<AppState>,
+    drive_number: i64,
+    physical_location: Option<String>,
+    categories: Option<Vec<String>>,
+) -> Result<DriveDto, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let repo = DriveRepo::new(&archive);
+    let drive = repo
+        .get_by_number(drive_number)
+        .map_err(map_err)?
+        .ok_or_else(|| format!("Drive {drive_number} is not registered."))?;
+    repo.update_details(
+        &drive.id,
+        physical_location.as_deref(),
+        categories.as_deref(),
+    )
+    .map_err(map_err)?;
+
+    let updated = repo
+        .get_by_number(drive_number)
+        .map_err(map_err)?
+        .ok_or_else(|| format!("Drive {drive_number} is not registered."))?;
+    let image_count: i64 = archive
+        .query_row(
+            "SELECT count(*) FROM files WHERE drive_id=?1 AND status='complete'",
+            [&updated.id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(DriveDto {
+        id: updated.id,
+        drive_number: updated.drive_number,
+        friendly_name: updated.friendly_name,
+        status: updated.status,
+        physical_location: updated.physical_location,
+        categories: updated.categories,
+        last_scan_at: updated.last_scan_at,
+        image_count,
+    })
+}
+
+/// Show an indexed original in Finder, when its drive is connected.
+///
+/// Read-only by construction: `open -R` selects the file in a Finder window and
+/// cannot alter it. When the drive is not connected this returns a plain-language
+/// message rather than an error string, because a disconnected drive is a normal
+/// state in this product, not a fault.
+#[tauri::command]
+fn reveal_in_finder(state: State<AppState>, file_id: String) -> Result<String, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let drive_number: Option<i64> = archive
+        .query_row(
+            "SELECT d.drive_number FROM files f JOIN drives d ON d.id=f.drive_id WHERE f.id=?1",
+            [&file_id],
+            |r| r.get(0),
+        )
+        .ok();
+
+    match family_archive_core::search::resolve_original(&archive, &file_id).map_err(map_err)? {
+        Some(path) => {
+            #[cfg(target_os = "macos")]
+            {
+                std::process::Command::new("open")
+                    .arg("-R")
+                    .arg(&path)
+                    .spawn()
+                    .map_err(|e| format!("could not open Finder: {e}"))?;
+            }
+            Ok(format!("Showing {} in Finder.", path.display()))
+        }
+        None => Ok(match drive_number {
+            Some(n) => format!("Connect Drive {n} to open the original."),
+            None => "That photograph is no longer in the catalogue.".to_string(),
+        }),
+    }
+}
+
+/// Write a privacy-redacted diagnostics bundle and return its path.
+///
+/// There is no unredacted variant: the export is built from counts and check
+/// outcomes, so the user never has to audit it before sharing it.
+#[tauri::command]
+fn export_diagnostics(state: State<AppState>) -> Result<String, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let queue = open_queue(&paths)?;
+    let diag =
+        family_archive_core::diagnostics::collect(&archive, Some(&queue), &paths, None)
+            .map_err(map_err)?;
+    let path = family_archive_core::diagnostics::write(&paths, &diag).map_err(map_err)?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -302,8 +462,13 @@ pub fn run() {
             get_progress,
             run_verifier,
             prepare_review,
-            doctor
+            doctor,
+            export_diagnostics,
+            reveal_in_finder,
+            update_drive_details,
+            set_date_override,
+            clear_date_override
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Family Archive");
+        .expect("error while running AtlasDrive");
 }

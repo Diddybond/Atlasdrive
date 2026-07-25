@@ -263,7 +263,10 @@ fn check_originals_unchanged(conn: &Connection) -> Check {
     // For each complete file that still resolves to a present original, confirm
     // size + mtime match the recorded snapshot. A mismatch is a hard halt.
     let mut stmt = match conn.prepare(
-        "SELECT f.size_bytes, f.source_mtime_ns, d.volume_name, f.relative_path
+        "SELECT f.size_bytes, f.source_mtime_ns, d.volume_name, f.relative_path,
+                (SELECT sr.scan_root FROM scan_runs sr
+                  WHERE sr.drive_id = f.drive_id AND sr.mode <> 'dry-run'
+                  ORDER BY sr.started_at DESC LIMIT 1)
          FROM files f
          JOIN drives d ON d.id=f.drive_id
          WHERE f.status='complete'",
@@ -271,15 +274,17 @@ fn check_originals_unchanged(conn: &Connection) -> Check {
         Ok(s) => s,
         Err(e) => return Check::fail("originals_unchanged", format!("query error: {e}")),
     };
-    // We cannot always resolve an absolute path here (drive may be offline).
-    // The check verifies only files whose absolute path is currently present;
-    // offline files are skipped (their integrity was verified at index time).
+    // An absolute path is not always resolvable (the drive may be disconnected).
+    // Files whose original is genuinely absent are skipped and counted — their
+    // integrity was verified at index time — but the count is reported so a
+    // wholly-skipped run can never be mistaken for a verified one.
     let rows = stmt.query_map([], |r| {
         Ok((
-            r.get::<_, i64>(0)?,             // size
-            r.get::<_, i64>(1)?,             // mtime
+            r.get::<_, i64>(0)?,            // size
+            r.get::<_, i64>(1)?,            // mtime
             r.get::<_, Option<String>>(2)?, // volume_name
-            r.get::<_, String>(3)?,          // relative_path
+            r.get::<_, String>(3)?,         // relative_path
+            r.get::<_, Option<String>>(4)?, // scan_root of the latest real run
         ))
     });
     let rows = match rows.and_then(|m| m.collect::<std::result::Result<Vec<_>, _>>()) {
@@ -287,13 +292,18 @@ fn check_originals_unchanged(conn: &Connection) -> Check {
         Err(e) => return Check::fail("originals_unchanged", format!("read error: {e}")),
     };
     let mut checked = 0;
-    for (size, mtime, volume_name, rel_path) in rows {
-        // Best-effort absolute path via a mounted /Volumes/<name>.
-        let Some(vol) = volume_name else { continue };
-        let abs = Path::new("/Volumes").join(&vol).join(&rel_path);
-        if !abs.exists() {
-            continue; // offline / not mounted: skip
-        }
+    let mut skipped = 0;
+    for (size, mtime, volume_name, rel_path, scan_root) in rows {
+        // Prefer the root the file was actually indexed from; fall back to a
+        // drive mounted at the conventional /Volumes/<name>.
+        let candidates = [
+            scan_root.map(|root| Path::new(&root).join(&rel_path)),
+            volume_name.map(|vol| Path::new("/Volumes").join(&vol).join(&rel_path)),
+        ];
+        let Some(abs) = candidates.into_iter().flatten().find(|p| p.exists()) else {
+            skipped += 1; // offline / not mounted
+            continue;
+        };
         let snap = SourceSnapshot {
             size_bytes: size as u64,
             mtime_ns: mtime,
@@ -307,7 +317,7 @@ fn check_originals_unchanged(conn: &Connection) -> Check {
     }
     Check::pass(
         "originals_unchanged",
-        format!("verified {checked} present originals unchanged (offline skipped)"),
+        format!("verified {checked} present originals unchanged; {skipped} skipped (offline)"),
     )
 }
 
@@ -441,8 +451,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(dir.path());
         paths.ensure().unwrap();
-        let mut config = Config::default();
-        config.free_space_floor_bytes = 0; // don't fail on CI disk
+        // don't fail on CI disk
+        let config = Config { free_space_floor_bytes: 0, ..Default::default() };
         (dir, paths, config)
     }
 

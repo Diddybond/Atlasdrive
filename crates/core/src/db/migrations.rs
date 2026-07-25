@@ -21,6 +21,16 @@ struct Migration {
 
 /// Apply all outstanding migrations for `kind`.
 pub fn migrate(conn: &Connection, kind: SchemaKind) -> Result<()> {
+    apply(conn, match kind {
+        SchemaKind::Archive => ARCHIVE_MIGRATIONS,
+        SchemaKind::Queue => QUEUE_MIGRATIONS,
+    })
+}
+
+/// Apply an explicit ordered migration list. Split out from [`migrate`] so the
+/// upgrade path itself can be tested against a representative older database
+/// without waiting for the schema to change in production.
+fn apply(conn: &Connection, set: &[Migration]) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version    INTEGER PRIMARY KEY,
@@ -28,11 +38,6 @@ pub fn migrate(conn: &Connection, kind: SchemaKind) -> Result<()> {
             applied_at TEXT NOT NULL
         );",
     )?;
-
-    let set = match kind {
-        SchemaKind::Archive => ARCHIVE_MIGRATIONS,
-        SchemaKind::Queue => QUEUE_MIGRATIONS,
-    };
 
     let current = crate::db::schema_version(conn)?;
     for m in set {
@@ -465,5 +470,86 @@ mod tests {
         migrate(&conn, SchemaKind::Queue).unwrap();
         let v2 = crate::db::schema_version(&conn).unwrap();
         assert_eq!(v1, v2);
+    }
+
+    /// Critical gate: upgrading a populated older database preserves every row.
+    ///
+    /// The shipped schema is still at version 1, so this exercises the upgrade
+    /// path itself with a representative forward migration applied to a
+    /// database that already holds catalogue data.
+    #[test]
+    fn upgrading_a_populated_old_database_preserves_data() {
+        const V2: &[Migration] = &[
+            Migration { version: 1, name: "initial_catalogue", sql: ARCHIVE_MIGRATIONS[0].sql },
+            Migration {
+                version: 2,
+                name: "add_drive_notes_2",
+                sql: "ALTER TABLE drives ADD COLUMN notes_2 TEXT;",
+            },
+        ];
+
+        // A database at the older version, holding real rows.
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        assert_eq!(crate::db::schema_version(&conn).unwrap(), 1);
+        conn.execute(
+            "INSERT INTO drives(id, drive_number, friendly_name, status, first_seen_at)
+             VALUES ('d-1', 14, 'AtlasDrive A', 'offline', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        apply(&conn, V2).unwrap();
+
+        assert_eq!(crate::db::schema_version(&conn).unwrap(), 2);
+        let (number, name): (i64, String) = conn
+            .query_row("SELECT drive_number, friendly_name FROM drives WHERE id='d-1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(number, 14);
+        assert_eq!(name, "AtlasDrive A");
+        assert!(crate::db::integrity_check(&conn).is_ok());
+
+        // Re-running the same set is a no-op, not a duplicate-column error.
+        apply(&conn, V2).unwrap();
+        assert_eq!(crate::db::schema_version(&conn).unwrap(), 2);
+    }
+
+    /// A failing migration must roll back atomically, leaving the old version
+    /// and the existing data intact rather than a half-upgraded database.
+    #[test]
+    fn a_failing_migration_rolls_back_and_keeps_the_old_version() {
+        const BAD: &[Migration] = &[
+            Migration { version: 1, name: "initial_catalogue", sql: ARCHIVE_MIGRATIONS[0].sql },
+            Migration {
+                version: 2,
+                name: "broken",
+                sql: "ALTER TABLE drives ADD COLUMN ok_column TEXT;
+                      ALTER TABLE no_such_table ADD COLUMN boom TEXT;",
+            },
+        ];
+
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute(
+            "INSERT INTO drives(id, drive_number, status, first_seen_at)
+             VALUES ('d-1', 14, 'offline', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let err = apply(&conn, BAD).expect_err("broken migration must fail");
+        assert!(matches!(err, Error::MigrationOrCorruption(_)), "got {err:?}");
+
+        // Version unchanged, data intact, and the partial column is gone.
+        assert_eq!(crate::db::schema_version(&conn).unwrap(), 1);
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM drives", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(
+            conn.query_row("SELECT ok_column FROM drives", [], |r| r.get::<_, Option<String>>(0))
+                .is_err(),
+            "the partially applied column must have been rolled back"
+        );
     }
 }

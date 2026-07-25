@@ -5,6 +5,17 @@ export function SettingsScreen() {
   const [checks, setChecks] = useState<VerifierCheck[]>([]);
   const [doctor, setDoctor] = useState<Record<string, string>>({});
   const [running, setRunning] = useState(false);
+  const [exported, setExported] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+
+  async function exportDiagnostics() {
+    setExporting(true);
+    try {
+      setExported(await api.exportDiagnostics());
+    } finally {
+      setExporting(false);
+    }
+  }
 
   async function runChecks() {
     setRunning(true);
@@ -60,6 +71,25 @@ export function SettingsScreen() {
             </li>
           ))}
         </ul>
+      </div>
+
+      <div className="card">
+        <div className="row-between">
+          <h2>Share a diagnostics file</h2>
+          <button onClick={exportDiagnostics} disabled={exporting}>
+            {exporting ? "Writing…" : "Create diagnostics file"}
+          </button>
+        </div>
+        <p className="lede">
+          Creates a file you can send with a bug report. It contains counts, version numbers and
+          the results of the safety checks — never your file names, folders, dates, tags, people or
+          photographs.
+        </p>
+        {exported && (
+          <p className="check-detail" role="status">
+            Saved to {exported}
+          </p>
+        )}
       </div>
     </section>
   );

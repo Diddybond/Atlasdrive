@@ -1,8 +1,12 @@
 # 15. Definition of Done and 96% Completion Rubric
 
-> **Current evidence-backed score: ~85/100** — see `docs/COMPLETION_STATUS.md`
-> for the per-gate and per-section breakdown. Not yet at 96%; not claimed
-> complete. 8/10 critical gates verified on Linux; 2 pending on-device macOS.
+> **Current evidence-backed score: 100/100** — see `docs/COMPLETION_STATUS.md`
+> for the per-section breakdown and `reports/completion-2026-07-25.md` for the
+> completion report. All 10 critical gates pass, verified on macOS.
+>
+> The rubric does not measure code signing. The bundle is unsigned, which is a
+> real release blocker requiring an Apple Developer ID — read "What 100/100 does
+> not mean" in `docs/COMPLETION_STATUS.md` before treating this as shippable.
 
 ## Completion rule
 

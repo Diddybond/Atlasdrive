@@ -162,6 +162,168 @@ pub fn user_confirmed(earliest: &str, latest: &str) -> DateEstimate {
     }
 }
 
+/// Read/write access to stored date estimates.
+pub struct DateRepo<'a> {
+    conn: &'a rusqlite::Connection,
+}
+
+impl<'a> DateRepo<'a> {
+    pub fn new(conn: &'a rusqlite::Connection) -> Self {
+        Self { conn }
+    }
+
+    /// Record the user's own correction for a photograph's date.
+    ///
+    /// This is the highest authority in `docs/09`: it replaces whatever the
+    /// estimator produced, is stored with `is_user_confirmed`, and re-analysis
+    /// will not overwrite it. Both bounds are validated and ordered so a
+    /// reversed range cannot be stored.
+    pub fn set_user_override(
+        &self,
+        file_id: &str,
+        earliest: &str,
+        latest: &str,
+    ) -> crate::error::Result<DateEstimate> {
+        let (earliest, latest) = normalise_range(earliest, latest)?;
+        let est = user_confirmed(&earliest, &latest);
+        let now = crate::util::now_iso8601();
+        let changed = self.conn.execute(
+            "INSERT INTO date_estimates
+               (file_id, earliest_date, latest_date, confidence, method_version,
+                evidence_json, is_user_confirmed, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,1,?7,?7)
+             ON CONFLICT(file_id) DO UPDATE SET
+                earliest_date=excluded.earliest_date, latest_date=excluded.latest_date,
+                confidence=excluded.confidence, method_version=excluded.method_version,
+                evidence_json=excluded.evidence_json, is_user_confirmed=1,
+                updated_at=excluded.updated_at",
+            rusqlite::params![
+                file_id,
+                est.earliest_date,
+                est.latest_date,
+                est.confidence,
+                est.method_version,
+                serde_json::to_string(&est.evidence)?,
+                now,
+            ],
+        )?;
+        if changed == 0 {
+            return Err(crate::error::Error::InvalidArgs(format!(
+                "no photograph with id {file_id}"
+            )));
+        }
+        Ok(est)
+    }
+
+    /// Remove a user's correction, letting the automatic estimate stand again.
+    pub fn clear_user_override(&self, file_id: &str) -> crate::error::Result<()> {
+        self.conn.execute(
+            "DELETE FROM date_estimates WHERE file_id=?1 AND is_user_confirmed=1",
+            [file_id],
+        )?;
+        Ok(())
+    }
+
+    /// The stored estimate for a file, if any.
+    pub fn get(&self, file_id: &str) -> crate::error::Result<Option<DateEstimate>> {
+        let row = self.conn.query_row(
+            "SELECT earliest_date, latest_date, confidence, method_version, evidence_json,
+                    is_user_confirmed
+               FROM date_estimates WHERE file_id=?1",
+            [file_id],
+            |r| {
+                let evidence_json: String = r.get(4)?;
+                let is_user_confirmed: i64 = r.get(5)?;
+                Ok(DateEstimate {
+                    earliest_date: r.get(0)?,
+                    latest_date: r.get(1)?,
+                    confidence: r.get(2)?,
+                    method_version: r.get(3)?,
+                    evidence: serde_json::from_str(&evidence_json).unwrap_or_default(),
+                    primary_source: if is_user_confirmed == 1 {
+                        DateSource::UserConfirmed
+                    } else {
+                        DateSource::Estimated
+                    },
+                    is_user_confirmed: is_user_confirmed == 1,
+                })
+            },
+        );
+        match row {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+/// Validate a user-supplied range and put its bounds in order.
+///
+/// A single date is a valid range (the user is certain). A reversed range is
+/// almost always a typo, so it is corrected rather than rejected — but a
+/// malformed date is refused, because guessing at it would be fabricating.
+fn normalise_range(earliest: &str, latest: &str) -> crate::error::Result<(String, String)> {
+    let a = earliest.trim();
+    let b = if latest.trim().is_empty() { a } else { latest.trim() };
+    for value in [a, b] {
+        if !is_iso_date(value) {
+            return Err(crate::error::Error::InvalidArgs(format!(
+                "date must be YYYY-MM-DD, got {value:?}"
+            )));
+        }
+    }
+    Ok(if a <= b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    })
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    #[test]
+    fn a_reversed_range_is_corrected_not_rejected() {
+        assert_eq!(
+            normalise_range("1998-12-01", "1998-01-01").unwrap(),
+            ("1998-01-01".to_string(), "1998-12-01".to_string())
+        );
+    }
+
+    #[test]
+    fn a_single_date_is_a_valid_range() {
+        assert_eq!(
+            normalise_range("1998-08-12", "").unwrap(),
+            ("1998-08-12".to_string(), "1998-08-12".to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_dates_are_refused_rather_than_guessed_at() {
+        for bad in ["1998", "12/08/1998", "1998-13-01", "1998-08-32", "not a date"] {
+            assert!(
+                normalise_range(bad, bad).is_err(),
+                "{bad:?} should not be accepted"
+            );
+        }
+    }
+}
+
+/// `YYYY-MM-DD` with plausible month/day values.
+fn is_iso_date(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    if !s.chars().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit()) {
+        return false;
+    }
+    let month: u32 = s[5..7].parse().unwrap_or(0);
+    let day: u32 = s[8..10].parse().unwrap_or(0);
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
 /// Human-friendly phrasing that never presents an estimate as certain.
 pub fn describe(est: &DateEstimate) -> String {
     if est.is_user_confirmed {

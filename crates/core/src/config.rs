@@ -1,7 +1,7 @@
 //! Application support paths and runtime configuration.
 //!
 //! On macOS the generated data lives under
-//! `~/Library/Application Support/FamilyArchive/` (see `docs/03_ARCHITECTURE.md`).
+//! `~/Library/Application Support/AtlasDrive/` (see `docs/03_ARCHITECTURE.md`).
 //! On other platforms (developer / CI machines) an equivalent directory is used
 //! so the whole service layer is testable off a Mac. The layout is identical.
 
@@ -14,7 +14,7 @@ use crate::error::Result;
 /// The canonical on-disk layout for all app-generated data.
 ///
 /// Nothing here is ever written to a source drive. The only thing the app is
-/// permitted to write to a drive is the `.family-archive` manifest folder,
+/// permitted to write to a drive is the `.atlasdrive` manifest folder,
 /// handled separately in [`crate::drive::manifest`].
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -31,16 +31,16 @@ impl AppPaths {
         {
             if let Some(home) = std::env::var_os("HOME") {
                 return PathBuf::from(home)
-                    .join("Library/Application Support/FamilyArchive");
+                    .join("Library/Application Support/AtlasDrive");
             }
         }
         #[cfg(not(target_os = "macos"))]
         {
             if let Some(home) = std::env::var_os("HOME") {
-                return PathBuf::from(home).join(".local/share/FamilyArchive");
+                return PathBuf::from(home).join(".local/share/AtlasDrive");
             }
         }
-        PathBuf::from("./FamilyArchive")
+        PathBuf::from("./AtlasDrive")
     }
 
     /// Construct from an explicit root (used heavily in tests).

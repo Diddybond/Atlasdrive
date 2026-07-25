@@ -58,9 +58,9 @@ Tauri, React, TypeScript, Rust and SQLite are the preferred baseline. A replacea
 
 ## D-010: Product naming
 
-**Status:** Open
+**Status:** Superseded by D-020
 
-Family Archive is the project name. Drive Atlas is a working app name only.
+Family Archive was the working project name; Drive Atlas was a working app name.
 
 ## D-011: Rust core owns all safety-critical logic
 
@@ -130,6 +130,152 @@ is a hard halt (exit 10).
 needs no webkit toolchain; it is built on macOS. The webview is granted no
 network, filesystem or shell permissions — all privileged work is in Rust
 commands.
+
+## D-017: Text queries are embedded by the same engine family as images
+
+**Status:** Settled
+
+**Context:** `docs/07` requires natural-language queries to be embedded locally
+"using the same compatible visual-text model family as the image embeddings".
+Two separate encoders would silently produce incomparable vectors.
+
+**Decision:** `AiEngine` gains a `TextEmbedding` capability. The default
+`local-heuristic` engine renders a query into the *same* 4×4 conceptual frame
+that the image encoder reduces every photograph to, then embeds it with the
+identical `embed_grid` function. Query and image vectors therefore share one
+definition of the space and one `(model_id, model_version)` partition by
+construction, not by convention. The lexicon is a deterministic table of visual
+priors (colour, lighting, setting, central subject) — not a learned CLIP text
+tower — and reports honest *coverage* of each query as its confidence.
+
+**Consequences:** Natural-language search works fully offline with no model
+download. `SearchRepo::natural_language_search` drops the visual leg entirely
+when coverage is zero, so an unrecognised query degrades to text search instead
+of producing a meaningless ranking. A learned local text encoder can replace the
+lexicon by registering an engine advertising the same capability under its own
+model version, with no database change.
+
+## D-018: Visual embeddings carry a constant brightness anchor
+
+**Status:** Settled
+
+**Supersedes:** the `0.1.0` embedding layout in D-013.
+
+**Context:** L2 normalisation discards vector magnitude. Because the image
+embedding is built purely from per-cell colour, a near-black frame and a
+near-white frame of the same hue normalised to the *same* direction — so "night"
+and "snow" were indistinguishable, for image-to-image similarity as well as for
+text queries.
+
+**Decision:** The embedding appends one constant dimension (value 1.0) before
+normalisation, making `EMBED_DIM` 65. The colour dimensions then shrink or grow
+relative to a fixed reference, so absolute lightness survives normalisation.
+The local engine's `MODEL_VERSION` moves to `0.2.0`.
+
+**Consequences:** Vectors written by `0.1.0` live in their own partition and are
+never compared against `0.2.0` vectors — this is exactly what model-version
+partitioning is for. A catalogue indexed under `0.1.0` needs re-analysis to gain
+brightness-aware search; its files, thumbnails and metadata are untouched.
+
+## D-019: The integrity verifier resolves originals via the recorded scan root
+
+**Status:** Settled
+
+**Context:** `check_originals_unchanged` resolved originals only through
+`/Volumes/<volume_name>/<relative_path>`. Any drive mounted elsewhere silently
+resolved to nothing, and the check reported a pass having verified zero files —
+the most important critical gate could pass without checking anything.
+
+**Decision:** The check prefers `scan_runs.scan_root` (the root the files were
+actually indexed from) and falls back to `/Volumes/<volume_name>`. It now
+reports both the verified and the skipped count, so a wholly-skipped run can
+never read as a verified one.
+
+**Consequences:** The original-integrity gate is demonstrable on any machine,
+not only where drives mount under `/Volumes`.
+
+## D-020: The product is AtlasDrive
+
+**Status:** Settled
+
+**Supersedes:** D-010
+
+**Context:** The product needed a settled name before first release, and the
+identity strings baked into user data (bundle id, Keychain service, application
+support directory, on-drive manifest folder) are far cheaper to change now than
+after anyone has a catalogue.
+
+**Decision:** The product is **AtlasDrive** (one word). Renamed together, as one
+change: display name and window title, bundle identifier `com.atlasdrive.app`,
+Keychain service `com.atlasdrive.masterkey`, data directory
+`~/Library/Application Support/AtlasDrive/`, on-drive manifest folder
+`.atlasdrive/` with `appId: "atlasdrive"`, and the CLI binaries `atlasdrive` and
+`atlasdrive-verify`. Brand voice and palette live in `docs/BRAND.md`.
+
+The internal Rust crates keep their `family-archive-*` package names. They are
+not user-visible, and renaming them would touch every import for no behavioural
+gain; it can be done later as a mechanical change.
+
+**Consequences:** These are identity changes, not schema changes — no migration
+is defined for them. A catalogue created before this decision keeps its data
+under the old directory and its master key under the old Keychain item, and the
+renamed build will not find either: it starts a fresh catalogue. That is
+acceptable only because the app has never shipped. **Any future change to these
+strings requires a migration**, because face embeddings are undecryptable
+without the Keychain item that sealed them.
+
+## D-021: Rescan reconciles the catalogue; the recorded source stat is refreshed
+
+**Status:** Settled
+
+**Context:** Between scans a photograph can be edited or can disappear. Both are
+normal, and neither is an integrity violation — but the same size/mtime
+comparison the safety gate uses is what detects them, so the two meanings had to
+be separated explicitly.
+
+**Decision:** `reconcile_rescan` runs after enqueue on every non-dry run. A file
+whose recorded size or mtime no longer matches disk is marked `changed` and
+re-queued via `Queue::requeue_changed`; a catalogued file the scan did not find
+is marked `missing`. Rows are never deleted — the user still needs to know a
+photograph was once on Drive 14. A file that reappears is re-analysed and
+restored. Within a run, a mid-processing mismatch remains a hard halt.
+
+`enqueue` stays `INSERT OR IGNORE` (that is what makes a plain re-run
+idempotent); reopening a completed item is a separate, explicit call.
+
+**Also fixed here:** the catalogue upsert never refreshed `size_bytes` /
+`source_mtime_ns`, so a re-analysed file kept its old stat forever and tripped
+the integrity verifier on every subsequent run. It now stores the post-processing
+snapshot that `assert_unchanged` just validated.
+
+## D-022: HEIC decodes through the macOS system pipeline
+
+**Status:** Settled
+
+**Context:** The `image` crate cannot decode HEIC, and iPhone libraries are full
+of it. Bundling `libheif` would add a C dependency and a licence to every build.
+
+**Decision:** On macOS, HEIC/HEIF are decoded by `/usr/bin/sips` (ImageIO — the
+same decoder Preview uses), converting *to a copy* in the app's own cache with an
+explicit `--out`, never rewriting the original. The intermediate is deleted
+whether or not decoding succeeded. On other platforms HEIC reports as
+unsupported, which the pipeline already treats as a recoverable per-file failure.
+`sips` is a local system binary, so indexing stays offline.
+
+## D-023: A user's date correction outranks re-analysis
+
+**Status:** Settled
+
+**Context:** `docs/07` requires user-confirmed data to survive model
+reprocessing. The date upsert overwrote `date_estimates` unconditionally, so
+re-analysing a photograph silently discarded the user's correction.
+
+**Decision:** The pipeline's date upsert carries
+`WHERE date_estimates.is_user_confirmed = 0`. `DateRepo::set_user_override`
+records a correction with `is_user_confirmed = 1`; `clear_user_override` hands
+authority back to the estimator. Ranges are validated as `YYYY-MM-DD` and a
+reversed range is ordered rather than rejected, but a malformed date is refused —
+guessing at it would be fabricating a date, which D-006 forbids.
 
 ## New decision template
 

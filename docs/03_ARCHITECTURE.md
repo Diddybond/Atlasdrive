@@ -71,7 +71,7 @@ Use macOS Application Support for generated data.
 Suggested layout:
 
 ```text
-~/Library/Application Support/FamilyArchive/
+~/Library/Application Support/AtlasDrive/
   archive.db
   queue.db
   progress.json
@@ -90,7 +90,7 @@ The `keys/` directory must not contain raw long-term encryption keys. Key materi
 With explicit user permission:
 
 ```text
-/Volumes/Example/.family-archive/
+/Volumes/Example/.atlasdrive/
   drive.json
   index-state.json
 ```

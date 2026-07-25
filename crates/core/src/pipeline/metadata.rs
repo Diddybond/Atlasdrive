@@ -64,15 +64,11 @@ pub fn extract(path: &Path, decoded_dims: Option<(u32, u32)>) -> ImageMetadata {
             exif::Tag::DateTimeDigitized => {
                 md.exif_digitized_date = normalize_exif_date(&val);
             }
-            exif::Tag::PixelXDimension => {
-                if md.width.is_none() {
-                    md.width = field.value.get_uint(0);
-                }
+            exif::Tag::PixelXDimension if md.width.is_none() => {
+                md.width = field.value.get_uint(0);
             }
-            exif::Tag::PixelYDimension => {
-                if md.height.is_none() {
-                    md.height = field.value.get_uint(0);
-                }
+            exif::Tag::PixelYDimension if md.height.is_none() => {
+                md.height = field.value.get_uint(0);
             }
             _ => {}
         }

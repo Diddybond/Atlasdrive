@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 
 // Used by the macOS Keychain backend; unused on the dev fallback platform.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const SERVICE: &str = "com.familyarchive.masterkey";
+const SERVICE: &str = "com.atlasdrive.masterkey";
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const ACCOUNT: &str = "master-v1";
 

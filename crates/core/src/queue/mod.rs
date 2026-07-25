@@ -95,6 +95,45 @@ impl<'a> Queue<'a> {
         Ok(inserted)
     }
 
+    /// Put already-processed items back into the queue because the original on
+    /// disk changed since it was indexed.
+    ///
+    /// [`Queue::enqueue`] is deliberately `INSERT OR IGNORE` on `queue_key`, so
+    /// it cannot revive a `complete` item — that is what makes a plain re-run
+    /// idempotent. An incremental rescan is the one case where an item must be
+    /// reopened, so it gets its own explicit call rather than weakening enqueue.
+    ///
+    /// The recorded size/mtime are refreshed to the newly observed values, and
+    /// any stale lease is dropped so the item cannot be double-claimed.
+    pub fn requeue_changed(
+        &self,
+        drive_id: &str,
+        root_id: &str,
+        files: &[(DiscoveredFile, i64)],
+    ) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut updated = 0usize;
+        {
+            let mut clear_lease = tx.prepare(
+                "DELETE FROM queue_leases WHERE item_id IN
+                   (SELECT id FROM queue_items WHERE queue_key = ?1)",
+            )?;
+            let mut stmt = tx.prepare(
+                "UPDATE queue_items
+                    SET state = 'queued', attempts = 0,
+                        size_bytes = ?2, source_mtime_ns = ?3, enqueued_at = ?4
+                  WHERE queue_key = ?1",
+            )?;
+            for (f, mtime) in files {
+                let key = Self::queue_key(drive_id, root_id, &f.relative_path);
+                clear_lease.execute(params![key])?;
+                updated += stmt.execute(params![key, f.size_bytes as i64, mtime, now_iso8601()])?;
+            }
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// Reclaim items whose lease has expired back to `queued`. Returns count.
     pub fn expire_leases(&self, now_ns: i64) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;

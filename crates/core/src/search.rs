@@ -50,6 +50,26 @@ impl SearchFilters {
     }
 }
 
+/// Weight a confirmed text/metadata hit carries in a fused ranking. Text
+/// matches are evidence about the file; visual similarity is a guess about its
+/// content, so text leads.
+const TEXT_WEIGHT: f32 = 0.6;
+/// Maximum weight visual similarity can add, before scaling by how much of the
+/// query the text encoder actually understood.
+const VISUAL_WEIGHT: f32 = 0.4;
+
+/// A natural-language query already embedded into the visual space.
+#[derive(Debug, Clone, Copy)]
+pub struct VisualQuery<'v> {
+    pub vector: &'v [f32],
+    /// Model partition the vector belongs to; must match the indexed images.
+    pub model_id: &'v str,
+    pub model_version: &'v str,
+    /// Encoder confidence that it understood the query, in [0,1]. Zero disables
+    /// the visual leg entirely.
+    pub coverage: f32,
+}
+
 /// Read-only search over the catalogue.
 pub struct SearchRepo<'a> {
     conn: &'a Connection,
@@ -137,6 +157,59 @@ impl<'a> SearchRepo<'a> {
         Ok(out)
     }
 
+    /// Natural-language search: the text/metadata index and the visual
+    /// embedding space, fused into one ranking.
+    ///
+    /// `visual` is the query embedded by an engine advertising
+    /// [`crate::ai::Capability::TextEmbedding`]. It is optional, and is ignored
+    /// when its `coverage` is zero — a query the encoder did not understand must
+    /// not be allowed to reorder results by what would be noise. In that case
+    /// this degrades to exactly [`SearchRepo::text_search`].
+    pub fn natural_language_search(
+        &self,
+        query: &str,
+        visual: Option<VisualQuery<'_>>,
+        filters: &SearchFilters,
+    ) -> Result<Vec<SearchResult>> {
+        let mut merged: Vec<SearchResult> = self.text_search(query, filters)?;
+        for r in &mut merged {
+            r.score = TEXT_WEIGHT;
+        }
+
+        let Some(visual) = visual.filter(|v| v.coverage > 0.0) else {
+            return Ok(merged);
+        };
+
+        let visual_hits =
+            self.vector_search(visual.vector, visual.model_id, visual.model_version, filters)?;
+        let n = visual_hits.len() as f32;
+        for (i, hit) in visual_hits.into_iter().enumerate() {
+            // Rank position, not raw cosine: these vectors are non-negative, so
+            // cosine values sit in a narrow high band and read as misleadingly
+            // confident. Position within the candidate set is the honest signal.
+            let rank_score = if n <= 1.0 { 1.0 } else { 1.0 - (i as f32) / n };
+            let contribution = VISUAL_WEIGHT * visual.coverage * rank_score;
+            match merged.iter_mut().find(|r| r.file_id == hit.file_id) {
+                Some(existing) => {
+                    existing.matched.push("visual".into());
+                    existing.score += contribution;
+                }
+                None => {
+                    let mut hit = hit;
+                    hit.score = contribution;
+                    merged.push(hit);
+                }
+            }
+        }
+
+        for r in &mut merged {
+            r.score = r.score.clamp(0.0, 1.0);
+        }
+        merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        merged.truncate(filters.limit_or(100));
+        Ok(merged)
+    }
+
     /// Similar-image search from an already-indexed file.
     pub fn similar_to(
         &self,
@@ -203,6 +276,43 @@ impl<'a> SearchRepo<'a> {
     }
 }
 
+/// Resolve a catalogued file back to its original on disk, if the drive is
+/// currently connected.
+///
+/// Returns `Ok(None)` when the drive is offline or the original is simply not
+/// there — that is an ordinary state for this product, not an error. Uses the
+/// same resolution order as the integrity verifier (recorded scan root first,
+/// then a conventional `/Volumes/<name>` mount), so "the verifier can see it"
+/// and "Reveal in Finder works" never disagree.
+pub fn resolve_original(conn: &Connection, file_id: &str) -> Result<Option<std::path::PathBuf>> {
+    let row = conn.query_row(
+        "SELECT f.relative_path, d.volume_name,
+                (SELECT sr.scan_root FROM scan_runs sr
+                  WHERE sr.drive_id = f.drive_id AND sr.mode <> 'dry-run'
+                  ORDER BY sr.started_at DESC LIMIT 1)
+           FROM files f JOIN drives d ON d.id = f.drive_id
+          WHERE f.id = ?1",
+        [file_id],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        },
+    );
+    let (rel, volume_name, scan_root) = match row {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let candidates = [
+        scan_root.map(|root| std::path::Path::new(&root).join(&rel)),
+        volume_name.map(|vol| std::path::Path::new("/Volumes").join(&vol).join(&rel)),
+    ];
+    Ok(candidates.into_iter().flatten().find(|p| p.exists()))
+}
+
 fn passes_filters(res: &SearchResult, filters: &SearchFilters) -> bool {
     if let Some(dn) = filters.drive_number {
         if res.drive_number != dn {
@@ -259,9 +369,60 @@ mod tests {
 
     #[test]
     fn vector_roundtrip() {
-        let v = vec![1.0f32, -2.5, 0.0, 3.14];
+        let v = vec![1.0f32, -2.5, 0.0, 3.25];
         let blob = encode_vector(&v);
         assert_eq!(decode_vector(&blob), v);
+    }
+
+    /// Reveal-in-Finder must resolve a real original when the drive is
+    /// connected, and must resolve to nothing once it is not.
+    #[test]
+    fn resolve_original_follows_the_drive_online_and_offline() {
+        use crate::db::{self, SchemaKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let volume = dir.path().join("Volumes/TestVol");
+        std::fs::create_dir_all(volume.join("holiday")).unwrap();
+        let original = volume.join("holiday/beach.png");
+        std::fs::write(&original, b"not really a png").unwrap();
+
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute(
+            "INSERT INTO drives(id, drive_number, volume_name, status, first_seen_at)
+             VALUES ('d1', 14, 'TestVol', 'online', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO roots(id, drive_id, relative_root, created_at)
+             VALUES ('r1','d1','','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, drive_id, root_id, relative_path, filename, size_bytes,
+                               source_mtime_ns, status, created_at, updated_at)
+             VALUES ('f1','d1','r1','holiday/beach.png','beach.png',1,1,'complete',
+                     '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scan_runs(id, drive_id, drive_number, scan_root, mode, started_at)
+             VALUES ('run1','d1',14,?1,'initial','2026-01-01T00:00:00Z')",
+            [volume.to_string_lossy()],
+        )
+        .unwrap();
+
+        let found = resolve_original(&conn, "f1").unwrap();
+        assert_eq!(found.as_deref(), Some(original.as_path()));
+
+        // Drive disconnected: the volume is gone, so there is nothing to reveal.
+        std::fs::remove_dir_all(dir.path().join("Volumes")).unwrap();
+        assert!(resolve_original(&conn, "f1").unwrap().is_none());
+
+        // An unknown file is not an error either.
+        assert!(resolve_original(&conn, "nope").unwrap().is_none());
     }
 
     #[test]

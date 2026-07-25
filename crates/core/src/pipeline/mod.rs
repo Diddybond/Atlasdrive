@@ -11,6 +11,7 @@
 //! The loop is idempotent: re-running never creates duplicate catalogue rows or
 //! unnecessary duplicate thumbnails.
 
+pub mod decode;
 pub mod metadata;
 pub mod phash;
 pub mod thumbnail;
@@ -84,6 +85,27 @@ pub struct IndexSummary {
     pub dry_run: bool,
     pub halted: bool,
     pub halt_reason: Option<String>,
+    /// Previously-indexed files whose original changed on disk and were
+    /// re-queued for analysis.
+    pub files_changed: u64,
+    /// Previously-indexed files no longer present under the scan root, marked
+    /// `missing` in the catalogue.
+    pub files_missing: u64,
+}
+
+/// What an incremental rescan found when comparing disk against the catalogue.
+#[derive(Debug, Default)]
+struct Rescan {
+    /// Files whose original changed since indexing, to be re-analysed.
+    changed: Vec<(scan::DiscoveredFile, i64)>,
+    /// Count of files marked `missing`.
+    missing: u64,
+}
+
+impl Rescan {
+    fn changed_count(&self) -> u64 {
+        self.changed.len() as u64
+    }
 }
 
 /// Everything the pipeline needs to run.
@@ -177,8 +199,23 @@ impl<'a> Pipeline<'a> {
                 (f.clone(), mtime)
             })
             .collect();
+        let mut rescan = Rescan::default();
         if !dry_run {
             q.enqueue(&run_id, &drive.id, opts.drive_number, &root_id, &with_mtime)?;
+
+            // Incremental rescan: reconcile the catalogue with what is on disk
+            // now. Purely a catalogue operation — originals are only stat'ed.
+            rescan = self.reconcile_rescan(&drive.id, &root_id, &with_mtime)?;
+            if !rescan.changed.is_empty() {
+                q.requeue_changed(&drive.id, &root_id, &rescan.changed)?;
+            }
+            if rescan.changed_count() > 0 || rescan.missing > 0 {
+                logger
+                    .info("rescan_reconciled")
+                    .field("changed", rescan.changed_count())
+                    .field("missing", rescan.missing)
+                    .emit_best_effort();
+            }
         }
 
         let mut progress = Progress::new(&run_id, opts.drive_number, &drive.id, &opts.path.to_string_lossy());
@@ -205,6 +242,8 @@ impl<'a> Pipeline<'a> {
             dry_run,
             halted: false,
             halt_reason: None,
+            files_changed: rescan.changed_count(),
+            files_missing: rescan.missing,
         };
 
         let mut consecutive_verifier_failures = 0u32;
@@ -436,10 +475,9 @@ impl<'a> Pipeline<'a> {
         let snap = SourceSnapshot::capture(&abs)?;
 
         // 2. Decode read-only. Unsupported/broken decode is a recoverable error.
+        //    HEIC/HEIF go through the macOS system decoder (see `decode`).
         let _ro = integrity::open_readonly(&abs)?; // prove read-only open works
-        let decoded = image::open(&abs)
-            .map_err(|e| Error::Other(format!("decode failed: {e}")))?;
-        let rgb = decoded.to_rgb8();
+        let rgb = decode::open_rgb(&abs, &self.paths.cache_dir().join("decode"))?;
         let (w, h) = (rgb.width(), rgb.height());
 
         // 3. Content + perceptual hashes.
@@ -569,6 +607,15 @@ impl<'a> Pipeline<'a> {
              ON CONFLICT(drive_id, root_id, relative_path) DO UPDATE SET
                 content_hash=excluded.content_hash,
                 perceptual_hash=excluded.perceptual_hash,
+                -- Refresh the recorded source stat. `snap` is the post-processing
+                -- snapshot that `assert_unchanged` just validated, so this is what
+                -- we genuinely last observed. Leaving these stale would strand a
+                -- re-analysed file permanently mismatched against its own original
+                -- and trip the integrity verifier on every later run.
+                size_bytes=excluded.size_bytes,
+                source_mtime_ns=excluded.source_mtime_ns,
+                source_birthtime_ns=excluded.source_birthtime_ns,
+                inode_or_file_id=excluded.inode_or_file_id,
                 status='complete', analysis_version=1, updated_at=excluded.updated_at,
                 last_verified_at=excluded.last_verified_at",
             params![
@@ -649,7 +696,11 @@ impl<'a> Pipeline<'a> {
              ON CONFLICT(file_id) DO UPDATE SET
                 earliest_date=excluded.earliest_date, latest_date=excluded.latest_date,
                 confidence=excluded.confidence, method_version=excluded.method_version,
-                evidence_json=excluded.evidence_json, updated_at=excluded.updated_at",
+                evidence_json=excluded.evidence_json, updated_at=excluded.updated_at
+             -- A date the user corrected outranks anything a model infers, and
+             -- re-analysis must never silently take it back (docs/07: user
+             -- confirmations are never removed by model reprocessing).
+             WHERE date_estimates.is_user_confirmed = 0",
             params![
                 file_id, date_est.earliest_date, date_est.latest_date, date_est.confidence,
                 date_est.method_version, serde_json::to_string(&date_est.evidence)?,
@@ -751,6 +802,8 @@ impl<'a> Pipeline<'a> {
             dry_run: false,
             halted: false,
             halt_reason: None,
+            files_changed: 0,
+            files_missing: 0,
         })
     }
 
@@ -773,9 +826,93 @@ impl<'a> Pipeline<'a> {
             files_failed: 0,
             batches: 0,
             dry_run: false,
+            files_changed: 0,
+            files_missing: 0,
             halted: false,
             halt_reason: None,
         })
+    }
+
+    /// Reconcile the catalogue against what the scan just found.
+    ///
+    /// Two independent facts change between scans: a file's bytes can change,
+    /// and a file can go away. Both are recorded against the catalogue only —
+    /// nothing on the drive is opened, written or removed here, just `stat`ed.
+    ///
+    /// A file is "changed" when its recorded size or modification time no
+    /// longer matches the original. Note this is the *inverse* use of the same
+    /// comparison the integrity gate makes: during a run, a mismatch means we
+    /// corrupted something and must halt; between runs, a mismatch means the
+    /// user edited or replaced the photograph and we should re-analyse it.
+    fn reconcile_rescan(
+        &self,
+        drive_id: &str,
+        root_id: &str,
+        discovered: &[(scan::DiscoveredFile, i64)],
+    ) -> Result<Rescan> {
+        use std::collections::HashMap;
+
+        // What the catalogue currently believes about this root.
+        let mut known: HashMap<String, (i64, i64, String)> = HashMap::new();
+        {
+            let mut stmt = self.archive.prepare(
+                "SELECT relative_path, size_bytes, source_mtime_ns, status
+                   FROM files WHERE drive_id = ?1 AND root_id = ?2",
+            )?;
+            let rows = stmt.query_map(params![drive_id, root_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (rel, size, mtime, status) = row?;
+                known.insert(rel, (size, mtime, status));
+            }
+        }
+
+        let mut out = Rescan::default();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        for (file, mtime) in discovered {
+            seen.insert(file.relative_path.as_str());
+            let Some((known_size, known_mtime, status)) = known.get(&file.relative_path) else {
+                continue; // brand new: ordinary enqueue already covers it
+            };
+            // Only files we finished are candidates for re-analysis; queued or
+            // failed ones are already going to be processed.
+            if status != "complete" && status != "missing" {
+                continue;
+            }
+            let changed = *known_size != file.size_bytes as i64 || *known_mtime != *mtime;
+            if changed || status == "missing" {
+                // 'changed' here is a catalogue state, not a safety alarm: the
+                // file is re-analysed and returns to 'complete'.
+                self.archive.execute(
+                    "UPDATE files SET status='changed', updated_at=?3
+                      WHERE drive_id=?1 AND relative_path=?2",
+                    params![drive_id, file.relative_path, now_iso8601()],
+                )?;
+                out.changed.push((file.clone(), *mtime));
+            }
+        }
+
+        // Anything the catalogue knows that the scan did not find is gone.
+        for (rel, (_, _, status)) in &known {
+            if seen.contains(rel.as_str()) || status == "missing" {
+                continue;
+            }
+            self.archive.execute(
+                "UPDATE files SET status='missing', updated_at=?3
+                  WHERE drive_id=?1 AND relative_path=?2",
+                params![drive_id, rel, now_iso8601()],
+            )?;
+            out.missing += 1;
+        }
+
+        Ok(out)
     }
 
     fn start_run(&self, drive_id: &str, opts: &IndexOptions, dry_run: bool) -> Result<String> {

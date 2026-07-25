@@ -5,10 +5,10 @@ use std::path::Path;
 use std::process::Command;
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_family-archive")
+    env!("CARGO_BIN_EXE_atlasdrive")
 }
 fn verify_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_family-archive-verify")
+    env!("CARGO_BIN_EXE_atlasdrive-verify")
 }
 
 fn write_png(path: &Path, color: [u8; 3]) {

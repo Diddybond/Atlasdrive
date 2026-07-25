@@ -5,10 +5,10 @@
 - Roadmap item: Phases 0–3, 5–7 (foundation, drive identity, safe scanner/queue,
   base image processing, verifier, visual/face/date intelligence)
 - Definition-of-done points earned: A(4) B(8) C(11) D(11) E(11) H(11) I(6) partial G
-- Commit: "Implement Family Archive core service layer (Rust)"
+- Commit: "Implement AtlasDrive core service layer (Rust)"
 - Tests: 64 lib tests (integrity, queue, drive, scan, crypto, ai, pipeline,
   verifier, dates, faces, search, migrations) — all pass
-- Verifier evidence: `family-archive-verify` runs 12 checks, exits 0 on clean
+- Verifier evidence: `atlasdrive-verify` runs 12 checks, exits 0 on clean
   catalogue and non-zero on a corrupt thumbnail
 - Notes: safety-first per spec priority order; deterministic offline AI engine
 

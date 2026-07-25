@@ -9,9 +9,26 @@ export function DrivesScreen() {
   const [path, setPath] = useState("");
   const [writeManifest, setWriteManifest] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
 
   async function load() {
     setDrives(await api.listDrives());
+  }
+
+  async function saveDetails(e: React.FormEvent<HTMLFormElement>, drive: Drive) {
+    e.preventDefault();
+    const form = new FormData(e.currentTarget);
+    const categories = String(form.get("categories") ?? "")
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean);
+    await api.updateDriveDetails({
+      driveNumber: drive.drive_number,
+      physicalLocation: String(form.get("location") ?? ""),
+      categories,
+    });
+    setEditing(null);
+    await load();
   }
   useEffect(() => {
     void load();
@@ -64,11 +81,11 @@ export function DrivesScreen() {
           </label>
           <label>
             Friendly name
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Family Archive A" />
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. AtlasDrive A" />
           </label>
           <label>
             Drive location on this Mac
-            <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/Volumes/FamilyArchiveA" />
+            <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/Volumes/AtlasDriveA" />
           </label>
           <label className="checkbox">
             <input type="checkbox" checked={writeManifest} onChange={(e) => setWriteManifest(e.target.checked)} />
@@ -93,9 +110,45 @@ export function DrivesScreen() {
                 {d.image_count != null && <> · {d.image_count.toLocaleString()} photographs</>}
                 {d.physical_location && <> · {d.physical_location}</>}
               </p>
+              {d.categories && d.categories.length > 0 && (
+                <p className="drive-meta subtle">What's on it: {d.categories.join(", ")}</p>
+              )}
               <p className="drive-meta subtle">
                 Last scanned: {d.last_scan_at ?? "never"}
               </p>
+
+              {editing === d.id ? (
+                <form className="form drive-edit" onSubmit={(e) => void saveDetails(e, d)}>
+                  <label>
+                    Where this drive is kept
+                    <input
+                      name="location"
+                      defaultValue={d.physical_location ?? ""}
+                      placeholder="Drawer 2, studio shelf B…"
+                    />
+                  </label>
+                  <label>
+                    What's on it (comma separated)
+                    <input
+                      name="categories"
+                      defaultValue={(d.categories ?? []).join(", ")}
+                      placeholder="holidays, scanned prints"
+                    />
+                  </label>
+                  <button type="submit">Save</button>
+                  <button type="button" className="ghost" onClick={() => setEditing(null)}>
+                    Cancel
+                  </button>
+                </form>
+              ) : (
+                <button
+                  className="ghost"
+                  onClick={() => setEditing(d.id)}
+                  aria-label={`Edit location and categories for Drive ${d.drive_number}`}
+                >
+                  Edit location &amp; categories
+                </button>
+              )}
             </div>
           </li>
         ))}

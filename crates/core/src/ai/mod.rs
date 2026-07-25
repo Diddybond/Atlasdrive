@@ -21,6 +21,7 @@
 //!     through long operations; the pipeline supplies queuing/resume.
 
 pub mod local;
+pub mod text;
 pub mod types;
 
 pub use types::*;
@@ -54,6 +55,8 @@ impl CancelToken {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
     VisualEmbedding,
+    /// Embedding a natural-language query into the *visual* embedding space.
+    TextEmbedding,
     FaceDetection,
     FaceEmbedding,
     Ocr,
@@ -79,6 +82,18 @@ pub trait AiEngine: Send + Sync {
 
     fn visual_embedding(&self, _img: &RgbImage, _cancel: &CancelToken) -> Result<Provenanced<Embedding>> {
         Err(unsupported("visual_embedding"))
+    }
+    /// Embed a natural-language query into the *same* space as
+    /// [`AiEngine::visual_embedding`], so `vector_search` can compare the two
+    /// directly. An engine offering this capability must guarantee the two
+    /// vectors share a dimension and a `model_id`/`model_version` partition;
+    /// otherwise embedding spaces would silently mix.
+    ///
+    /// [`AiMeta::confidence`] reports how much of the query the encoder actually
+    /// understood, so a caller can decline to rank by vision when the answer
+    /// would be meaningless.
+    fn text_embedding(&self, _text: &str, _cancel: &CancelToken) -> Result<Provenanced<Embedding>> {
+        Err(unsupported("text_embedding"))
     }
     fn detect_faces(&self, _img: &RgbImage, _cancel: &CancelToken) -> Result<Provenanced<Vec<FaceDetection>>> {
         Err(unsupported("detect_faces"))

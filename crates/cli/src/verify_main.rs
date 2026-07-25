@@ -1,4 +1,4 @@
-//! `family-archive-verify` — the real, standalone verifier binary.
+//! `atlasdrive-verify` — the real, standalone verifier binary.
 //!
 //! This is an executable that exits non-zero on failure (see
 //! `docs/13_TESTING_AND_VERIFIER.md`). It is intentionally a separate binary
@@ -15,7 +15,7 @@ use family_archive_core::crypto::keystore;
 use family_archive_core::{db, verifier};
 
 #[derive(Parser)]
-#[command(name = "family-archive-verify", version, about = "Independent Family Archive verifier.")]
+#[command(name = "atlasdrive-verify", version, about = "Independent AtlasDrive verifier.")]
 struct Args {
     /// Application-support data directory (defaults to the OS location).
     #[arg(long)]

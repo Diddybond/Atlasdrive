@@ -1,4 +1,4 @@
-# Coding Agent Instructions: Family Archive
+# Coding Agent Instructions: AtlasDrive
 
 This file applies to Codex, Claude Code and similar repository coding agents.
 

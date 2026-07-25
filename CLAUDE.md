@@ -1,4 +1,4 @@
-# Claude Code Instructions: Family Archive
+# Claude Code Instructions: AtlasDrive
 
 Read all files in `docs/` before making architectural changes.
 

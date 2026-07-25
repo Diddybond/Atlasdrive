@@ -1,15 +1,34 @@
+/* AtlasDrive palette — see docs/BRAND.md. Brand colours are defined once here
+   and everything else refers to them through a role token, so a palette change
+   never means hunting for hex codes in components. */
 :root {
-  --bg: #f6f5f2;
-  --panel: #ffffff;
-  --ink: #1d1d1f;
-  --ink-soft: #55555c;
-  --line: #e2e0da;
-  --accent: #3a5a9b;
-  --accent-ink: #ffffff;
+  --atlas-graphite: #161b22;
+  --atlas-slate: #252c35;
+  --atlas-blue: #3da9fc;
+  --atlas-amber: #f5a623;
+  --atlas-map-white: #f4f6f8;
+  --atlas-clear-white: #f7f9fb;
+  --atlas-steel: #9aa6b2;
+  /* Derived for contrast only: Navigation Blue and Location Amber are ~2.4:1
+     on white and fail WCAG AA as text. */
+  --atlas-blue-deep: #0a63a8;
+  --atlas-amber-deep: #8a5a00;
+
+  /* Role tokens — light mode. */
+  --bg: var(--atlas-map-white);
+  --panel: var(--atlas-clear-white);
+  --ink: var(--atlas-graphite);
+  --ink-soft: #55606b;
+  --line: #dbe1e8;
+  --accent: var(--atlas-blue);
+  /* Graphite on Navigation Blue is 8.2:1; white would be 2.4:1. */
+  --accent-ink: var(--atlas-graphite);
+  --link: var(--atlas-blue-deep);
+  --focus: var(--atlas-blue-deep);
   --ok: #1f7a4d;
-  --warn: #8a5a00;
+  --warn: var(--atlas-amber-deep);
   --fail: #a3282b;
-  --offline: #8a5a00;
+  --offline: var(--atlas-amber-deep);
   --radius: 12px;
   --gap: 16px;
   font-size: 16px;
@@ -17,13 +36,19 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1a1a1c;
-    --panel: #242427;
-    --ink: #f2f2f4;
-    --ink-soft: #b3b3ba;
-    --line: #34343a;
-    --accent: #7aa0e0;
-    --accent-ink: #10131a;
+    --bg: var(--atlas-graphite);
+    --panel: var(--atlas-slate);
+    --ink: var(--atlas-clear-white);
+    --ink-soft: var(--atlas-steel);
+    --line: #333c47;
+    --accent: var(--atlas-blue);
+    --accent-ink: var(--atlas-graphite);
+    --link: var(--atlas-blue);
+    --focus: var(--atlas-blue);
+    --ok: #4cc38a;
+    --warn: var(--atlas-amber);
+    --fail: #ff6b6b;
+    --offline: var(--atlas-amber);
   }
 }
 
@@ -49,12 +74,12 @@ button {
 }
 button:hover:not(:disabled) { filter: brightness(1.08); }
 button:disabled { opacity: 0.5; cursor: default; }
-button.ghost { background: transparent; color: var(--accent); }
-button.ghost:hover:not(:disabled) { background: rgba(58, 90, 155, 0.08); }
+button.ghost { background: transparent; color: var(--link); }
+button.ghost:hover:not(:disabled) { background: rgba(61, 169, 252, 0.12); }
 
 /* Clear keyboard focus for accessibility. */
 :focus-visible {
-  outline: 3px solid var(--accent);
+  outline: 3px solid var(--focus);
   outline-offset: 2px;
 }
 
@@ -78,9 +103,11 @@ input[type="text"], input[type="search"], input:not([type]) {
   flex-direction: column;
   gap: 8px;
 }
-.brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 16px; }
-.brand-mark { color: var(--accent); font-size: 20px; }
-.brand-name { font-weight: 700; font-size: 1.05rem; }
+.brand { display: flex; align-items: center; gap: 11px; padding: 6px 8px 18px; }
+.brand-mark { flex: none; width: 36px; height: 36px; }
+.brand-text { display: flex; flex-direction: column; line-height: 1.25; }
+.brand-name { font-weight: 700; font-size: 1.05rem; letter-spacing: -0.01em; }
+.brand-tagline { font-size: 0.76rem; color: var(--ink-soft); }
 .sidebar ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .nav-item {
   width: 100%;
@@ -93,7 +120,7 @@ input[type="text"], input[type="search"], input:not([type]) {
   display: flex;
   flex-direction: column;
 }
-.nav-item:hover { background: rgba(58, 90, 155, 0.08); }
+.nav-item:hover { background: rgba(61, 169, 252, 0.12); }
 .nav-item.active { background: var(--accent); color: var(--accent-ink); }
 .nav-label { font-weight: 600; }
 .nav-hint { font-size: 0.8rem; opacity: 0.8; }
@@ -101,8 +128,8 @@ input[type="text"], input[type="search"], input:not([type]) {
   margin-top: auto;
   font-size: 0.8rem;
   color: var(--ink-soft);
-  background: rgba(138, 90, 0, 0.1);
-  border: 1px solid rgba(138, 90, 0, 0.25);
+  background: rgba(245, 166, 35, 0.12);
+  border: 1px solid rgba(245, 166, 35, 0.35);
   padding: 10px;
   border-radius: 10px;
 }
@@ -113,6 +140,7 @@ h2 { font-size: 1.15rem; margin: 0 0 12px; }
 .lede { color: var(--ink-soft); max-width: 60ch; margin: 0 0 24px; }
 .footnote { color: var(--ink-soft); font-size: 0.85rem; margin-top: 20px; max-width: 62ch; }
 .empty { color: var(--ink-soft); padding: 24px 0; }
+.search-note { color: var(--ink-soft); font-size: 0.9rem; margin: 12px 0 0; max-width: 62ch; }
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 
 .search-bar { display: flex; gap: 10px; margin-bottom: 12px; }
@@ -136,7 +164,7 @@ h2 { font-size: 1.15rem; margin: 0 0 12px; }
   display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--gap);
 }
 .result-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; display: flex; flex-direction: column; }
-.thumb { aspect-ratio: 4 / 3; background: linear-gradient(135deg, #d9d9e2, #c3c3d0); display: grid; place-items: center; }
+.thumb { aspect-ratio: 4 / 3; background: linear-gradient(135deg, var(--atlas-steel), #7d8894); display: grid; place-items: center; }
 .thumb-mark { font-size: 2rem; }
 .result-body { padding: 12px 14px; }
 .result-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }

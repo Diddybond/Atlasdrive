@@ -1,6 +1,6 @@
 [package]
 name = "family-archive-cli"
-description = "Command-line interface and verifier for Family Archive."
+description = "Command-line interface and verifier for AtlasDrive."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,11 @@ authors.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "family-archive"
+name = "atlasdrive"
 path = "src/main.rs"
 
 [[bin]]
-name = "family-archive-verify"
+name = "atlasdrive-verify"
 path = "src/verify_main.rs"
 
 [dependencies]

@@ -1,12 +1,18 @@
-# Family Archive
+# AtlasDrive
+
+> **A private atlas of every photograph you own.**
 
 A private, local-first macOS application for finding photographs scattered across numbered external drives.
 
-The application scans approved drives without modifying original files, keeps searchable thumbnails and visual metadata on the Mac, and tells the user which physical drive contains each photograph even while that drive is disconnected.
+AtlasDrive turns a shelf of external drives into one searchable atlas of your family's photographs. It reads each drive once, builds a local catalogue of what it found, and leaves every original exactly as it was. Search by what a photo shows, who is in it, or roughly when it was taken — and keep searching when the drive is sitting in a drawer, unplugged.
 
-## Working product name
+## Product name
 
-**Family Archive** is the project name. **Drive Atlas** is the current working app name. The name is not a settled product decision and may be changed without affecting architecture.
+**AtlasDrive** (one word) is settled — see [D-020](docs/16_DECISIONS.md). Brand
+voice, palette and approved copy live in [`docs/BRAND.md`](docs/BRAND.md).
+
+The internal Rust crates are still named `family-archive-*`; that is a cosmetic
+leftover, not a second product name.
 
 ## Core promise
 

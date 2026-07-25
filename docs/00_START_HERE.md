@@ -2,7 +2,7 @@
 
 ## Product summary
 
-Family Archive is a local macOS photo catalogue for people with photographs spread across many external hard drives.
+AtlasDrive is a local macOS photo catalogue for people with photographs spread across many external hard drives.
 
 A user can label a physical drive with a number such as **Drive 14**, scan it once, disconnect it, and still search its photographs from the Mac. Search results show thumbnails, likely people, subjects, dates, folders and the numbered drive that contains the original.
 

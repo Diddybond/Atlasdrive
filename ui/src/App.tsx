@@ -23,8 +23,11 @@ export function App() {
     <div className="app">
       <nav className="sidebar" aria-label="Main sections">
         <div className="brand">
-          <span className="brand-mark" aria-hidden>◆</span>
-          <span className="brand-name">Family Archive</span>
+          <img className="brand-mark" src="./atlasdrive-mark.png" alt="" width={36} height={36} />
+          <span className="brand-text">
+            <span className="brand-name">AtlasDrive</span>
+            <span className="brand-tagline">Your photographs, mapped</span>
+          </span>
         </div>
         <ul>
           {NAV.map((item) => (
