@@ -127,6 +127,13 @@ pub struct GalleryFace {
     pub cluster_status: Option<String>,
     /// How many faces are grouped with this one.
     pub group_size: i64,
+    /// Which drive this face was found on.
+    ///
+    /// Carried on every face because a wall of unnamed faces from twenty drives
+    /// is not reviewable: "who is this?" is a much easier question when you
+    /// know it came off the 2019 weddings disk.
+    pub drive_number: i64,
+    pub drive_name: Option<String>,
 }
 
 /// A face the app believes is a named person, awaiting a yes or no.
@@ -299,23 +306,43 @@ impl<'a> FaceRepo<'a> {
     ///
     /// Ordering by quality matters — the clearest face of a person is the one
     /// you can actually recognise, and it is what should represent the group.
+    /// Faces to browse, best first.
+    ///
+    /// `drive_number` restricts to one drive. Reviewing a single disk at a time
+    /// is how the archive is built — one plugged in, indexed, unplugged — and
+    /// it is also the only way a face wall stays comprehensible once there are
+    /// thousands of faces from twenty disks in it.
     pub fn gallery(&self, limit: usize) -> Result<Vec<GalleryFace>> {
-        let mut stmt = self.conn.prepare(
+        self.gallery_on_drive(limit, None)
+    }
+
+    pub fn gallery_on_drive(
+        &self,
+        limit: usize,
+        drive_number: Option<i64>,
+    ) -> Result<Vec<GalleryFace>> {
+        let mut sql = String::from(
             "SELECT f.id, f.cluster_id, f.quality, f.file_id,
                     p.display_name, c.status,
-                    (SELECT count(*) FROM faces sib WHERE sib.cluster_id = f.cluster_id)
+                    (SELECT count(*) FROM faces sib WHERE sib.cluster_id = f.cluster_id),
+                    d.drive_number, d.friendly_name
                FROM faces f
                JOIN face_thumbnails ft ON ft.face_id = f.id
+               JOIN files fi ON fi.id = f.file_id
+               JOIN drives d ON d.id = fi.drive_id
                LEFT JOIN face_clusters c ON c.id = f.cluster_id
                LEFT JOIN people p       ON p.id = c.person_id
               WHERE f.is_false_detection = 0 AND f.is_ignored = 0
                 AND (c.status IS NULL OR c.status <> 'rejected')
                 -- Proposals live in the review queue, not the gallery: a guess
                 -- must never look like a name the user gave.
-                AND (c.person_id IS NULL OR c.status = 'confirmed')
-              ORDER BY f.quality DESC
-              LIMIT ?1",
-        )?;
+                AND (c.person_id IS NULL OR c.status = 'confirmed')",
+        );
+        if let Some(n) = drive_number {
+            sql.push_str(&format!(" AND d.drive_number = {n}"));
+        }
+        sql.push_str(" ORDER BY f.quality DESC LIMIT ?1");
+        let mut stmt = self.conn.prepare(&sql)?;
         let out = stmt
             .query_map([limit as i64], |r| {
                 Ok(GalleryFace {
@@ -326,6 +353,8 @@ impl<'a> FaceRepo<'a> {
                     person_name: r.get(4)?,
                     cluster_status: r.get(5)?,
                     group_size: r.get::<_, Option<i64>>(6)?.unwrap_or(1),
+                    drive_number: r.get(7)?,
+                    drive_name: r.get(8)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

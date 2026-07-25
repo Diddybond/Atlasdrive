@@ -238,6 +238,8 @@ export interface GalleryFace {
   person_name?: string | null;
   cluster_status?: string | null;
   group_size: number;
+  drive_number: number;
+  drive_name?: string | null;
 }
 
 export interface TagCount {
@@ -361,7 +363,8 @@ export const api = {
   tagFaceCluster: (clusterId: string, name: string) =>
     call<{ id: string; display_name: string }>("tag_face_cluster", { clusterId, name }),
   listPeople: () => call<NamedPerson[]>("list_people"),
-  faceGallery: (limit?: number) => call<GalleryFace[]>("face_gallery", { limit }),
+  faceGallery: (limit?: number, driveNumber?: number) =>
+    call<GalleryFace[]>("face_gallery", { limit, driveNumber }),
   faceThumbnail: (faceId: string) => call<string | null>("face_thumbnail", { faceId }),
   tagFace: (faceId: string, name: string) =>
     call<{ person: { id: string; display_name: string }; suggested: number }>("tag_face", {
@@ -428,9 +431,9 @@ function mockFaceImage(seed: number): string {
 }
 
 const mockGallery: GalleryFace[] = [
-  { face_id: "fa-1", cluster_id: "c-a1b2c3", file_id: "f1", quality: 0.9, group_size: 34 },
-  { face_id: "fa-2", cluster_id: "c-d4e5f6", file_id: "f2", quality: 0.8, group_size: 12 },
-  { face_id: "fa-3", cluster_id: null, file_id: "f3", quality: 0.7, group_size: 1 },
+  { face_id: "fa-1", cluster_id: "c-a1b2c3", file_id: "f1", quality: 0.9, group_size: 34, drive_number: 14, drive_name: "AtlasDrive A" },
+  { face_id: "fa-2", cluster_id: "c-d4e5f6", file_id: "f2", quality: 0.8, group_size: 12, drive_number: 7, drive_name: "Holidays 2004-2011" },
+  { face_id: "fa-3", cluster_id: null, file_id: "f3", quality: 0.7, group_size: 1, drive_number: 14, drive_name: "AtlasDrive A" },
 ];
 
 const mockClusters: ClusterSummary[] = [
@@ -602,8 +605,12 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       person.confirmed_faces += cluster ? cluster.face_count : 0;
       return Promise.resolve(person as unknown as T);
     }
-    case "face_gallery":
-      return Promise.resolve(mockGallery as unknown as T);
+    case "face_gallery": {
+      const only = args?.driveNumber as number | undefined;
+      return Promise.resolve(
+        (only ? mockGallery.filter((f) => f.drive_number === only) : mockGallery) as unknown as T,
+      );
+    }
     case "face_thumbnail": {
       const idx = mockGallery.findIndex((f) => f.face_id === args?.faceId);
       return Promise.resolve((idx >= 0 ? mockFaceImage(idx + 1) : null) as unknown as T);

@@ -389,6 +389,21 @@ h2 {
   .live-dot, .feed li:first-child { animation: none; }
 }
 
+/* Which drive a face wall is showing. Sits above the grid because it changes
+   what the heading below it counts. */
+.drive-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 20px 0 4px; }
+.filter-label { color: var(--ink-soft); font-size: 0.86rem; margin-right: 2px; }
+.chip-count { opacity: 0.7; font-size: 0.78rem; margin-left: 2px; }
+/* Which drive a face lives on, and the way to open it there. Deliberately a
+   separate control from naming: opening Finder and answering "who is this?"
+   are different intentions and must not share one click target. */
+.face-reveal {
+  display: block; width: 100%; margin-top: 4px;
+  background: transparent; border: none; color: var(--link);
+  font-size: 0.72rem; padding: 2px; border-radius: 6px; cursor: pointer;
+}
+.face-reveal:hover { background: rgba(61, 169, 252, 0.14); }
+
 .now-doing { margin: 10px 0 0; font-size: 0.85rem; color: var(--ink-soft); }
 .now-doing .filename {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

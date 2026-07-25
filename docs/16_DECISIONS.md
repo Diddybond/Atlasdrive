@@ -1396,3 +1396,27 @@ does.
 The newest feed row fades in on opacity alone. An earlier version slid in on a
 transform and was caught mid-animation on nearly every poll, which read as a
 clipped, broken row. A live display must never look broken at rest.
+
+## D-054: A face knows which drive it came from
+
+**Status:** settled.
+
+**Context.** The face wall showed 175 unnamed faces with nothing to say where
+any of them came from — and that was with one drive indexed. At twenty it is not
+a review queue, it is a haystack.
+
+**Decision.** Every `GalleryFace` carries its drive number and name, and the
+gallery can be restricted to one drive. Reviewing a single disk at a time
+matches how the archive is built — one plugged in, indexed, unplugged — and
+"who is this?" is a far easier question when the answer is bounded by "this came
+off the 2019 weddings drive".
+
+The filter offers only drives that actually have faces, counted from an
+unfiltered read so the list does not collapse to whatever is currently selected.
+
+**Opening the original.** Each face also carries a control that reveals its
+source photograph in Finder. Deliberately a *separate* control from the face
+itself: opening a folder and answering "who is this?" are different intentions,
+and one click target serving both would make each of them worse. The existing
+`reveal_in_finder` already refuses gracefully when the drive is not connected,
+which is the common case for a face found on a disk now sitting on a shelf.

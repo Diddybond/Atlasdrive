@@ -11,6 +11,13 @@ import { api, ExportSummary, GalleryFace, NamedPerson, PersonFolder, SuggestedFa
 ///   2. Faces that might be someone — guesses, asked as questions.
 ///   3. Faces nobody has claimed — the gallery to browse and name.
 export function ReviewScreen() {
+  // Which drive's faces to show. A wall of unnamed faces from twenty disks is
+  // not reviewable; "who is this?" is a far easier question when you know the
+  // photograph came off the 2019 weddings drive.
+  const [driveFilter, setDriveFilter] = useState<number | null>(null);
+  const [drives, setDrives] = useState<{ number: number; name: string; faces: number }[]>([]);
+  const [revealNote, setRevealNote] = useState<string | null>(null);
+
   const [faces, setFaces] = useState<GalleryFace[]>([]);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [people, setPeople] = useState<NamedPerson[]>([]);
@@ -42,15 +49,43 @@ export function ReviewScreen() {
     return loaded;
   }
 
-  async function load() {
-    const gallery = await api.faceGallery(200);
+  /// Open the photograph this face came from in Finder.
+  ///
+  /// The face is a crop; the thing worth opening is the original it was cut
+  /// from, on whichever drive holds it. The backend says plainly when that
+  /// drive is not connected rather than failing silently.
+  async function reveal(f: GalleryFace) {
+    try {
+      setRevealNote(await api.revealInFinder(f.file_id));
+    } catch (err) {
+      setRevealNote(String(err));
+    }
+  }
+
+  async function load(drive?: number) {
+    const gallery = await api.faceGallery(200, drive);
     setFaces(gallery);
     setPeople(await api.listPeople());
     setThumbs(await loadThumbs(gallery.map((f) => f.face_id), {}));
   }
+  // The drives that actually have faces, counted from an unfiltered read so the
+  // list does not shrink to whatever is currently selected.
   useEffect(() => {
-    void load();
+    void api.faceGallery(1000).then((all) => {
+      const counts = new Map<number, { name: string; faces: number }>();
+      for (const f of all) {
+        const e = counts.get(f.drive_number) ?? { name: f.drive_name ?? `Drive ${f.drive_number}`, faces: 0 };
+        e.faces += 1;
+        counts.set(f.drive_number, e);
+      }
+      setDrives([...counts.entries()].map(([number, v]) => ({ number, ...v })).sort((a, b) => a.number - b.number));
+    });
   }, []);
+
+  useEffect(() => {
+    void load(driveFilter ?? undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [driveFilter]);
 
   async function openReview(person: NamedPerson) {
     setReviewing(person);
@@ -325,8 +360,37 @@ export function ReviewScreen() {
       )}
 
       {/* 3. Faces nobody has claimed. */}
+      {drives.length > 1 && (
+        <div className="drive-filter">
+          <span className="filter-label">Show faces from</span>
+          <button
+            className={driveFilter === null ? "chip selected" : "chip"}
+            onClick={() => setDriveFilter(null)}
+          >
+            Every drive
+          </button>
+          {drives.map((d) => (
+            <button
+              key={d.number}
+              className={driveFilter === d.number ? "chip selected" : "chip"}
+              onClick={() => setDriveFilter(d.number)}
+              title={d.name}
+            >
+              Drive {d.number} <span className="chip-count">{d.faces}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {revealNote && (
+        <p className="search-note" role="status">
+          {revealNote}
+        </p>
+      )}
+
       <h2>
         {unnamed.length} face{unnamed.length === 1 ? "" : "s"} nobody has named
+        {driveFilter !== null && ` on Drive ${driveFilter}`}
       </h2>
       {unnamed.length === 0 ? (
         <p className="empty">No faces yet. Scan a drive and any faces found will appear here.</p>
@@ -352,6 +416,14 @@ export function ReviewScreen() {
                 <span className="face-cell-label">
                   Who is this?{f.group_size > 1 && <> · {f.group_size}</>}
                 </span>
+              </button>
+              <button
+                className="face-reveal"
+                onClick={() => void reveal(f)}
+                aria-label={`Show the photograph containing this face in Finder, on Drive ${f.drive_number}`}
+                title={`Drive ${f.drive_number}${f.drive_name ? ` — ${f.drive_name}` : ""}`}
+              >
+                Drive {f.drive_number} ›
               </button>
             </li>
           ))}

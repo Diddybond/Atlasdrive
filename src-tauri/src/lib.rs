@@ -195,11 +195,12 @@ fn tag_face_cluster(
 fn face_gallery(
     state: State<AppState>,
     limit: Option<usize>,
+    drive_number: Option<i64>,
 ) -> Result<Vec<faces::GalleryFace>, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
     faces::FaceRepo::new(&archive)
-        .gallery(limit.unwrap_or(200))
+        .gallery_on_drive(limit.unwrap_or(200), drive_number)
         .map_err(map_err)
 }
 
