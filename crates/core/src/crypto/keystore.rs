@@ -23,6 +23,12 @@ const ACCOUNT: &str = "master-v1";
 pub trait KeyStore {
     /// Return the existing master key, or generate+persist a new one.
     fn get_or_create(&self) -> Result<MasterKey>;
+    /// Overwrite the stored key with `key`.
+    ///
+    /// Only restore uses this. Face embeddings and face crops are encrypted
+    /// with the master key, so a catalogue restored onto different hardware is
+    /// unreadable unless the key that encrypted it is put back first.
+    fn put(&self, key: &MasterKey) -> Result<()>;
     /// Human label for diagnostics (never includes key material).
     fn backend_name(&self) -> &'static str;
 }
@@ -70,6 +76,11 @@ impl KeyStore for KeychainKeyStore {
             }
         }
     }
+    fn put(&self, key: &MasterKey) -> Result<()> {
+        use security_framework::passwords::set_generic_password;
+        set_generic_password(SERVICE, ACCOUNT, key.as_bytes())
+            .map_err(|e| Error::Encryption(format!("keychain store: {e}")))
+    }
     fn backend_name(&self) -> &'static str {
         "macos-keychain"
     }
@@ -106,6 +117,22 @@ impl KeyStore for FileKeyStore {
             std::fs::set_permissions(&path, perms)?;
         }
         Ok(key)
+    }
+    fn put(&self, key: &MasterKey) -> Result<()> {
+        use std::io::Write;
+        std::fs::create_dir_all(&self.keys_dir)?;
+        let path = self.keys_dir.join("master.key");
+        let mut f = std::fs::File::create(&path)?;
+        f.write_all(key.as_bytes())?;
+        f.sync_all()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path)?.permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&path, perms)?;
+        }
+        Ok(())
     }
     fn backend_name(&self) -> &'static str {
         "file-fallback-dev"

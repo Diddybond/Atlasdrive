@@ -13,6 +13,8 @@
 //! layout mirrors the architecture layers in `docs/03_ARCHITECTURE.md`.
 
 pub mod ai;
+pub mod backup;
+pub mod bitrot;
 pub mod config;
 pub mod crypto;
 pub mod dates;
@@ -31,6 +33,7 @@ pub mod progress;
 pub mod queue;
 pub mod scan;
 pub mod search;
+pub mod settings;
 pub mod signing;
 pub mod util;
 pub mod verifier;

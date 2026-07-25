@@ -299,3 +299,76 @@ describe("AtlasDrive UI", () => {
     });
   });
 });
+
+describe("Backup", () => {
+  async function openSettings() {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Backup", level: 2 })).toBeDefined();
+    });
+  }
+
+  it("cannot back up until a folder has been chosen", async () => {
+    await openSettings();
+    const button = screen.getByRole("button", { name: "Back up now" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(screen.getByText("not chosen yet")).toBeDefined();
+  });
+
+  it("says plainly whether a backup will leave the Mac", async () => {
+    await openSettings();
+    fireEvent.click(screen.getByRole("button", { name: /Choose|Change/ }));
+    // The mock picker returns a Google Drive path.
+    await waitFor(() => {
+      expect(screen.getByText(/synchronised by Google Drive/)).toBeDefined();
+    });
+    expect(screen.getByText(/never connects to the internet/)).toBeDefined();
+  });
+
+  it("backs up and then lists the backup it made", async () => {
+    await openSettings();
+    fireEvent.click(screen.getByRole("button", { name: /Choose|Change/ }));
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "Back up now" }) as HTMLButtonElement).disabled)
+        .toBe(false);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Back up now" }));
+    await waitFor(() => {
+      expect(screen.getByText(/new thumbnails/)).toBeDefined();
+    });
+    // Only the genuinely new thumbnails are copied — that is what makes a
+    // nightly cloud backup affordable.
+    expect(screen.getByText(/14478 already there/)).toBeDefined();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Available backups", level: 3 })).toBeDefined();
+    });
+  });
+
+  it("asks before replacing the catalogue, and says the old one is kept", async () => {
+    await openSettings();
+    fireEvent.click(screen.getByRole("button", { name: /Choose|Change/ }));
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "Back up now" }) as HTMLButtonElement).disabled)
+        .toBe(false);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Back up now" }));
+    // Several backups may be listed; the newest is first.
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /Restore…/ }).length).toBeGreaterThan(0);
+    });
+
+    // Restoring is destructive enough to need a second click.
+    fireEvent.click(screen.getAllByRole("button", { name: /Restore…/ })[0]);
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toBeDefined();
+    });
+    expect(screen.getByText(/kept on disk, not deleted/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: /Yes, replace it/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/named people/)).toBeDefined();
+    });
+  });
+});

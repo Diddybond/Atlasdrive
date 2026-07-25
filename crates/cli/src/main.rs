@@ -70,11 +70,59 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
+    /// Back up the catalogue, or restore it.
+    ///
+    /// Point `--to` at a folder your cloud client synchronises (Google Drive
+    /// for Desktop, Dropbox, iCloud) and the backup travels off this Mac
+    /// without AtlasDrive itself ever touching the network.
+    Backup {
+        #[command(subcommand)]
+        action: BackupAction,
+    },
+    /// Reclaim disk space: re-encode legacy PNG thumbnails and compact the
+    /// database. Safe to run at any time; changes nothing you can see.
+    Compact,
     /// Write a privacy-redacted diagnostics bundle safe to share in a bug report.
     Report {
         /// Required, and the only supported mode: unredacted export is not offered.
         #[arg(long)]
         redacted: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupAction {
+    /// Write a backup.
+    Now {
+        /// Destination folder.
+        #[arg(long)]
+        to: PathBuf,
+        /// Leave the master key out of the bundle. Face data in the backup then
+        /// only decrypts on this Mac.
+        #[arg(long)]
+        no_key: bool,
+        /// Skip the thumbnail mirror; back up the database only.
+        #[arg(long)]
+        no_thumbnails: bool,
+        /// How many snapshots to keep.
+        #[arg(long, default_value_t = 7)]
+        keep: usize,
+    },
+    /// List the backups at a destination, newest first.
+    List {
+        #[arg(long)]
+        at: PathBuf,
+    },
+    /// Restore the catalogue from a backup folder.
+    ///
+    /// The catalogue being replaced is kept, not deleted.
+    Restore {
+        /// A snapshot folder, as printed by `backup list`.
+        #[arg(long)]
+        from: PathBuf,
+        /// Do not put the backup's master key back into the Keychain.
+        #[arg(long)]
+        no_key: bool,
     },
 }
 
@@ -119,6 +167,22 @@ enum DriveAction {
         /// Limit to one drive; omit to inventory every registered drive.
         #[arg(long)]
         number: Option<i64>,
+    },
+    /// Re-read a connected drive and check the files are still the files.
+    ///
+    /// Compares every original against the content hash recorded when it was
+    /// indexed. A file whose content changed while its size and modification
+    /// time did not was not edited by anyone — that is silent corruption.
+    Check {
+        #[arg(long)]
+        number: i64,
+        /// Stop after this many files, for a quick sample of a large drive.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Skip files already checked within this many days, so a big drive can
+        /// be worked through over several sessions.
+        #[arg(long)]
+        skip_recent_days: Option<i64>,
     },
     /// List registered drives.
     List,
@@ -284,6 +348,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Faces { action } => faces_cmd(&ctx, action),
         Command::Doctor => doctor_cmd(&ctx),
         Command::Date { file, from, to, clear } => date_cmd(&ctx, &file, &from, to.as_deref(), clear),
+        Command::Backup { action } => backup_cmd(&ctx, action),
+        Command::Compact => compact_cmd(&ctx),
         Command::Report { redacted } => report_cmd(&ctx, redacted),
     }
 }
@@ -392,6 +458,9 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
                 );
             }
             Ok(())
+        }
+        DriveAction::Check { number, limit, skip_recent_days } => {
+            drive_check_cmd(ctx, number, limit, skip_recent_days)
         }
         DriveAction::List => {
             for d in repo.list()? {
@@ -741,6 +810,213 @@ fn date_cmd(ctx: &Ctx, file: &str, from: &str, to: Option<&str>, clear: bool) ->
     println!("{}", family_archive_core::dates::describe(&est));
     println!("Your correction is kept even if this photograph is analysed again.");
     Ok(())
+}
+
+/// Reclaim space without changing what the catalogue contains.
+///
+/// Two independent sources of waste, both worth addressing before an archive
+/// reaches twenty drives. Thumbnails written by older versions are PNG, roughly
+/// five times the size of the JPEG now used. And SQLite does not return freed
+/// pages to the filesystem, so a catalogue that has had faces rebuilt or files
+/// removed keeps the space.
+fn compact_cmd(ctx: &Ctx) -> Result<()> {
+    use family_archive_core::pipeline::thumbnail;
+
+    let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
+
+    println!("Re-encoding legacy PNG thumbnails...");
+    let report = thumbnail::recompress_to_jpeg(&archive, &ctx.paths.thumbnails_dir())?;
+    if report.converted > 0 {
+        println!(
+            "  {} converted: {} -> {} ({}x smaller)",
+            report.converted,
+            human_bytes(report.bytes_before),
+            human_bytes(report.bytes_after),
+            if report.bytes_after > 0 {
+                report.bytes_before / report.bytes_after.max(1)
+            } else {
+                0
+            }
+        );
+    } else {
+        println!("  nothing to convert ({} already JPEG)", report.already_jpeg);
+    }
+    if report.failed > 0 {
+        println!("  {} could not be read and were left alone", report.failed);
+    }
+
+    let before = std::fs::metadata(ctx.paths.archive_db()).map(|m| m.len()).unwrap_or(0);
+    println!("Compacting the catalogue...");
+    archive.execute_batch("VACUUM")?;
+    let after = std::fs::metadata(ctx.paths.archive_db()).map(|m| m.len()).unwrap_or(0);
+    println!("  {} -> {}", human_bytes(before), human_bytes(after));
+
+    Ok(())
+}
+
+fn drive_check_cmd(
+    ctx: &Ctx,
+    number: i64,
+    limit: Option<usize>,
+    skip_recent_days: Option<i64>,
+) -> Result<()> {
+    use family_archive_core::bitrot::{self, Verdict};
+
+    let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
+    let started = std::time::Instant::now();
+
+    let report = bitrot::verify_drive(
+        &archive,
+        number,
+        &bitrot::VerifyOptions {
+            limit,
+            skip_verified_within_days: skip_recent_days,
+            cancel: None,
+        },
+        |done, total| {
+            if total > 0 && (done % 200 == 0 || done == total) {
+                eprint!("\r  checked {done}/{total}");
+            }
+        },
+    )?;
+    eprintln!();
+
+    println!("Drive {} — integrity check", report.drive_number);
+    println!(
+        "  {} files read ({}) in {:.0}s",
+        report.checked,
+        human_bytes(report.bytes_read),
+        started.elapsed().as_secs_f64()
+    );
+    println!("  {} intact", report.intact);
+
+    let corrupt = report.count(Verdict::Corrupt);
+    let unreadable = report.count(Verdict::Unreadable);
+    let edited = report.count(Verdict::Edited);
+    let missing = report.count(Verdict::Missing);
+
+    if edited > 0 {
+        println!("  {edited} edited since indexing — re-index to bring the catalogue up to date");
+    }
+    if missing > 0 {
+        println!("  {missing} no longer on the drive");
+    }
+
+    if corrupt == 0 && unreadable == 0 {
+        println!("  no corruption found");
+    } else {
+        println!();
+        println!("  {corrupt} CORRUPT, {unreadable} unreadable:");
+        for f in report.problems() {
+            println!("    {} — {}", f.relative_path, f.detail);
+        }
+    }
+    if report.incomplete {
+        println!("  (stopped early; run again to continue)");
+    }
+
+    // A corrupt original is a real fault, so the exit code has to say so —
+    // this command belongs in a cron job.
+    if corrupt > 0 || unreadable > 0 {
+        return Err(Error::VerifierFailure(format!(
+            "{corrupt} corrupt and {unreadable} unreadable file(s) on drive {number}"
+        )));
+    }
+    Ok(())
+}
+
+fn human_bytes(n: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    if n >= 1024 * MB {
+        format!("{:.1} GB", n as f64 / (1024.0 * MB as f64))
+    } else if n >= MB {
+        format!("{} MB", n / MB)
+    } else {
+        format!("{} KB", n.div_ceil(1024))
+    }
+}
+
+fn backup_cmd(ctx: &Ctx, action: BackupAction) -> Result<()> {
+    use family_archive_core::backup;
+
+    match action {
+        BackupAction::Now { to, no_key, no_thumbnails, keep } => {
+            let options = backup::BackupOptions {
+                include_key: !no_key,
+                include_thumbnails: !no_thumbnails,
+                keep: Some(keep),
+            };
+            let report = backup::create(&ctx.paths, &to, &options)?;
+            println!("Backed up to {}", report.bundle);
+            println!("  catalogue: {}", human_bytes(report.db_bytes));
+            if !no_thumbnails {
+                println!(
+                    "  thumbnails: {} new ({}), {} already there",
+                    report.thumbnails_copied,
+                    human_bytes(report.thumbnail_bytes_copied),
+                    report.thumbnails_present
+                );
+            }
+            if report.key_included {
+                println!("  master key included — anyone who can read that folder can read the");
+                println!("  face data. Delete {} to store it separately.", backup::KEY_FILE);
+            } else {
+                println!("  master key NOT included — face data restores only on this Mac.");
+            }
+            if report.pruned > 0 {
+                println!("  removed {} older backup(s)", report.pruned);
+            }
+            Ok(())
+        }
+        BackupAction::List { at } => {
+            let all = backup::list(&at)?;
+            if all.is_empty() {
+                println!("No backups at {}", at.display());
+                return Ok(());
+            }
+            println!("Backups at {} (newest first)", at.display());
+            for b in all {
+                match b.manifest {
+                    Some(m) => println!(
+                        "  {}  {} files, {} faces, {} named  ({})",
+                        b.name,
+                        m.counts.files,
+                        m.counts.faces,
+                        m.counts.people_named,
+                        human_bytes(m.db_bytes)
+                    ),
+                    None => println!("  {}  (no manifest)", b.name),
+                }
+            }
+            Ok(())
+        }
+        BackupAction::Restore { from, no_key } => {
+            let report = backup::restore(
+                &ctx.paths,
+                &from,
+                &backup::RestoreOptions {
+                    restore_key: !no_key,
+                    restore_thumbnails: true,
+                },
+            )?;
+            println!("Restored from {}", report.restored_from);
+            println!(
+                "  {} drives, {} files, {} faces, {} named people",
+                report.counts.drives,
+                report.counts.files,
+                report.counts.faces,
+                report.counts.people_named
+            );
+            println!("  {} thumbnails restored", report.thumbnails_restored);
+            if report.key_restored {
+                println!("  master key restored to the Keychain");
+            }
+            if let Some(prev) = report.previous_catalogue {
+                println!("  the catalogue this replaced is kept at {prev}");
+            }
+            Ok(())
+        }
+    }
 }
 
 fn report_cmd(ctx: &Ctx, redacted: bool) -> Result<()> {

@@ -5,6 +5,52 @@
 // demonstrable and testable without the native layer. The shapes mirror the
 // serde types in family-archive-core.
 
+export interface Settings {
+  backup_destination?: string | null;
+  backup_include_key: boolean;
+  backup_keep?: number | null;
+  backup_after_indexing: boolean;
+  last_backup_at?: string | null;
+}
+
+export interface BackupReport {
+  bundle: string;
+  db_bytes: number;
+  thumbnails_copied: number;
+  thumbnails_present: number;
+  thumbnail_bytes_copied: number;
+  key_included: boolean;
+  pruned: number;
+}
+
+export interface BackupManifest {
+  created_at: string;
+  app_version: string;
+  db_bytes: number;
+  key_included: boolean;
+  counts: {
+    drives: number;
+    files: number;
+    faces: number;
+    people_named: number;
+    thumbnails: number;
+  };
+}
+
+export interface BackupInfo {
+  path: string;
+  name: string;
+  manifest?: BackupManifest | null;
+}
+
+export interface RestoreReport {
+  restored_from: string;
+  previous_catalogue?: string | null;
+  counts: BackupManifest["counts"];
+  thumbnails_restored: number;
+  key_restored: boolean;
+}
+
 export interface Drive {
   id: string;
   drive_number: number;
@@ -195,6 +241,15 @@ export const api = {
   runVerifier: () => call<VerifierCheck[]>("run_verifier"),
   prepareReview: (limit: number) => call<ClusterSummary[]>("prepare_review", { limit }),
   doctor: () => call<Record<string, string>>("doctor"),
+  chooseFolder: (prompt?: string) => call<string | null>("choose_folder", { prompt }),
+  getSettings: () => call<Settings>("get_settings"),
+  saveSettings: (settings: Settings) => call<void>("save_settings", { settings }),
+  describeBackupDestination: (path: string) =>
+    call<string | null>("describe_backup_destination", { path }),
+  backupNow: (destination?: string) => call<BackupReport>("backup_now", { destination }),
+  listBackups: (destination?: string) => call<BackupInfo[]>("list_backups", { destination }),
+  restoreBackup: (bundle: string) => call<RestoreReport>("restore_backup", { bundle }),
+  compactCatalogue: () => call<string>("compact_catalogue"),
   exportDiagnostics: () => call<string>("export_diagnostics"),
   tagFaceCluster: (clusterId: string, name: string) =>
     call<{ id: string; display_name: string }>("tag_face_cluster", { clusterId, name }),
@@ -276,6 +331,20 @@ const mockClusters: ClusterSummary[] = [
   { cluster_id: "c-d4e5f6", status: "unnamed", face_count: 12 },
 ];
 const mockPeople: NamedPerson[] = [];
+
+let mockSettings: Settings = {
+  backup_destination: null,
+  backup_include_key: true,
+  backup_keep: 7,
+  backup_after_indexing: true,
+  last_backup_at: null,
+};
+const mockBackups: BackupInfo[] = [];
+// Real bundle names are unique — backup::free_bundle_path guarantees it even
+// for two backups in the same second. The mock must not be sloppier than the
+// thing it stands in for, or the UI gets exercised against duplicate keys it
+// would never see.
+let mockBackupSeq = 0;
 
 function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   switch (cmd) {
@@ -454,6 +523,62 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     }
     case "doctor":
       return Promise.resolve({ keystore: "file-fallback-dev", archive_integrity: "ok", ai_offline: "true" } as unknown as T);
+    case "choose_folder":
+      return Promise.resolve("/Users/you/Library/CloudStorage/GoogleDrive-you@example.com/My Drive/AtlasDrive" as unknown as T);
+    case "get_settings":
+      return Promise.resolve(mockSettings as unknown as T);
+    case "save_settings": {
+      mockSettings = { ...(args?.settings as Settings) };
+      return Promise.resolve(undefined as unknown as T);
+    }
+    case "describe_backup_destination": {
+      const p = String(args?.path ?? "");
+      const which = p.includes("GoogleDrive") || p.includes("Google Drive")
+        ? "Google Drive"
+        : p.includes("Dropbox")
+          ? "Dropbox"
+          : null;
+      return Promise.resolve(which as unknown as T);
+    }
+    case "backup_now": {
+      mockBackupSeq += 1;
+      const name =
+        new Date().toISOString().replace(/[:.]/g, "").slice(0, 15) + "Z" +
+        (mockBackupSeq > 1 ? `-${mockBackupSeq}` : "");
+      mockBackups.unshift({
+        path: `${mockSettings.backup_destination ?? "/tmp"}/catalogue/${name}`,
+        name,
+        manifest: {
+          created_at: new Date().toISOString(),
+          app_version: "0.1.0",
+          db_bytes: 36_000_000,
+          key_included: mockSettings.backup_include_key,
+          counts: { drives: 3, files: 14606, faces: 2126, people_named: 2, thumbnails: 14606 },
+        },
+      });
+      mockSettings.last_backup_at = new Date().toISOString();
+      return Promise.resolve({
+        bundle: mockBackups[0].path,
+        db_bytes: 36_000_000,
+        thumbnails_copied: 128,
+        thumbnails_present: 14478,
+        thumbnail_bytes_copied: 5_600_000,
+        key_included: mockSettings.backup_include_key,
+        pruned: 0,
+      } as unknown as T);
+    }
+    case "list_backups":
+      return Promise.resolve(mockBackups as unknown as T);
+    case "restore_backup":
+      return Promise.resolve({
+        restored_from: String(args?.bundle ?? ""),
+        previous_catalogue: "/data/archive.db.replaced-2026-07-25T193000Z",
+        counts: { drives: 3, files: 14606, faces: 2126, people_named: 2, thumbnails: 14606 },
+        thumbnails_restored: 14606,
+        key_restored: true,
+      } as unknown as T);
+    case "compact_catalogue":
+      return Promise.resolve("758 thumbnails re-encoded (182 MB saved); catalogue 160 MB -> 37 MB" as unknown as T);
     case "update_drive_details": {
       const target = mockDrives.find((d) => d.drive_number === args?.driveNumber);
       if (target) {

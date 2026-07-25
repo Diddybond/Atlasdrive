@@ -262,6 +262,11 @@ h2 {
 .kv div { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .kv dt { color: var(--ink-soft); text-transform: capitalize; }
 .kv dd { margin: 0; font-weight: 600; }
+/* A backup destination is a long absolute path. Let it wrap and keep the
+   button clear of it, rather than letting the two collide on a narrow window. */
+.kv dd.path { display: flex; align-items: center; gap: 12px; min-width: 0; justify-content: flex-end; }
+.kv dd.path .path-text { overflow-wrap: anywhere; text-align: right; font-weight: 500; }
+.kv dd.path button { flex: none; }
 
 .check-list { list-style: none; margin: 0; padding: 0; }
 .check-row { display: grid; grid-template-columns: 64px 200px 1fr; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }

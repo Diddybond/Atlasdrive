@@ -900,6 +900,143 @@ fn doctor(state: State<AppState>) -> Result<std::collections::BTreeMap<String, S
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Backup
+// ---------------------------------------------------------------------------
+
+/// Show a native folder chooser and return what was picked.
+///
+/// Done in Rust with the system dialog rather than by granting the webview a
+/// dialog plugin, so `capabilities/default.json` stays empty of filesystem and
+/// shell permissions — the webview asks a command, exactly as it does for
+/// everything else privileged.
+#[tauri::command]
+fn choose_folder(prompt: Option<String>) -> Result<Option<String>, String> {
+    let prompt = prompt.unwrap_or_else(|| "Choose a folder".to_string());
+    // Quotes inside the prompt would break out of the AppleScript string.
+    let safe: String = prompt.chars().filter(|c| *c != '"' && *c != '\\').collect();
+    let script = format!(
+        "try\n  POSIX path of (choose folder with prompt \"{safe}\")\non error number -128\n  return \"\"\nend try"
+    );
+    let out = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(map_err)?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    let picked = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Cancelling is a normal outcome, not an error.
+    Ok(if picked.is_empty() { None } else { Some(picked) })
+}
+
+#[tauri::command]
+fn get_settings(state: State<AppState>) -> Result<family_archive_core::settings::Settings, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    Ok(family_archive_core::settings::load(&paths))
+}
+
+#[tauri::command]
+fn save_settings(
+    state: State<AppState>,
+    settings: family_archive_core::settings::Settings,
+) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    family_archive_core::settings::save(&paths, &settings).map_err(map_err)
+}
+
+/// Which cloud service, if any, appears to synchronise a folder. Advisory:
+/// the user is told whether a backup will leave this Mac, never prevented.
+#[tauri::command]
+fn describe_backup_destination(path: String) -> Option<String> {
+    family_archive_core::settings::is_cloud_synced(std::path::Path::new(&path))
+        .map(|s| s.to_string())
+}
+
+#[tauri::command]
+fn backup_now(
+    state: State<AppState>,
+    destination: Option<String>,
+) -> Result<family_archive_core::backup::BackupReport, String> {
+    use family_archive_core::{backup, settings};
+    let paths = state.paths.lock().unwrap().clone();
+    let mut prefs = settings::load(&paths);
+
+    let dest = destination
+        .or_else(|| prefs.backup_destination.clone())
+        .ok_or_else(|| "no backup folder chosen yet".to_string())?;
+
+    let report = backup::create(
+        &paths,
+        std::path::Path::new(&dest),
+        &backup::BackupOptions {
+            include_key: prefs.backup_include_key,
+            include_thumbnails: true,
+            keep: prefs.backup_keep,
+        },
+    )
+    .map_err(map_err)?;
+
+    // Remember a destination that worked, so the next backup is one click.
+    prefs.backup_destination = Some(dest);
+    prefs.last_backup_at = Some(family_archive_core::util::now_iso8601());
+    let _ = settings::save(&paths, &prefs);
+
+    Ok(report)
+}
+
+#[tauri::command]
+fn list_backups(
+    state: State<AppState>,
+    destination: Option<String>,
+) -> Result<Vec<family_archive_core::backup::BackupInfo>, String> {
+    use family_archive_core::{backup, settings};
+    let paths = state.paths.lock().unwrap().clone();
+    let dest = destination.or_else(|| settings::load(&paths).backup_destination);
+    let Some(dest) = dest else { return Ok(Vec::new()) };
+    backup::list(std::path::Path::new(&dest)).map_err(map_err)
+}
+
+/// Restore the catalogue. The catalogue being replaced is kept, not deleted.
+#[tauri::command]
+fn restore_backup(
+    state: State<AppState>,
+    bundle: String,
+) -> Result<family_archive_core::backup::RestoreReport, String> {
+    use family_archive_core::backup;
+    let paths = state.paths.lock().unwrap().clone();
+    backup::restore(
+        &paths,
+        std::path::Path::new(&bundle),
+        &backup::RestoreOptions { restore_key: true, restore_thumbnails: true },
+    )
+    .map_err(map_err)
+}
+
+/// Reclaim disk space. Changes nothing the user can see.
+#[tauri::command]
+fn compact_catalogue(state: State<AppState>) -> Result<String, String> {
+    use family_archive_core::pipeline::thumbnail;
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+
+    let report = thumbnail::recompress_to_jpeg(&archive, &paths.thumbnails_dir()).map_err(map_err)?;
+    let before = std::fs::metadata(paths.archive_db()).map(|m| m.len()).unwrap_or(0);
+    archive.execute_batch("VACUUM").map_err(map_err)?;
+    let after = std::fs::metadata(paths.archive_db()).map(|m| m.len()).unwrap_or(0);
+
+    let mb = |n: u64| n / (1024 * 1024);
+    Ok(format!(
+        "{} thumbnails re-encoded ({} MB saved); catalogue {} MB -> {} MB",
+        report.converted,
+        mb(report.bytes_before.saturating_sub(report.bytes_after)),
+        mb(before),
+        mb(after)
+    ))
+}
+
+
 /// Application entry point invoked from `main.rs`.
 pub fn run() {
     tauri::Builder::default()
@@ -916,6 +1053,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            choose_folder,
+            get_settings,
+            save_settings,
+            describe_backup_destination,
+            backup_now,
+            list_backups,
+            restore_backup,
+            compact_catalogue,
             list_drives,
             register_drive,
             search_catalogue,

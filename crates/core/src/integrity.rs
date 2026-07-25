@@ -73,7 +73,11 @@ pub fn open_readonly(path: &Path) -> Result<File> {
     Ok(f)
 }
 
-fn mtime_ns(meta: &std::fs::Metadata) -> i64 {
+/// Modification time in nanoseconds since the epoch.
+///
+/// Public because bit-rot detection compares against it: a content change with
+/// an untouched mtime is the signature of decay rather than an edit.
+pub fn mtime_ns(meta: &std::fs::Metadata) -> i64 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

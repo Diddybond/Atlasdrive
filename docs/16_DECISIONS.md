@@ -601,3 +601,126 @@ with no change to the repository.
 
 `atlasdrive doctor` reports which of the three states the running build is in,
 so the question is answerable without trusting this document.
+
+## D-032: Backups are written to a folder, not uploaded by the app
+
+**Status:** settled.
+
+**Context.** The catalogue is the only part of AtlasDrive that cannot be
+recreated: the photographs live on the drives, but the naming of faces, the
+date corrections and the confirmed tags exist in exactly one place. The owner
+asked for backups to reach their Rifkin & Livesey Google Drive, and offered
+either an in-app connection or an exported archive.
+
+**Decision.** AtlasDrive writes backups to a folder and stops there. A sync
+client the owner already trusts — Google Drive for Desktop, Dropbox, iCloud —
+does the uploading. The alternative, an OAuth flow and a Drive API client
+inside the app, would have meant a Google Cloud project, token storage, and an
+HTTP client in a codebase that currently has none, which would weaken the
+"indexing makes no network call" guarantee and its verifier gate for no gain the
+owner would ever see. The folder approach also works unchanged with a NAS or a
+plain external disk.
+
+Destinations are advisory-checked with `settings::is_cloud_synced`, so the
+interface can say plainly whether a backup will leave the Mac. It never blocks a
+choice; it removes the ambiguity.
+
+**Layout.** Database snapshots are timestamped under `catalogue/` and retained
+(seven by default). Thumbnails are an additive mirror under `thumbnails/`,
+shared by every snapshot. That split exists because thumbnail filenames derive
+from a content-based file id and never change once written, so a sync client
+uploads each thumbnail exactly once ever rather than re-uploading roughly 10GB
+on every backup. Measured: the second backup of the real catalogue copied 0 of
+758 thumbnails.
+
+**Consistency.** The snapshot is taken with `VACUUM INTO`, which reads a
+consistent view under a read lock and cannot modify the source, so a backup is
+safe while the app is in use. It compacts as a side effect: the real catalogue
+went from 160MB to 36MB.
+
+**Safety.** Restore verifies the manifest checksum and runs
+`PRAGMA integrity_check` *before* touching the live catalogue, because a bundle
+that arrived through a sync client may still be uploading. The catalogue being
+replaced is renamed aside, never deleted, and its path is reported — a restore
+must not be the operation that loses the data.
+
+**The key.** Face embeddings and crops are encrypted with a Keychain key, so a
+catalogue restored onto different hardware would have unreadable face data. The
+key is therefore written into the bundle by default, as a separate, plainly
+named `master.key`. The owner chose an unencrypted backup for recoverability;
+including the key is consistent with that intent, and the README in every bundle
+states that anyone who can read the folder can read the face data, and that
+deleting the one file removes that exposure while leaving the rest restorable.
+
+## D-033: Thumbnails are JPEG, not PNG
+
+**Status:** settled.
+
+**Context.** Photo thumbnails were written as 512px PNG, averaging 290KB on real
+wedding photographs. Face crops had already moved to JPEG for exactly this
+reason (D-024) but the main thumbnails had not. The owner's archive is twenty
+drives and more than 200,000 files, which put the thumbnail store on course for
+51GB — enough to make cloud backup impractical and to be a problem on its own.
+
+**Decision.** Thumbnails are JPEG at quality 82, the same setting as face crops.
+Measured on the real catalogue: 216MB to 34MB, a factor of 6.3. Projected across
+200,000 files that is 51GB against 10GB.
+
+`thumbnail::recompress_to_jpeg` converts existing catalogues in place. It works
+from the existing PNG rather than the original photograph, deliberately: the
+originals are on external drives that are usually unplugged, and a migration
+requiring twenty drives to be connected in turn would never be run. Each file is
+converted and re-decoded before its row is updated and the old file removed, so
+an interrupted run leaves every remaining row pointing at a file that exists.
+
+Exposed as `atlasdrive compact`, together with a `VACUUM` of the live database,
+since both reclaim space and neither changes anything visible. On the real
+catalogue the two together took 376MB to 71MB.
+
+**Consequence.** A test asserts JPEG is far smaller than PNG, using a fixture
+with a photograph's frequency profile. That detail matters: the first attempt
+used random noise, which is JPEG's pathological worst case and measured only
+2.1x, against 5x on real photographs. A fixture that is not photograph-like
+tests the opposite of the real situation.
+
+## D-034: Bit rot is distinguished from editing by the metadata, not the hash
+
+**Status:** settled.
+
+**Context.** Originals live on external drives that sit on a shelf for years.
+Every indexed file already carries a BLAKE3 content hash alongside its size and
+modification time, so re-reading a drive can establish whether the files are
+still the files. The catch is that a changed hash on its own says almost
+nothing: most files whose content changed were simply edited, and a check that
+cannot tell the difference produces a list nobody reads.
+
+**Decision.** The verdict comes from the combination, not the hash alone:
+
+| size | mtime | hash | verdict |
+|------|-------|------|---------|
+| same | same | same | intact |
+| any | changed | changed | edited — expected, not a fault |
+| same | same | **changed** | **corrupt** |
+
+The third row is the entire value of the feature. No editor rewrites a file
+without moving its modification time, so content that changed underneath an
+untouched size and mtime was not changed by a person. That is decay, a failing
+cable or a drive going bad — and it is invisible everywhere else in the system,
+including in the thumbnail, which was generated years earlier from bytes that
+were still good.
+
+`Verdict::is_problem` is therefore true only for `Corrupt` and `Unreadable`.
+Edited and missing files are reported but not raised as faults, because they
+have ordinary explanations and a re-index resolves them.
+
+**Consequence.** Reads go through `integrity::open_readonly`, and the check
+never writes to a source drive — the modification times it reads are the
+evidence, so disturbing them would destroy the signal. A pass is recorded in
+`files.last_verified_at`, and rows are taken oldest-verified first, so a
+twenty-drive archive can be swept over many sessions rather than in one sitting.
+A disconnected drive is reported as disconnected rather than as every file
+missing, which would otherwise look like catastrophic loss.
+
+`atlasdrive drive check --number N` exits non-zero when anything is corrupt or
+unreadable, so it can be run on a schedule. Measured on the real wedding drive:
+60 files, 747MB, 9 seconds, no corruption.
