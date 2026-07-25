@@ -28,6 +28,13 @@ pub struct Volume {
     pub is_startup_disk: bool,
     /// The drive number this volume is already registered as, if any.
     pub registered_as: Option<i64>,
+    /// True when the volume is mounted read-only.
+    ///
+    /// Common and entirely fine: macOS mounts NTFS read-only, and a
+    /// write-protected archive disk is exactly what a careful owner uses.
+    /// AtlasDrive never writes to originals, so the only thing affected is the
+    /// optional identity file.
+    pub is_read_only: bool,
 }
 
 impl Volume {
@@ -36,6 +43,7 @@ impl Volume {
         match (self.registered_as, self.is_startup_disk) {
             (Some(n), _) => format!("{} — already Drive {n}", self.name),
             (None, true) => format!("{} — this Mac's startup disk", self.name),
+            (None, false) if self.is_read_only => format!("{} — read-only", self.name),
             (None, false) => self.name.clone(),
         }
     }
@@ -49,6 +57,7 @@ impl Volume {
 /// numbers.
 pub fn connected(conn: Option<&rusqlite::Connection>) -> Result<Vec<Volume>> {
     let root_dev = device_of(Path::new("/"));
+    let read_only = read_only_mounts();
 
     let mut found: Vec<Volume> = Vec::new();
     let entries = match std::fs::read_dir("/Volumes") {
@@ -73,10 +82,12 @@ pub fn connected(conn: Option<&rusqlite::Connection>) -> Result<Vec<Volume>> {
         // identified by living on the same device rather than by its name —
         // "Macintosh HD" is a default, not a guarantee.
         let is_startup_disk = device_of(&path) == root_dev;
+        let path_str = path.to_string_lossy().to_string();
 
         found.push(Volume {
+            is_read_only: read_only.contains(&path_str),
             name,
-            path: path.to_string_lossy().to_string(),
+            path: path_str,
             is_startup_disk,
             registered_as: None,
         });
@@ -131,6 +142,35 @@ fn annotate_registered(conn: &rusqlite::Connection, volumes: &mut [Volume]) {
             }
         }
     }
+}
+
+/// Mount points currently mounted read-only.
+///
+/// Read from `mount` rather than by probing with a temporary file: listing the
+/// drives someone might register should not write to every disk attached to
+/// their machine.
+#[cfg(target_os = "macos")]
+fn read_only_mounts() -> std::collections::HashSet<String> {
+    let mut found = std::collections::HashSet::new();
+    let Ok(out) = std::process::Command::new("/sbin/mount").output() else {
+        return found;
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        // "/dev/disk9s1 on /Volumes/New Volume (ntfs, local, read-only, ...)"
+        let Some((before, flags)) = line.rsplit_once(" (") else { continue };
+        if !flags.split(',').any(|f| f.trim().trim_end_matches(')') == "read-only") {
+            continue;
+        }
+        if let Some((_, mount_point)) = before.split_once(" on ") {
+            found.insert(mount_point.to_string());
+        }
+    }
+    found
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_only_mounts() -> std::collections::HashSet<String> {
+    std::collections::HashSet::new()
 }
 
 /// Device id of the filesystem a path sits on, for identifying the boot volume.
@@ -200,6 +240,33 @@ mod tests {
         }
     }
 
+    /// macOS mounts NTFS read-only, so any Windows-formatted drive in a
+    /// collection lands here. It must be detected, not discovered by a failed
+    /// write.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn read_only_volumes_are_detected_from_the_mount_table() {
+        let mounts = read_only_mounts();
+        // Cross-check against `mount` itself rather than asserting on this
+        // machine's particular disks.
+        let out = std::process::Command::new("/sbin/mount").output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let expected: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("read-only"))
+            .filter_map(|l| l.rsplit_once(" (").map(|(b, _)| b))
+            .filter_map(|b| b.split_once(" on ").map(|(_, m)| m))
+            .collect();
+        for m in expected {
+            assert!(mounts.contains(m), "missed read-only mount {m}\n{text}");
+        }
+
+        // And whatever it finds is reflected on the listed volumes.
+        for v in connected(None).unwrap() {
+            assert_eq!(v.is_read_only, mounts.contains(&v.path), "{}", v.path);
+        }
+    }
+
     #[test]
     fn labels_say_what_is_already_known() {
         let plain = Volume {
@@ -207,8 +274,14 @@ mod tests {
             path: "/Volumes/Late 25 A".into(),
             is_startup_disk: false,
             registered_as: None,
+            is_read_only: false,
         };
         assert_eq!(plain.label(), "Late 25 A");
+
+        // Read-only is stated rather than hidden: it is normal, and it is why
+        // the identity file cannot be saved.
+        let locked = Volume { is_read_only: true, ..plain.clone() };
+        assert_eq!(locked.label(), "Late 25 A — read-only");
 
         let registered = Volume { registered_as: Some(3), ..plain.clone() };
         assert_eq!(registered.label(), "Late 25 A — already Drive 3");
@@ -246,12 +319,14 @@ mod tests {
                 path: "/Volumes/Late 25 A".into(),
                 is_startup_disk: false,
                 registered_as: None,
+                is_read_only: false,
             },
             Volume {
                 name: "Brand New".into(),
                 path: "/Volumes/Brand New".into(),
                 is_startup_disk: false,
                 registered_as: None,
+                is_read_only: false,
             },
         ];
         annotate_registered(&conn, &mut volumes);
@@ -286,6 +361,7 @@ mod tests {
             path: "/Volumes/Late 25 AB".into(),
             is_startup_disk: false,
             registered_as: None,
+            is_read_only: false,
         }];
         annotate_registered(&conn, &mut volumes);
         assert_eq!(volumes[0].registered_as, None, "prefix match must not count");

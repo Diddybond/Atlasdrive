@@ -1177,3 +1177,36 @@ application bundles and system files.
 
 Selects now share the form's styling. They had kept the platform's own chrome
 and sat oddly beside the themed fields around them.
+
+## D-048: A read-only drive is a normal drive
+
+**Status:** settled. Found by the owner hitting it on a real disk.
+
+**Two defects, one report.** Registering an NTFS volume gave
+`io error: Read-only file system (os error 30)` — and the drive was registered
+anyway. `register_drive` recorded the drive, then wrote the optional identity
+file, and returned the write's error. The owner was told registration failed
+when it had succeeded, and retrying would have complained the number was in use.
+
+The identity file is a convenience: it lets a drive be recognised automatically
+next time, and a drive is entirely usable without it. Failing the registration
+because of it was simply wrong. It is now non-fatal, and `DriveDto` carries a
+`note` — registration succeeded, here is what did not.
+
+**Read-only is not an edge case here.** macOS mounts NTFS read-only, so every
+Windows-formatted disk in a twenty-drive collection lands on this path. A
+write-protected archive disk is also exactly what a careful owner would use. And
+AtlasDrive never writes to originals anyway — read-only is *how it already
+treats every drive*. Presenting it as an error contradicted the app's own
+premise.
+
+**Decision.** `Volume::is_read_only` is read from the mount table and shown in
+the picker as "— read-only", still selectable. Choosing one disables the
+identity-file option and says why: "This drive is read-only, so nothing can be
+written to it — which is exactly how AtlasDrive reads your photographs anyway.
+It will be recognised by its name and contents instead."
+
+Read from `/sbin/mount` rather than by probing with a temporary file: listing
+the drives someone *might* register must not write to every disk attached to
+their machine. A test cross-checks the parse against `mount`'s own output rather
+than against this machine's particular disks.

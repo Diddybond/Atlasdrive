@@ -4,6 +4,7 @@ import { api, Drive, DriveContents, DriveCoverage, Volume } from "../api";
 export function DrivesScreen() {
   const [coverage, setCoverage] = useState<Record<number, DriveCoverage>>({});
   const [volumes, setVolumes] = useState<Volume[]>([]);
+  const [registerNote, setRegisterNote] = useState<string | null>(null);
   const [folders, setFolders] = useState<string[]>([]);
   const [drives, setDrives] = useState<Drive[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -52,6 +53,12 @@ export function DrivesScreen() {
   }
   /// A drive was picked from the list: use it, and offer the folders on it
   /// where photographs usually live.
+  /// Whether the chosen path sits on a read-only volume. Matched on the volume
+  /// root so it still holds when a folder inside the drive is chosen.
+  const chosenIsReadOnly = volumes.some(
+    (v) => v.is_read_only && (path === v.path || path.startsWith(`${v.path}/`)),
+  );
+
   async function pickVolume(chosen: string) {
     setPath(chosen);
     setFolders(chosen ? await api.likelyPhotoFolders(chosen) : []);
@@ -90,11 +97,15 @@ export function DrivesScreen() {
       return;
     }
     try {
-      await api.registerDrive({ number: n, path, name, writeManifest });
+      const drive = await api.registerDrive({ number: n, path, name, writeManifest });
+      // Registering can succeed and still have something worth saying — a
+      // read-only drive that could not take the identity file, most often.
+      setRegisterNote(drive.note ?? null);
       setShowForm(false);
       setNumber("");
       setName("");
       setPath("");
+      setFolders([]);
       await load();
     } catch (err) {
       setError(String(err));
@@ -143,7 +154,9 @@ export function DrivesScreen() {
                     ? `${v.name} — already Drive ${v.registered_as}`
                     : v.is_startup_disk
                       ? `${v.name} — this Mac's startup disk`
-                      : v.name}
+                      : v.is_read_only
+                        ? `${v.name} — read-only`
+                        : v.name}
                 </option>
               ))}
             </select>
@@ -185,13 +198,31 @@ export function DrivesScreen() {
             </span>
           </label>
           <label className="checkbox">
-            <input type="checkbox" checked={writeManifest} onChange={(e) => setWriteManifest(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={writeManifest && !chosenIsReadOnly}
+              disabled={chosenIsReadOnly}
+              onChange={(e) => setWriteManifest(e.target.checked)}
+            />
             Save a small identity file on the drive so it is recognised next time (nothing else on the
             drive is changed)
           </label>
+          {chosenIsReadOnly && (
+            <p className="check-detail">
+              This drive is read-only, so nothing can be written to it — which is exactly how
+              AtlasDrive reads your photographs anyway. It will be recognised by its name and
+              contents instead.
+            </p>
+          )}
           {error && <p className="error" role="alert">{error}</p>}
           <button type="submit">Register drive</button>
         </form>
+      )}
+
+      {registerNote && (
+        <p className="search-note" role="status">
+          {registerNote}
+        </p>
       )}
 
       {rescanNote && (

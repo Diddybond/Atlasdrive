@@ -631,7 +631,7 @@ describe("Picking a drive to register", () => {
     const select = screen.getByLabelText(/Which drive/) as HTMLSelectElement;
     const labels = [...select.options].map((o) => o.text);
     expect(labels).toContain("Late 25 B");
-    expect(labels).toContain("Samsung_X5");
+    expect(labels.some((l) => l.startsWith("New Volume"))).toBe(true);
   });
 
   it("will not let you register the same disk twice", async () => {
@@ -676,5 +676,40 @@ describe("Picking a drive to register", () => {
     expect((screen.getByLabelText(/Folder to index/) as HTMLInputElement).value).toBe(
       "/Volumes/Late 25 B/Weddings",
     );
+  });
+});
+
+describe("Read-only drives", () => {
+  async function openRegister() {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    await waitFor(() => screen.getByRole("button", { name: /Register a drive/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Register a drive/ }));
+    await waitFor(() => screen.getByLabelText(/Which drive/));
+  }
+
+  it("marks a read-only drive in the list", async () => {
+    await openRegister();
+    const select = screen.getByLabelText(/Which drive/) as HTMLSelectElement;
+    const ro = [...select.options].find((o) => o.text.includes("read-only"));
+    expect(ro).toBeDefined();
+    // Read-only is normal for this app, so it must still be selectable.
+    expect(ro!.disabled).toBe(false);
+  });
+
+  it("explains rather than fails when the drive cannot be written to", async () => {
+    await openRegister();
+    fireEvent.change(screen.getByLabelText(/Which drive/), {
+      target: { value: "/Volumes/New Volume" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/exactly how AtlasDrive reads your photographs/)).toBeDefined();
+    });
+    // The identity-file option is off and unavailable, not left to fail.
+    const boxes = screen.getAllByRole("checkbox") as HTMLInputElement[];
+    const identity = boxes.find((b) => b.disabled);
+    expect(identity).toBeDefined();
+    expect(identity!.checked).toBe(false);
   });
 });

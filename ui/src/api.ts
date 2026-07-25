@@ -10,6 +10,7 @@ export interface Volume {
   path: string;
   is_startup_disk: boolean;
   registered_as?: number | null;
+  is_read_only: boolean;
 }
 
 export interface DriveCoverage {
@@ -110,6 +111,9 @@ export interface Drive {
   categories?: string[];
   last_scan_at?: string | null;
   image_count?: number;
+  /// Worth saying, but not a failure — an identity file that could not be
+  /// written to a read-only drive, for instance.
+  note?: string | null;
 }
 
 export interface SearchResult {
@@ -608,10 +612,10 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve({ keystore: "file-fallback-dev", archive_integrity: "ok", ai_offline: "true" } as unknown as T);
     case "connected_volumes":
       return Promise.resolve([
-        { name: "Late 25 A", path: "/Volumes/Late 25 A", is_startup_disk: false, registered_as: 1 },
-        { name: "Late 25 B", path: "/Volumes/Late 25 B", is_startup_disk: false, registered_as: null },
-        { name: "Samsung_X5", path: "/Volumes/Samsung_X5", is_startup_disk: false, registered_as: null },
-        { name: "Macintosh HD", path: "/Volumes/Macintosh HD", is_startup_disk: true, registered_as: null },
+        { name: "Late 25 A", path: "/Volumes/Late 25 A", is_startup_disk: false, registered_as: 1, is_read_only: false },
+        { name: "Late 25 B", path: "/Volumes/Late 25 B", is_startup_disk: false, registered_as: null, is_read_only: false },
+        { name: "New Volume", path: "/Volumes/New Volume", is_startup_disk: false, registered_as: null, is_read_only: true },
+        { name: "Macintosh HD", path: "/Volumes/Macintosh HD", is_startup_disk: true, registered_as: null, is_read_only: false },
       ] as unknown as T);
     case "likely_photo_folders":
       return Promise.resolve(

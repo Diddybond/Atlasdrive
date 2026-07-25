@@ -50,6 +50,10 @@ struct DriveDto {
     categories: Vec<String>,
     last_scan_at: Option<String>,
     image_count: i64,
+    /// Something worth saying about the registration that is not a failure —
+    /// an identity file that could not be written to a read-only drive, say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note: Option<String>,
 }
 
 #[tauri::command]
@@ -76,6 +80,7 @@ fn list_drives(state: State<AppState>) -> Result<Vec<DriveDto>, String> {
             categories: d.categories,
             last_scan_at: d.last_scan_at,
             image_count,
+            note: None,
         });
     }
     Ok(out)
@@ -101,10 +106,36 @@ fn register_drive(
             ..Default::default()
         })
         .map_err(map_err)?;
+    // The identity file is a convenience, not part of registering: it lets the
+    // drive be recognised automatically next time, and the drive is perfectly
+    // usable without it. Failing the whole registration when it cannot be
+    // written was a real defect — the drive was already recorded by the call
+    // above, so the owner was told registration failed when it had succeeded,
+    // and retrying then complained the number was in use.
+    //
+    // Read-only drives are the common case here, not an edge one: macOS mounts
+    // NTFS read-only, so every Windows-formatted disk lands on this path.
+    let mut note = None;
     if write_manifest {
         let m = DriveManifest::new(&drive.id, drive.drive_number, name);
-        m.write_to_volume(&vol).map_err(map_err)?;
-        repo.audit(&drive.id, "manifest_written", None).map_err(map_err)?;
+        match m.write_to_volume(&vol) {
+            Ok(_) => {
+                let _ = repo.audit(&drive.id, "manifest_written", None);
+            }
+            Err(e) => {
+                let read_only = e.to_string().contains("Read-only")
+                    || e.to_string().contains("os error 30");
+                note = Some(if read_only {
+                    "Registered. This drive is read-only, so the identity file was not saved —                      AtlasDrive will recognise it by name and contents instead. Nothing else                      changes."
+                        .to_string()
+                } else {
+                    format!(
+                        "Registered, but the identity file could not be saved ({e}).                          AtlasDrive will recognise this drive by name and contents instead."
+                    )
+                });
+                let _ = repo.audit(&drive.id, "manifest_skipped", None);
+            }
+        }
     }
     Ok(DriveDto {
         id: drive.id,
@@ -115,6 +146,7 @@ fn register_drive(
         categories: drive.categories,
         last_scan_at: drive.last_scan_at,
         image_count: 0,
+        note,
     })
 }
 
@@ -887,6 +919,7 @@ fn update_drive_details(
         categories: updated.categories,
         last_scan_at: updated.last_scan_at,
         image_count,
+        note: None,
     })
 }
 
