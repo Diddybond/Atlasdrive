@@ -1071,3 +1071,37 @@ parallel-then-collect design can introduce.
 
 Not re-measured end to end, because the real catalogue is already converted and
 the operation is one-off per catalogue.
+
+## D-045: A drive says whether it can be unplugged
+
+**Status:** settled.
+
+**Context.** The archive is built one drive at a time: plug it in, name it,
+leave it connected until it finishes, unplug it, move to the next. Indexing runs
+at a measured 0.27–0.36 files/sec, so ten thousand photographs is most of a
+night and twenty thousand is closer to two.
+
+Parallelising was considered and left alone. The owner's constraint is not speed
+— "if that takes two days, so be it" — it is *knowing when it is done*. Making
+indexing four times faster would not answer that question; it would only change
+how long it takes to reach it.
+
+**The failure that matters.** A drive unplugged at ninety per cent stays at
+ninety per cent. Nothing else in the system would ever say so, and months later
+a photograph genuinely on drive 3 would simply not be found — indistinguishable
+from it never having existed. Getting the answer wrong in the *reassuring*
+direction is the expensive mistake, which is why `DriveCoverage::summary` says
+"Safe to unplug" only when `outstanding` is zero, and a test asserts that phrase
+never appears on unfinished work.
+
+**Decision.** Every drive shows its coverage on the Drives screen, loaded with
+the screen rather than behind a button: green "Finished — all N photographs
+indexed. Safe to unplug", or amber "11,000 of 15,000 indexed (73%) — 4,000 still
+to do. Leave this drive connected." Coverage compares `files.status='complete'`
+against the last real scan's `files_discovered`, and can never report negative
+outstanding work when photographs have been deleted from a drive since.
+
+`estimate_indexing` reports how long a folder will take before it is started,
+using this catalogue's own measured throughput once it has any, falling back to
+0.30 files/sec. Phrased as a duration to plan around rather than a warning —
+hours below a day, days above it — because the drive stays connected either way.

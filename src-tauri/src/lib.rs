@@ -969,6 +969,36 @@ fn doctor(state: State<AppState>) -> Result<std::collections::BTreeMap<String, S
 }
 
 // ---------------------------------------------------------------------------
+// Coverage and estimates
+// ---------------------------------------------------------------------------
+
+/// How completely each drive has been indexed, least complete first.
+#[tauri::command]
+fn drive_coverage(
+    state: State<AppState>,
+) -> Result<Vec<family_archive_core::inventory::DriveCoverage>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::inventory::drive_coverage(&archive).map_err(map_err)
+}
+
+/// How long indexing a folder is likely to take, before a night is committed
+/// to it. Counts the files by walking the tree, which is fast — nothing is
+/// decoded or analysed.
+#[tauri::command]
+fn estimate_index(
+    state: State<AppState>,
+    path: String,
+) -> Result<family_archive_core::inventory::IndexEstimate, String> {
+    use family_archive_core::scan::{enumerate, ScanOptions};
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let found = enumerate(std::path::Path::new(&path), &ScanOptions::default())
+        .map_err(map_err)?;
+    Ok(family_archive_core::inventory::estimate_indexing(&archive, found.len() as u64))
+}
+
+// ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
 
@@ -1236,6 +1266,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            drive_coverage,
+            estimate_index,
             similar_photographs,
             propose_events,
             list_events,

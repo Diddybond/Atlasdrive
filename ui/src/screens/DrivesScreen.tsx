@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { api, Drive, DriveContents } from "../api";
+import { api, Drive, DriveContents, DriveCoverage } from "../api";
 
 export function DrivesScreen() {
+  const [coverage, setCoverage] = useState<Record<number, DriveCoverage>>({});
   const [drives, setDrives] = useState<Drive[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [number, setNumber] = useState("");
@@ -49,6 +50,11 @@ export function DrivesScreen() {
   }
   useEffect(() => {
     void load();
+    // Coverage is what tells you whether a drive can be unplugged, so it is
+    // loaded whenever this screen is, not behind a button.
+    void api.driveCoverage().then((rows) => {
+      setCoverage(Object.fromEntries(rows.map((c) => [c.drive_number, c])));
+    });
   }, []);
 
   async function register(e: React.FormEvent) {
@@ -133,6 +139,28 @@ export function DrivesScreen() {
                 {d.image_count != null && <> · {d.image_count.toLocaleString()} photographs</>}
                 {d.physical_location && <> · {d.physical_location}</>}
               </p>
+              {coverage[d.drive_number] && (
+                <p
+                  className={
+                    coverage[d.drive_number].outstanding > 0
+                      ? "coverage working"
+                      : "coverage done"
+                  }
+                  role="status"
+                >
+                  {coverage[d.drive_number].outstanding > 0
+                    ? `${coverage[d.drive_number].complete.toLocaleString()} of ` +
+                      `${coverage[d.drive_number].discovered.toLocaleString()} indexed ` +
+                      `(${Math.round(
+                        (coverage[d.drive_number].complete /
+                          Math.max(1, coverage[d.drive_number].discovered)) *
+                          100,
+                      )}%) — ${coverage[d.drive_number].outstanding.toLocaleString()} still to do. ` +
+                      `Leave this drive connected.`
+                    : `Finished — all ${coverage[d.drive_number].complete.toLocaleString()} ` +
+                      `photographs indexed. Safe to unplug.`}
+                </p>
+              )}
               {d.categories && d.categories.length > 0 && (
                 <p className="drive-meta subtle">What's on it: {d.categories.join(", ")}</p>
               )}

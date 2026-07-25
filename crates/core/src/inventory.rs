@@ -418,3 +418,316 @@ mod tests {
         assert!(s.contains("Kept in Drawer 2."), "got {s}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Coverage
+// ---------------------------------------------------------------------------
+
+/// How completely a drive has actually been indexed.
+///
+/// This exists to answer one question at the moment it is asked: *is this drive
+/// finished, and can I unplug it?* The archive is built one drive at a time,
+/// left connected until it is done — which at roughly a third of a photograph
+/// per second can be a night or several days.
+///
+/// Getting that answer wrong in the reassuring direction is the expensive
+/// failure. A drive unplugged at ninety per cent sits at ninety per cent
+/// forever, and months later a photograph genuinely on drive 3 simply would not
+/// be found — indistinguishable from it never having existed. So the summary
+/// says "safe to unplug" only when there is nothing left to do.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DriveCoverage {
+    pub drive_number: i64,
+    pub drive_name: Option<String>,
+    /// Photographs the last real scan found on the drive.
+    pub discovered: i64,
+    /// Photographs fully indexed.
+    pub complete: i64,
+    /// Discovered but not yet indexed.
+    pub outstanding: i64,
+    pub failed: i64,
+    /// How the last scan ended, when it recorded an outcome.
+    pub last_outcome: Option<String>,
+    pub last_scan_at: Option<String>,
+}
+
+impl DriveCoverage {
+    pub fn percent(&self) -> f64 {
+        if self.discovered <= 0 {
+            return if self.complete > 0 { 100.0 } else { 0.0 };
+        }
+        (self.complete as f64 / self.discovered as f64 * 100.0).min(100.0)
+    }
+
+    /// True when photographs were found on the drive and never indexed.
+    ///
+    /// The plain question the interface needs to ask: is there work left on
+    /// this drive that will be missed unless it is plugged back in?
+    pub fn is_incomplete(&self) -> bool {
+        self.outstanding > 0
+    }
+
+    /// The answer to "can I unplug this yet?", in one sentence.
+    pub fn summary(&self) -> String {
+        if self.discovered == 0 && self.complete == 0 {
+            return "Never indexed.".to_string();
+        }
+        if !self.is_incomplete() {
+            return format!(
+                "Finished — all {} photographs indexed. Safe to unplug.",
+                self.complete
+            );
+        }
+        format!(
+            "{} of {} indexed ({:.0}%). {} still to do — leave this drive connected.",
+            self.complete,
+            self.discovered,
+            self.percent(),
+            self.outstanding
+        )
+    }
+}
+
+/// Coverage for every registered drive, least complete first.
+///
+/// Ordered that way deliberately: the drive most in need of being plugged back
+/// in should be the one at the top of the list.
+pub fn drive_coverage(conn: &Connection) -> Result<Vec<DriveCoverage>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.drive_number, d.friendly_name, d.last_scan_at,
+                (SELECT count(*) FROM files f
+                  WHERE f.drive_id = d.id AND f.status = 'complete'),
+                (SELECT count(*) FROM files f
+                  WHERE f.drive_id = d.id AND f.status = 'failed'),
+                (SELECT sr.files_discovered FROM scan_runs sr
+                  WHERE sr.drive_id = d.id AND sr.mode <> 'dry-run'
+                  ORDER BY sr.started_at DESC LIMIT 1),
+                (SELECT sr.outcome FROM scan_runs sr
+                  WHERE sr.drive_id = d.id AND sr.mode <> 'dry-run'
+                  ORDER BY sr.started_at DESC LIMIT 1)
+           FROM drives d
+          ORDER BY d.drive_number",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let complete: i64 = r.get(3)?;
+        let discovered: i64 = r.get::<_, Option<i64>>(5)?.unwrap_or(0);
+        Ok(DriveCoverage {
+            drive_number: r.get(0)?,
+            drive_name: r.get(1)?,
+            last_scan_at: r.get(2)?,
+            complete,
+            failed: r.get(4)?,
+            // A rescan can discover fewer files than are catalogued (photographs
+            // deleted from the drive), so this must never go negative.
+            outstanding: (discovered - complete).max(0),
+            discovered,
+            last_outcome: r.get(6)?,
+        })
+    })?;
+    let mut all: Vec<DriveCoverage> = rows.collect::<std::result::Result<_, _>>()?;
+    all.sort_by(|a, b| {
+        b.is_incomplete()
+            .cmp(&a.is_incomplete())
+            .then(a.percent().partial_cmp(&b.percent()).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    Ok(all)
+}
+
+/// How long indexing a folder will take, so the time can be planned for.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IndexEstimate {
+    pub files: u64,
+    pub files_per_second: f64,
+    pub hours: f64,
+    /// True when this is unlikely to finish in one night.
+    pub exceeds_one_night: bool,
+    pub summary: String,
+}
+
+/// Beyond this a run spans more than one night, so the estimate is given in
+/// days. Not a warning — a drive is left connected until it finishes, however
+/// long that is — just the more readable unit.
+pub const OVERNIGHT_HOURS: f64 = 10.0;
+
+/// Throughput assumed before this catalogue has measured its own.
+///
+/// Measured on a real wedding drive: 0.27–0.36 files/sec, dominated by Vision
+/// analysis. The lower end is used so an estimate errs towards warning.
+pub const ASSUMED_FILES_PER_SECOND: f64 = 0.30;
+
+/// Estimate how long indexing `file_count` photographs will take.
+///
+/// Throughput is taken from this catalogue's own history when it has any, so
+/// the estimate reflects the machine it is running on rather than the one the
+/// constant was measured on.
+///
+/// Phrased as a duration to plan around, not as a warning. The drive stays
+/// connected until it finishes; the number is there so its owner knows whether
+/// that is tonight or the rest of the week.
+pub fn estimate_indexing(conn: &Connection, file_count: u64) -> IndexEstimate {
+    let measured: Option<f64> = conn
+        .query_row(
+            "SELECT CAST(sum(files_done) AS REAL) /
+                    NULLIF(sum(strftime('%s', ended_at) - strftime('%s', started_at)), 0)
+               FROM scan_runs
+              WHERE mode <> 'dry-run' AND ended_at IS NOT NULL AND files_done > 0",
+            [],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let fps = measured.filter(|f| *f > 0.0).unwrap_or(ASSUMED_FILES_PER_SECOND);
+    let hours = file_count as f64 / fps / 3600.0;
+    let exceeds = hours > OVERNIGHT_HOURS;
+
+    let summary = if file_count == 0 {
+        "No photographs found here.".to_string()
+    } else if hours >= 24.0 {
+        format!(
+            "{file_count} photographs, about {:.1} days. Leave the drive connected — \
+             it keeps its place if interrupted.",
+            hours / 24.0
+        )
+    } else if exceeds {
+        format!(
+            "{file_count} photographs, about {hours:.0} hours — more than one night. \
+             Leave the drive connected until it finishes."
+        )
+    } else {
+        format!("{file_count} photographs, about {hours:.1} hours.")
+    };
+
+    IndexEstimate { files: file_count, files_per_second: fps, hours, exceeds_one_night: exceeds, summary }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::db::{self, SchemaKind};
+
+    fn drive(conn: &Connection, id: &str, number: i64, discovered: i64, complete: i64) {
+        conn.execute(
+            "INSERT INTO drives (id, drive_number, friendly_name, status, first_seen_at)
+             VALUES (?1, ?2, ?3, 'offline', 'now')",
+            rusqlite::params![id, number, format!("Drive {number}")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO roots (id, drive_id, relative_root, created_at)
+             VALUES (?1, ?2, '', 'now')",
+            rusqlite::params![format!("rt-{id}"), id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scan_runs (id, drive_id, drive_number, mode, scan_root, started_at,
+                                    ended_at, outcome, files_discovered, files_done, files_failed)
+             VALUES (?1, ?2, ?3, 'full', '/Volumes/x', '2026-01-01T00:00:00Z',
+                     '2026-01-01T09:00:00Z', 'ok', ?4, ?5, 0)",
+            rusqlite::params![format!("sr-{id}"), id, number, discovered, complete],
+        )
+        .unwrap();
+        for i in 0..complete {
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, status, analysis_version, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?1, ?1, 1, 0, 'complete', 1, 'now', 'now')",
+                rusqlite::params![format!("{id}-f{i}"), id, format!("rt-{id}")],
+            )
+            .unwrap();
+        }
+    }
+
+    /// The failure this exists to prevent: a drive unplugged part-way through
+    /// the night, left at seventy per cent, with nothing ever saying so.
+    #[test]
+    fn a_part_indexed_drive_says_so_and_sorts_first() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        drive(&conn, "d1", 1, 500, 500);   // finished
+        drive(&conn, "d2", 2, 15000, 11000); // unplugged before it finished
+        drive(&conn, "d3", 3, 800, 800);   // finished
+
+        let all = drive_coverage(&conn).unwrap();
+        assert_eq!(all.len(), 3);
+
+        // The drive needing attention is first, not buried in drive-number order.
+        assert_eq!(all[0].drive_number, 2);
+        assert!(all[0].is_incomplete());
+        assert_eq!(all[0].outstanding, 4000);
+        assert!((all[0].percent() - 73.3).abs() < 0.5, "{}", all[0].percent());
+        assert!(all[0].summary().contains("leave this drive connected"), "{}", all[0].summary());
+
+        // And the finished ones say so plainly.
+        assert!(!all[1].is_incomplete());
+        // "Safe to unplug" is the phrase that must never appear on unfinished work.
+        assert!(all[1].summary().contains("Safe to unplug"), "{}", all[1].summary());
+        assert!(!all[0].summary().contains("Safe to unplug"), "{}", all[0].summary());
+    }
+
+    /// Photographs deleted from a drive since the last scan must not read as
+    /// negative outstanding work.
+    #[test]
+    fn fewer_files_on_disk_than_catalogued_is_not_negative_work() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        drive(&conn, "d1", 1, 100, 120);
+        let all = drive_coverage(&conn).unwrap();
+        assert_eq!(all[0].outstanding, 0);
+        assert!(!all[0].is_incomplete());
+        assert!(all[0].percent() <= 100.0);
+    }
+
+    #[test]
+    fn a_never_indexed_drive_says_so() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute(
+            "INSERT INTO drives (id, drive_number, status, first_seen_at)
+             VALUES ('d9', 9, 'offline', 'now')",
+            [],
+        )
+        .unwrap();
+        let all = drive_coverage(&conn).unwrap();
+        assert_eq!(all[0].summary(), "Never indexed.");
+    }
+
+    /// The estimate exists so the time can be planned for, not to warn.
+    #[test]
+    fn warns_when_a_drive_will_not_finish_overnight() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+
+        let short = estimate_indexing(&conn, 5_000);
+        assert!(!short.exceeds_one_night);
+        assert!(short.summary.contains("4.6 hours"), "{}", short.summary);
+
+        let long = estimate_indexing(&conn, 20_000);
+        assert!(long.exceeds_one_night);
+        assert!(long.summary.contains("more than one night"), "{}", long.summary);
+        assert!(long.summary.contains("until it finishes"), "{}", long.summary);
+
+        // Past a day, days are the readable unit.
+        let huge = estimate_indexing(&conn, 60_000);
+        assert!(huge.summary.contains("days"), "{}", huge.summary);
+        assert!(huge.summary.contains("keeps its place"), "{}", huge.summary);
+
+        assert_eq!(estimate_indexing(&conn, 0).summary, "No photographs found here.");
+    }
+
+    /// The estimate must reflect this machine once it has evidence of its own.
+    #[test]
+    fn measured_throughput_replaces_the_assumed_rate() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        assert_eq!(
+            estimate_indexing(&conn, 1000).files_per_second,
+            ASSUMED_FILES_PER_SECOND
+        );
+
+        // A past run: 3600 files in one hour = 1.0 files/sec, far faster than
+        // the assumed rate.
+        drive(&conn, "d1", 1, 3600, 3600);
+        let e = estimate_indexing(&conn, 3600);
+        assert!(
+            (e.files_per_second - 0.1111).abs() < 0.01,
+            "expected the measured rate, got {}",
+            e.files_per_second
+        );
+    }
+}

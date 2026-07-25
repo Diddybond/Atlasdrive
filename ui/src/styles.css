@@ -291,6 +291,12 @@ h2 {
 .adjust-panel h3 + * { margin-top: 0; }
 .adjust-panel select { max-width: 60%; }
 
+/* Whether a drive can be unplugged. Deliberately loud when the answer is no:
+   unplugging early leaves a drive part-indexed and nothing later would say so. */
+.coverage { margin: 6px 0 0; font-size: 0.86rem; font-weight: 600; }
+.coverage.done { color: var(--ok); }
+.coverage.working { color: var(--warn); }
+
 .check-list { list-style: none; margin: 0; padding: 0; }
 .check-row { display: grid; grid-template-columns: 64px 200px 1fr; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
 .pill { text-align: center; border-radius: 6px; padding: 2px 6px; font-weight: 700; font-size: 0.78rem; }

@@ -590,3 +590,29 @@ describe("Adjusting an event", () => {
     });
   });
 });
+
+describe("Knowing when a drive can be unplugged", () => {
+  it("says a finished drive is safe to unplug", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/Finished — all 4,213 photographs indexed/)).toBeDefined();
+    });
+    // Two of the three mock drives are finished; both must say so, and the
+    // unfinished one must not.
+    expect(screen.getAllByText(/Safe to unplug/)).toHaveLength(2);
+  });
+
+  it("says an unfinished drive must stay connected, and never says safe", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/4,000 still to do/)).toBeDefined();
+    });
+    const row = screen.getByText(/4,000 still to do/);
+    expect(row.textContent).toContain("Leave this drive connected");
+    // The reassuring phrase must never appear on unfinished work.
+    expect(row.textContent).not.toContain("Safe to unplug");
+    expect(row.textContent).toContain("73%");
+  });
+});

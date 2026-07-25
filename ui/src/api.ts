@@ -5,6 +5,25 @@
 // demonstrable and testable without the native layer. The shapes mirror the
 // serde types in family-archive-core.
 
+export interface DriveCoverage {
+  drive_number: number;
+  drive_name?: string | null;
+  discovered: number;
+  complete: number;
+  outstanding: number;
+  failed: number;
+  last_outcome?: string | null;
+  last_scan_at?: string | null;
+}
+
+export interface IndexEstimate {
+  files: number;
+  files_per_second: number;
+  hours: number;
+  exceeds_one_night: boolean;
+  summary: string;
+}
+
 export interface ArchiveEvent {
   id: string;
   name?: string | null;
@@ -267,6 +286,8 @@ export const api = {
   runVerifier: () => call<VerifierCheck[]>("run_verifier"),
   prepareReview: (limit: number) => call<ClusterSummary[]>("prepare_review", { limit }),
   doctor: () => call<Record<string, string>>("doctor"),
+  driveCoverage: () => call<DriveCoverage[]>("drive_coverage"),
+  estimateIndex: (path: string) => call<IndexEstimate>("estimate_index", { path }),
   similarPhotographs: (fileId: string, limit?: number) =>
     call<SearchResult[]>("similar_photographs", { fileId, limit }),
   proposeEvents: (gapHours?: number) => call<ProposeReport>("propose_events", { gapHours }),
@@ -576,6 +597,20 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     }
     case "doctor":
       return Promise.resolve({ keystore: "file-fallback-dev", archive_integrity: "ok", ai_offline: "true" } as unknown as T);
+    case "drive_coverage":
+      return Promise.resolve([
+        { drive_number: 7, drive_name: "Holidays 2004-2011", discovered: 15000, complete: 11000, outstanding: 4000, failed: 0, last_outcome: "cancelled", last_scan_at: "2026-07-20" },
+        { drive_number: 14, drive_name: "AtlasDrive A", discovered: 4213, complete: 4213, outstanding: 0, failed: 0, last_outcome: "ok", last_scan_at: "2026-07-24" },
+        { drive_number: 22, drive_name: "Scanned prints", discovered: 1502, complete: 1502, outstanding: 0, failed: 0, last_outcome: "ok", last_scan_at: "2026-05-12" },
+      ] as unknown as T);
+    case "estimate_index": {
+      const files = 14320;
+      const hours = files / 0.3 / 3600;
+      return Promise.resolve({
+        files, files_per_second: 0.3, hours, exceeds_one_night: hours > 10,
+        summary: `${files} photographs, about ${hours.toFixed(0)} hours — more than one night. Leave the drive connected until it finishes.`,
+      } as unknown as T);
+    }
     case "similar_photographs":
       return Promise.resolve(
         mockResults.filter((r) => r.file_id !== args?.fileId) as unknown as T,
