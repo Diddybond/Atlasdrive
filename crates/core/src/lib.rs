@@ -15,6 +15,7 @@
 pub mod ai;
 pub mod backup;
 pub mod bitrot;
+pub mod compare;
 pub mod config;
 pub mod crypto;
 pub mod dates;

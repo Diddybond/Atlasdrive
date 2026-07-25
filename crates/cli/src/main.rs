@@ -184,6 +184,20 @@ enum DriveAction {
         #[arg(long)]
         skip_recent_days: Option<i64>,
     },
+    /// Compare two drives by content. Neither needs to be connected.
+    ///
+    /// For understanding clone relationships, not for deleting anything.
+    Compare {
+        #[arg(long)]
+        a: i64,
+        #[arg(long)]
+        b: i64,
+        /// List the differing files, not just the counts.
+        #[arg(long)]
+        list: bool,
+    },
+    /// Find every pair of drives that look like clones of one another.
+    Clones,
     /// List registered drives.
     List,
 }
@@ -461,6 +475,50 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
         }
         DriveAction::Check { number, limit, skip_recent_days } => {
             drive_check_cmd(ctx, number, limit, skip_recent_days)
+        }
+        DriveAction::Compare { a, b, list } => {
+            let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
+            let c = family_archive_core::compare::compare_drives(&archive, a, b)?;
+            println!("{}", c.summary());
+            println!(
+                "  drive {}: {} distinct files, {} not on {}",
+                c.a_number, c.a_total, c.only_a_count, c.b_number
+            );
+            println!(
+                "  drive {}: {} distinct files, {} not on {}",
+                c.b_number, c.b_total, c.only_b_count, c.a_number
+            );
+            if list {
+                if !c.only_a.is_empty() {
+                    println!("\n  only on drive {} ({}):", c.a_number, human_bytes(c.only_a_bytes as u64));
+                    for f in &c.only_a {
+                        println!("    {}", f.relative_path);
+                    }
+                }
+                if !c.only_b.is_empty() {
+                    println!("\n  only on drive {} ({}):", c.b_number, human_bytes(c.only_b_bytes as u64));
+                    for f in &c.only_b {
+                        println!("    {}", f.relative_path);
+                    }
+                }
+                if c.truncated {
+                    println!("\n  (list truncated)");
+                }
+            }
+            Ok(())
+        }
+        DriveAction::Clones => {
+            let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
+            let pairs = family_archive_core::compare::find_near_identical(&archive)?;
+            if pairs.is_empty() {
+                println!("No drives look like clones of one another.");
+                return Ok(());
+            }
+            println!("Drives that look like clones:");
+            for c in pairs {
+                println!("  {}", c.summary());
+            }
+            Ok(())
         }
         DriveAction::List => {
             for d in repo.list()? {

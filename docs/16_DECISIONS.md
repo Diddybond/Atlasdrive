@@ -724,3 +724,39 @@ missing, which would otherwise look like catastrophic loss.
 `atlasdrive drive check --number N` exits non-zero when anything is corrupt or
 unreadable, so it can be run on a schedule. Measured on the real wedding drive:
 60 files, 747MB, 9 seconds, no corruption.
+
+## D-035: Drives are compared by content hash, for understanding not deletion
+
+**Status:** settled.
+
+**Context.** Over twenty drives accumulated across years, some drives are
+near-clones of others — the same archive copied forward, with a few files added
+to one side or the other. The owner wanted to know when that is the case, and
+explicitly did not want deduplication: "what's on those drives stays on those
+drives for now."
+
+**Decision.** `compare::compare_drives` reports overlap and the files unique to
+each side. Nothing in the module deletes, moves, or recommends removing
+anything, and that restraint is the point rather than an omission.
+
+Comparison is by BLAKE3 content hash, not by path, because clones drift: a
+photograph refiled from `2019/wedding/` into `by-client/smith/` is the same
+photograph and must count as present on both. Counting is over *distinct*
+contents, so a drive holding the same file twice does not inflate its own total
+and skew the percentages.
+
+Overlap is expressed against the **larger** drive. A small drive wholly
+contained in a large one would otherwise read as "100% identical", which would
+invite treating the large drive as redundant when it holds a great deal the
+small one does not; that case is described as "contained in" instead.
+`is_near_identical` requires 95% and is deliberately conservative for the same
+reason.
+
+**Consequence.** The comparison reads the catalogue, so neither drive needs to
+be plugged in — comparing two 4TB disks by re-reading them would need hours and
+both connected at once. `find_near_identical` sweeps every pair; at twenty
+drives that is 190 index-backed counting queries, which is nothing.
+
+`drives.backup_of_drive_id` and `set_backup_relationship` already existed in the
+data model and had never been reachable; a confirmed clone relationship can now
+be recorded against them.
