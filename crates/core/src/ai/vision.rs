@@ -192,7 +192,12 @@ impl VisionEngine {
         }
         let worker = guard.as_mut().expect("worker present");
 
-        writeln!(worker.stdin, "{}", abs.display())
+        // JSON-encode the request: a macOS filename may contain a newline, and a
+        // bare-path protocol would let it inject an extra line — desynchronising
+        // the stream so that every later photograph received the previous one's
+        // analysis. Escaping makes framing independent of the filename.
+        let request = serde_json::json!({ "path": abs.to_string_lossy() });
+        writeln!(worker.stdin, "{request}")
             .map_err(|e| Error::Other(format!("vision worker write failed: {e}")))?;
         worker
             .stdin
@@ -434,6 +439,38 @@ mod tests {
         let close = crate::util::cosine_similarity(&vr, &vr2);
         let far = crate::util::cosine_similarity(&vr, &vb);
         assert!(close > far, "near-identical {close} should beat different {far}");
+    }
+
+    /// A filename containing a newline must not desynchronise the worker stream.
+    ///
+    /// macOS permits newlines in filenames. With a bare-path protocol such a name
+    /// injected an extra request line, so the worker replied twice while the
+    /// caller read once — and from then on every photograph was given the
+    /// *previous* one's labels, faces and OCR. Silent catalogue corruption.
+    #[test]
+    fn a_newline_in_a_filename_cannot_desync_the_worker() {
+        let Some(e) = engine() else { return };
+        let dir = tempfile::tempdir().unwrap();
+
+        let awkward = dir.path().join("evil\nsecond.png");
+        let normal = dir.path().join("normal.png");
+        write_png(&awkward, [200, 30, 30], 64, 64);
+        write_png(&normal, [30, 200, 30], 64, 64);
+
+        let c = CancelToken::new();
+        // The awkward name analyses correctly rather than half-consuming the pipe.
+        let a = e.analyse_file(&awkward, &c).unwrap();
+        assert_eq!(a.value.width, 64);
+
+        // And the next call gets *its own* answer, not a stale one. A 96x64 image
+        // proves the reply belongs to this request and not the previous file.
+        let wide = dir.path().join("wide.png");
+        write_png(&wide, [30, 30, 200], 96, 64);
+        let b = e.analyse_file(&wide, &c).unwrap();
+        assert_eq!(b.value.width, 96, "reply must correspond to the file just sent");
+
+        let n = e.analyse_file(&normal, &c).unwrap();
+        assert_eq!(n.value.width, 64);
     }
 
     #[test]

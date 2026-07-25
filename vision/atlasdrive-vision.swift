@@ -7,7 +7,13 @@
 // entirely on-device, with no model download and no licence to accept.
 //
 // Protocol, deliberately dumb so the Rust side stays simple:
-//   * stdin  — one absolute image path per line, UTF-8.
+//   * stdin  — one JSON object per line: {"path":"/absolute/path"}.
+//
+//     JSON rather than a bare path for a specific reason: macOS filenames may
+//     legally contain newlines. A bare-path protocol lets such a name inject an
+//     extra line, desynchronising the stream so that every later photograph
+//     receives the *previous* one's analysis. Escaping makes the framing
+//     independent of the filename's contents.
 //   * stdout — exactly one JSON object per line, in the same order.
 //   * A file that cannot be read produces `{"ok":false,...}`, never a crash and
 //     never a skipped line, so the caller's line accounting always matches.
@@ -207,10 +213,20 @@ if CommandLine.arguments.contains("--selftest") {
 
 setbuf(stdout, nil)
 
+struct Request: Decodable { let path: String }
+
 while let line = readLine(strippingNewline: true) {
-    let path = line.trimmingCharacters(in: .whitespaces)
-    if path.isEmpty { continue }
-    let result = analyse(path: path)
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    if trimmed.isEmpty { continue }
+
+    // One reply per request line, always — even for a malformed request, or the
+    // caller's accounting breaks.
+    guard let data = trimmed.data(using: .utf8),
+          let request = try? JSONDecoder().decode(Request.self, from: data) else {
+        print("{\"ok\":false,\"error\":\"malformed request\",\"faces\":[],\"height\":0,\"labels\":[],\"ocr\":\"\",\"print\":[],\"width\":0}")
+        continue
+    }
+    let result = analyse(path: request.path)
     if let data = try? encoder.encode(result), let json = String(data: data, encoding: .utf8) {
         print(json)
     } else {

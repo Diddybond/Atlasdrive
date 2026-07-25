@@ -407,15 +407,44 @@ fn person_folders(
 }
 
 /// Open a folder in Finder. Read-only: it shows a window, nothing more.
+///
+/// The path must be a folder the catalogue actually knows about — one that
+/// contains an indexed photograph. Without that check this command would open
+/// *any* directory on the machine on request, which is more authority than a
+/// photo catalogue needs. The webview only ever loads local bundled assets, so
+/// there is no known way to reach it with a hostile path today; this is here so
+/// that stays true if the interface ever renders anything less trusted.
 #[tauri::command]
-fn open_folder(path: String) -> Result<(), String> {
+fn open_folder(state: State<AppState>, path: String) -> Result<(), String> {
     let dir = std::path::Path::new(&path);
     if !dir.is_dir() {
         return Err("That folder is not available — connect the drive and try again.".into());
     }
+
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let canonical = dir
+        .canonicalize()
+        .map_err(|_| "That folder is not available.".to_string())?;
+
+    // Resolve each scan root once and check the folder sits inside one.
+    let mut roots = archive
+        .prepare("SELECT DISTINCT scan_root FROM scan_runs WHERE mode <> 'dry-run'")
+        .map_err(map_err)?;
+    let known = roots
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(map_err)?
+        .filter_map(|r| r.ok())
+        .filter_map(|root| std::path::Path::new(&root).canonicalize().ok())
+        .any(|root| canonical.starts_with(&root));
+
+    if !known {
+        return Err("AtlasDrive only opens folders it has indexed.".into());
+    }
+
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
-        .arg(dir)
+        .arg(&canonical)
         .spawn()
         .map_err(|e| format!("could not open Finder: {e}"))?;
     Ok(())

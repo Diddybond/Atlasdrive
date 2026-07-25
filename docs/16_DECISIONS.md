@@ -509,6 +509,39 @@ described it as `outdoor 0.97, animal 0.93, horse 0.93, blue_sky 0.92`; a 43MB
 `.ARW` beside it was skipped by default and picked up only when
 `--include-type arw` was passed.
 
+## D-030: Worker requests are JSON-framed, and Finder access is catalogue-bound
+
+**Status:** Settled
+
+Two findings from a security audit of everything added since the last one.
+
+**1. A filename could corrupt the catalogue.** The Vision worker used a
+newline-delimited protocol: one path per line in, one JSON reply per line out.
+macOS permits newlines in filenames, so a file named `evil\nsecond.jpg` sent two
+request lines while the caller read one reply. Verified: two paths in, three
+replies out. From that point the stream is one behind, and **every subsequent
+photograph is committed with the previous one's labels, faces, OCR and
+embedding** — silent, permanent catalogue corruption that no verifier check
+would catch, because every row is individually well-formed.
+
+Requests are now `{"path":"…"}` per line, so framing is independent of the
+filename's bytes. A malformed request still produces exactly one reply, because
+the caller's accounting depends on it. Regression test asserts a later call gets
+its own answer, using a differently-sized image so a stale reply cannot pass.
+
+**2. `open_folder` would open any directory on the machine.** It validated only
+that the path was a directory. The webview loads nothing but local bundled
+assets under a strict CSP and the UI renders through React's escaping, so there
+is no known route to reach it with a hostile path — but a photo catalogue does
+not need the authority to open arbitrary folders. It now canonicalises the path
+and requires it to sit inside a recorded `scan_runs.scan_root`.
+
+**Also confirmed unchanged:** no SQL is built by string formatting; no process is
+launched through a shell; the CSP still grants the webview no network,
+filesystem or shell access; originals stay read-only; indexing makes no network
+call; face embeddings and face crops are encrypted at rest; the verifier still
+exits non-zero.
+
 ## New decision template
 
 ```markdown
