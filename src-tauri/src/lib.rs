@@ -211,7 +211,7 @@ fn start_index(
                 archive: &archive,
                 queue: &queue,
                 paths: &paths,
-                engines: std::sync::Arc::new(EngineRegistry::local_default()),
+                engines: std::sync::Arc::new(EngineRegistry::local_with_vision()),
                 key: &key,
                 logger: Logger::new(paths.index_log()),
                 cancel,
@@ -433,7 +433,25 @@ fn doctor(state: State<AppState>) -> Result<std::collections::BTreeMap<String, S
         "archive_integrity".into(),
         if db::integrity_check(&archive).is_ok() { "ok".into() } else { "fail".into() },
     );
-    out.insert("ai_offline".into(), EngineRegistry::local_default().all_offline().to_string());
+    let registry = EngineRegistry::local_with_vision();
+    out.insert("ai_offline".into(), registry.all_offline().to_string());
+    // Whether real image understanding is active, and which engine is doing it.
+    // Worth surfacing: without it, search falls back to colour matching and the
+    // difference is invisible from the interface.
+    match registry.file_analyser() {
+        Some(engine) => {
+            out.insert(
+                "image_recognition".into(),
+                format!("{} {}", engine.model_id(), engine.model_version()),
+            );
+        }
+        None => {
+            out.insert(
+                "image_recognition".into(),
+                "unavailable — colour matching only".into(),
+            );
+        }
+    }
     Ok(out)
 }
 

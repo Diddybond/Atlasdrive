@@ -114,6 +114,47 @@ contrast requirements. They are the only permitted additions.
   panels. They are not brand colours and never appear decoratively.
 - Body text must clear **4.5:1**; large text and non-text indicators **3:1**.
 
+## Typography
+
+Every face ships with macOS. Nothing is fetched at runtime — the webview's CSP
+has no `font-src`, and the product makes no network calls, so a webfont would be
+both blocked and off-message.
+
+| Token | Stack | Used for |
+|---|---|---|
+| `--font-brand` | Avenir Next → Avenir → Futura | The wordmark, drive numbers, headline figures |
+| `--font-display` | Avenir Next → Avenir → system | Headings, nav labels, filenames, legend text |
+| `--font-ui` | system (SF) | Body copy, form fields, anything read at length |
+| `--font-mono` | SF Mono → Menlo | Paths and identifiers, where character shape matters |
+
+Avenir Next is the brand face: geometric enough to feel cartographic, humanist
+enough to stay legible at 11px in a sidebar. SF stays for body text because it is
+what macOS optimises for reading.
+
+### The wordmark
+
+**AtlasDrive** is one word carrying two weights — `Atlas` at 500, `Drive` at 700
+— with `-0.015em` tracking so the halves read as a single word. The split is
+meaning, not decoration: *Atlas* the idea, *Drive* the object. It is two spans in
+the markup purely to allow the weights; it still reads, copies and is announced
+as "AtlasDrive".
+
+Never re-space it, hyphenate it, or set it in a different face.
+
+### Legend text
+
+Small, uppercase, widely tracked, Steel Grey — the tagline, status pills and stat
+labels. It borrows the voice of a map key: quiet, factual, secondary.
+
+Keep tracked caps on **one line**. Wrapped tracked caps read as two unrelated
+fragments, which is why the sidebar tagline is sized to fit rather than allowed
+to break.
+
+### Figures
+
+`font-variant-numeric: tabular-nums` is set on `body`. During a scan the counts
+change every second, and proportional digits make the whole layout twitch.
+
 ## Application icon
 
 The mark is a drive plate read as a map: a rounded graphite square, a Navigation

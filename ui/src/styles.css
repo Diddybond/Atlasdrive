@@ -29,6 +29,14 @@
   --warn: var(--atlas-amber-deep);
   --fail: #a3282b;
   --offline: var(--atlas-amber-deep);
+  /* Typography — see docs/BRAND.md.
+     All faces ship with macOS, so nothing is fetched at runtime: the webview's
+     CSP has no font-src and the product makes no network calls. */
+  --font-brand: "Avenir Next", "Avenir", "Futura", -apple-system, sans-serif;
+  --font-display: "Avenir Next", "Avenir", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --font-mono: "SF Mono", "Menlo", ui-monospace, monospace;
+
   --radius: 12px;
   --gap: 16px;
   font-size: 16px;
@@ -56,10 +64,15 @@
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font-ui);
   color: var(--ink);
   background: var(--bg);
   line-height: 1.5;
+  /* Photo counts and drive numbers change constantly during a scan; tabular
+     figures stop the layout twitching as the digits update. */
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 button {
@@ -105,9 +118,33 @@ input[type="text"], input[type="search"], input:not([type]) {
 }
 .brand { display: flex; align-items: center; gap: 11px; padding: 6px 8px 18px; }
 .brand-mark { flex: none; width: 36px; height: 36px; }
-.brand-text { display: flex; flex-direction: column; line-height: 1.25; }
-.brand-name { font-weight: 700; font-size: 1.05rem; letter-spacing: -0.01em; }
-.brand-tagline { font-size: 0.76rem; color: var(--ink-soft); }
+.brand-text { display: flex; flex-direction: column; gap: 3px; }
+
+/* The wordmark. One word, set in a geometric humanist face, with the weight
+   split carrying the compound: "Atlas" the idea, "Drive" the object. Tightened
+   tracking makes the two halves read as a single word rather than two. */
+.brand-name {
+  font-family: var(--font-brand);
+  font-size: 1.24rem;
+  line-height: 1;
+  letter-spacing: -0.015em;
+  color: var(--ink);
+}
+.brand-name .wm-atlas { font-weight: 500; }
+.brand-name .wm-drive { font-weight: 700; }
+
+/* Map-legend voice: small, uppercase, widely tracked. Sized to sit on one line
+   in the sidebar — tracked caps that wrap read as two unrelated fragments. */
+.brand-tagline {
+  font-family: var(--font-display);
+  font-size: 0.55rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--ink-soft);
+  line-height: 1.2;
+  white-space: nowrap;
+}
 .sidebar ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .nav-item {
   width: 100%;
@@ -122,8 +159,8 @@ input[type="text"], input[type="search"], input:not([type]) {
 }
 .nav-item:hover { background: rgba(61, 169, 252, 0.12); }
 .nav-item.active { background: var(--accent); color: var(--accent-ink); }
-.nav-label { font-weight: 600; }
-.nav-hint { font-size: 0.8rem; opacity: 0.8; }
+.nav-label { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.005em; }
+.nav-hint { font-size: 0.78rem; opacity: 0.75; }
 .demo-badge {
   margin-top: auto;
   font-size: 0.8rem;
@@ -135,8 +172,20 @@ input[type="text"], input[type="search"], input:not([type]) {
 }
 
 .content { padding: 32px 40px; max-width: 1100px; }
-h1 { font-size: 1.7rem; margin: 0 0 6px; }
-h2 { font-size: 1.15rem; margin: 0 0 12px; }
+h1 {
+  font-family: var(--font-display);
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0 0 6px;
+}
+h2 {
+  font-family: var(--font-display);
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 12px;
+}
 .lede { color: var(--ink-soft); max-width: 60ch; margin: 0 0 24px; }
 .footnote { color: var(--ink-soft); font-size: 0.85rem; margin-top: 20px; max-width: 62ch; }
 .empty { color: var(--ink-soft); padding: 24px 0; }
@@ -168,19 +217,27 @@ h2 { font-size: 1.15rem; margin: 0 0 12px; }
 .thumb-mark { font-size: 2rem; }
 .result-body { padding: 12px 14px; }
 .result-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-.drive-badge { background: var(--accent); color: var(--accent-ink); border-radius: 6px; padding: 2px 8px; font-size: 0.8rem; font-weight: 700; }
-.status { font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.drive-badge { background: var(--accent); color: var(--accent-ink); border-radius: 6px; padding: 2px 8px; font-size: 0.78rem; font-weight: 700; font-family: var(--font-brand); letter-spacing: 0.01em; }
+.status { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; font-family: var(--font-display); }
 .status.online { color: var(--ok); }
 .status.offline { color: var(--offline); }
-.filename { font-weight: 600; margin: 4px 0; word-break: break-word; }
+.filename { font-family: var(--font-display); font-weight: 600; font-size: 0.95rem; margin: 4px 0; word-break: break-word; }
 .date { color: var(--ink-soft); font-size: 0.9rem; margin: 2px 0; }
 .matched { color: var(--ink-soft); font-size: 0.82rem; margin: 6px 0 0; }
 .offline-note { color: var(--offline); font-size: 0.85rem; margin: 8px 0 0; font-weight: 600; }
 
 .drive-list { list-style: none; margin: 0; padding: 0; }
 .drive-card { display: flex; align-items: center; gap: 18px; }
-.drive-number { min-width: 56px; height: 56px; border-radius: 12px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-size: 1.5rem; font-weight: 800; }
-.drive-name { font-weight: 700; margin: 0 0 4px; }
+.drive-number {
+  min-width: 56px; height: 56px; border-radius: 12px;
+  background: var(--accent); color: var(--accent-ink);
+  display: grid; place-items: center;
+  font-family: var(--font-brand);
+  font-size: 1.5rem; font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.drive-name { font-family: var(--font-display); font-weight: 600; font-size: 1.05rem; letter-spacing: -0.01em; margin: 0 0 4px; }
 .drive-meta { color: var(--ink-soft); margin: 0; font-size: 0.9rem; }
 .drive-meta.subtle { font-size: 0.82rem; }
 
@@ -188,8 +245,8 @@ h2 { font-size: 1.15rem; margin: 0 0 12px; }
 .progress-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin: 16px 0 0; }
 .stats div { background: var(--bg); border-radius: 8px; padding: 10px 12px; }
-.stats dt { font-size: 0.78rem; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.04em; }
-.stats dd { margin: 4px 0 0; font-size: 1.15rem; font-weight: 700; }
+.stats dt { font-size: 0.68rem; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.12em; font-weight: 600; font-family: var(--font-display); }
+.stats dd { margin: 4px 0 0; font-size: 1.3rem; font-weight: 600; font-family: var(--font-brand); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 .capitalize { text-transform: capitalize; }
 
 .review-list { list-style: none; margin: 0; padding: 0; }

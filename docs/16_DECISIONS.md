@@ -277,6 +277,54 @@ authority back to the estimator. Ranges are validated as `YYYY-MM-DD` and a
 reversed range is ordered rather than rejected, but a malformed date is refused —
 guessing at it would be fabricating a date, which D-006 forbids.
 
+## D-024: Apple Vision provides real image understanding
+
+**Status:** Settled
+
+**Supersedes:** the "heuristic engine is the default analyser" part of D-013.
+D-013 still governs the fallback.
+
+**Context:** The `local-heuristic` engine could not say what a photograph shows.
+Its "visual embedding" was a 4×4 grid of average colours, its "face detection"
+was skin-tone blob finding, and its OCR returned an empty string. Searching
+"bike" matched colour layout, not bicycles. That gap between what the interface
+implied and what the product delivered was the single biggest honesty problem in
+the app.
+
+**Decision:** Apple's Vision framework is the default analyser on macOS. It
+provides object and scene classification (~1,300 labels with confidences), real
+text recognition, real face detection and a learned 768-dimension feature print
+— all on-device, with no model download, no licence and no network.
+
+It runs as a long-lived Swift worker (`vision/atlasdrive-vision.swift`) speaking
+a line-oriented JSON protocol, which is exactly the "replaceable local analysis
+worker in another language where model support is stronger" that D-009
+anticipates. A process per photograph would dominate the cost of a large scan.
+
+Because real models analyse once and produce everything, `AiEngine` gains
+`analyse_file` plus `supports_file_analysis`. The per-capability methods would
+have forced one full model pass per capability.
+
+**Consequences:**
+
+- Vision's embedding is its own `(apple-vision, 1.0.0)` partition at 768
+  dimensions, never compared against the heuristic engine's 65. This is what
+  model-version partitioning was built for.
+- Classification labels become concept tags and recognised text goes into
+  `files_fts`, so "bike" finds photographs Vision labelled `bicycle`, and words
+  visible *inside* a photograph become searchable.
+- Vision has **no text tower**, so a natural-language query cannot be projected
+  into the feature-print space. Query-time text embedding stays on the heuristic
+  engine for colour and mood; object matching goes through the label index,
+  which is the better mechanism for named things anyway.
+- Indexing never depends on the worker. A missing or crashed worker falls back
+  to the heuristic engine per file and logs it; a corrupt image is a per-file
+  error, not a run failure.
+- Labels below 0.20 confidence are dropped. Vision emits a long tail of
+  near-zero guesses and storing them would make search worse, not better.
+- The worker ships as a Tauri resource. Tauri rewrites `../vision/bin/x` to
+  `Resources/_up_/vision/bin/x`, so the lookup checks that layout explicitly.
+
 ## New decision template
 
 ```markdown

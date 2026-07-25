@@ -86,3 +86,6 @@ src-tauri/icons/32x32.png
 src-tauri/icons/128x128*.png
 src-tauri/icons/Square*.png
 src-tauri/icons/StoreLogo.png
+
+# The Vision worker is compiled by vision/build.sh; the Swift source is tracked.
+vision/bin/

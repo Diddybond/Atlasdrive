@@ -488,23 +488,74 @@ impl<'a> Pipeline<'a> {
         let md = metadata::extract(&abs, Some((w, h)));
 
         // 5. AI analysis (all local, offline).
+        //
+        // Colour and scan-artefact analysis are cheap pixel statistics and always
+        // come from the heuristic engine. Everything that needs a model — the
+        // embedding, what the photograph shows, its text and its faces — comes
+        // from a single-pass analyser when one is registered (Apple Vision), and
+        // from the heuristic engine otherwise.
         let cancel = &self.cancel;
         let color = self
             .engines
             .engine_for(Capability::Color)
             .color(&rgb, cancel)?;
-        let scene = self
-            .engines
-            .engine_for(Capability::Scene)
-            .scene(&rgb, cancel)?;
         let scan_art = self
             .engines
             .engine_for(Capability::ScanArtifact)
             .scan_artifact(&rgb, cancel)?;
-        let embed_engine = self.engines.engine_for(Capability::VisualEmbedding);
-        let embedding = embed_engine.visual_embedding(&rgb, cancel)?;
-        let face_engine = self.engines.engine_for(Capability::FaceDetection);
-        let faces = face_engine.detect_faces(&rgb, cancel)?;
+
+        let analyser = self.engines.file_analyser();
+        // A real model failing on one photograph must not fail the run; fall
+        // back to the heuristic engine for that file and carry on.
+        let analysis = match &analyser {
+            Some(engine) => match engine.analyse_file(&abs, cancel) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    self.logger
+                        .warn("file_analysis_fallback")
+                        .field("path", item.relative_path.clone())
+                        .field("error", format!("{e}"))
+                        .emit_best_effort();
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let (embedding, faces, scene, ocr_text) = match analysis {
+            Some(a) => {
+                let meta = a.meta.clone();
+                let value = a.value;
+                let embedding = match value.embedding {
+                    Some(e) => crate::ai::Provenanced::new(e, meta.clone()),
+                    // An analyser that recognised the image but produced no
+                    // vector still leaves search working via the other engine.
+                    None => self
+                        .engines
+                        .engine_for(Capability::VisualEmbedding)
+                        .visual_embedding(&rgb, cancel)?,
+                };
+                let scene = match value.scene {
+                    Some(s) => crate::ai::Provenanced::new(s, meta.clone()),
+                    None => self.engines.engine_for(Capability::Scene).scene(&rgb, cancel)?,
+                };
+                let faces = crate::ai::Provenanced::new(value.faces, meta);
+                (embedding, faces, scene, value.ocr.map(|o| o.text))
+            }
+            None => {
+                let embedding = self
+                    .engines
+                    .engine_for(Capability::VisualEmbedding)
+                    .visual_embedding(&rgb, cancel)?;
+                let scene = self.engines.engine_for(Capability::Scene).scene(&rgb, cancel)?;
+                let faces = self
+                    .engines
+                    .engine_for(Capability::FaceDetection)
+                    .detect_faces(&rgb, cancel)?;
+                (embedding, faces, scene, None)
+            }
+        };
+        let face_engine = self.engines.engine_for(Capability::FaceEmbedding);
 
         // 6. Date estimate.
         let filename_year = dates::year_from_text(&item.relative_path);
@@ -546,7 +597,8 @@ impl<'a> Pipeline<'a> {
         let tx = self.archive.unchecked_transaction()?;
         self.commit_file(
             &tx, &file_id, drive, item, &snap, &content_hash, &phash, &md, &color.value,
-            &scene.value, &scan_art.value, &embedding, &date_est, &thumb, &faces.value, &rgb,
+            &scene.value, &scan_art.value, &embedding, &date_est, &thumb, &faces.value,
+            ocr_text.as_deref(), &rgb,
             &face_engine, cancel,
         )?;
         tx.commit()?;
@@ -584,6 +636,7 @@ impl<'a> Pipeline<'a> {
         date_est: &dates::DateEstimate,
         thumb: &thumbnail::ThumbnailInfo,
         faces: &[crate::ai::FaceDetection],
+        ocr_text: Option<&str>,
         rgb: &image::RgbImage,
         face_engine: &Arc<dyn crate::ai::AiEngine>,
         cancel: &CancelToken,
@@ -664,11 +717,12 @@ impl<'a> Pipeline<'a> {
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
              ON CONFLICT(file_id) DO UPDATE SET
                 description=excluded.description, concepts_json=excluded.concepts_json,
+                ocr_text=excluded.ocr_text, ocr_confidence=excluded.ocr_confidence,
                 likely_scanned_print=excluded.likely_scanned_print",
             params![
                 file_id, scene.indoor_prob, scene.outdoor_prob, scene.people_count,
                 scene.description, serde_json::to_string(&scene.concepts)?,
-                Option::<String>::None, 0.0,
+                ocr_text, if ocr_text.is_some() { 1.0 } else { 0.0 },
                 serde_json::to_string(color)?, scan_art.likely_scanned_print as i64,
                 scan_art.likely_photo_of_photo as i64,
                 serde_json::to_string(scan_art)?,
@@ -748,7 +802,10 @@ impl<'a> Pipeline<'a> {
         tx.execute(
             "INSERT INTO files_fts (file_id, filename, relative_path, tags, ocr_text, description)
              VALUES (?1,?2,?3,?4,?5,?6)",
-            params![file_id, filename, item.relative_path, tag_text, "", scene.description],
+            params![
+                file_id, filename, item.relative_path, tag_text,
+                ocr_text.unwrap_or(""), scene.description
+            ],
         )?;
 
         Ok(())

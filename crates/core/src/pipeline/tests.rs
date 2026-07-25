@@ -606,6 +606,140 @@ fn a_user_date_override_survives_reanalysis() {
     assert!(repo.get(&file_id).unwrap().is_none());
 }
 
+/// With Apple Vision registered, the catalogue records what a photograph
+/// actually shows and the words visible inside it — and both become searchable.
+///
+/// This is the difference between the heuristic engine and real understanding,
+/// so it is asserted end to end rather than at the engine boundary.
+#[cfg(target_os = "macos")]
+#[test]
+fn vision_records_real_labels_and_readable_text() {
+    use crate::search::{SearchFilters, SearchRepo};
+
+    // Skip when the Swift worker has not been built in this checkout.
+    if crate::ai::vision::VisionEngine::detect().is_none() {
+        return;
+    }
+
+    let (h, opts) = setup(no_disk_floor());
+
+    // An image with unmistakable content: rendered text on a page. Vision should
+    // classify it as a document and read the words back.
+    let doc = h.drive_dir.join("papers/letter.png");
+    std::fs::create_dir_all(doc.parent().unwrap()).unwrap();
+    render_text_image(&doc, "MARGARET");
+
+    let p = Pipeline {
+        archive: &h.archive,
+        queue: &h.queue,
+        paths: &h.paths,
+        engines: Arc::new(EngineRegistry::local_with_vision()),
+        key: &h.key,
+        logger: Logger::new(h.paths.index_log()),
+        cancel: CancelToken::new(),
+    };
+    let summary = p.run(&opts).unwrap();
+    assert_eq!(summary.files_failed, 0);
+
+    // The analysis is attributed to Vision, not the heuristic engine.
+    let (model, description): (String, String) = h
+        .archive
+        .query_row(
+            "SELECT s.model_id, s.description FROM scene_analysis s
+               JOIN files f ON f.id = s.file_id WHERE f.filename='letter.png'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(model, crate::ai::vision::MODEL_ID);
+    assert!(!description.is_empty());
+
+    // Embeddings land in Vision's own partition at its own dimension, never
+    // mixed with the heuristic engine's.
+    let (dim, count): (i64, i64) = h
+        .archive
+        .query_row(
+            "SELECT dim, count(*) FROM visual_embeddings WHERE model_id=?1",
+            [crate::ai::vision::MODEL_ID],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(dim, 768);
+    assert!(count > 0);
+
+    // The word is only present as pixels — not in the filename, not in the path.
+    let ocr: String = h
+        .archive
+        .query_row(
+            "SELECT COALESCE(s.ocr_text,'') FROM scene_analysis s
+               JOIN files f ON f.id = s.file_id WHERE f.filename='letter.png'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        ocr.to_uppercase().contains("MARGARET"),
+        "Vision should have read the text; got {ocr:?}"
+    );
+
+    // And that makes it findable by searching for what the photograph says.
+    let repo = SearchRepo::new(&h.archive);
+    let hits = repo
+        .text_search(
+            "MARGARET",
+            &SearchFilters { include_offline: true, limit: 10, ..Default::default() },
+        )
+        .unwrap();
+    assert!(
+        hits.iter().any(|r| r.filename == "letter.png"),
+        "recognised text must be searchable"
+    );
+}
+
+/// Draw large block letters onto a white page, so Vision has real text to read
+/// without needing a font renderer or a checked-in photograph.
+#[cfg(target_os = "macos")]
+fn render_text_image(path: &Path, word: &str) {
+    // A coarse 5x7 block font, enough for Vision's text recogniser.
+    const GLYPHS: &[(char, [&str; 7])] = &[
+        ('A', ["00100", "01010", "01010", "10001", "11111", "10001", "10001"]),
+        ('E', ["11111", "10000", "10000", "11110", "10000", "10000", "11111"]),
+        ('G', ["01110", "10001", "10000", "10111", "10001", "10001", "01110"]),
+        ('M', ["10001", "11011", "10101", "10001", "10001", "10001", "10001"]),
+        ('R', ["11110", "10001", "10001", "11110", "10010", "10010", "10001"]),
+        ('T', ["11111", "00100", "00100", "00100", "00100", "00100", "00100"]),
+    ];
+    let scale = 26u32;
+    let pad = 60u32;
+    let letters: Vec<&[&str; 7]> = word
+        .chars()
+        .filter_map(|c| GLYPHS.iter().find(|(g, _)| *g == c).map(|(_, rows)| rows))
+        .collect();
+    let w = pad * 2 + letters.len() as u32 * 7 * scale;
+    let h = pad * 2 + 7 * scale;
+    let mut img = RgbImage::from_pixel(w, h, Rgb([255, 255, 255]));
+    for (i, rows) in letters.iter().enumerate() {
+        let ox = pad + i as u32 * 7 * scale;
+        for (ry, row) in rows.iter().enumerate() {
+            for (cx, ch) in row.chars().enumerate() {
+                if ch != '1' {
+                    continue;
+                }
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let x = ox + cx as u32 * scale + dx;
+                        let y = pad + ry as u32 * scale + dy;
+                        if x < w && y < h {
+                            img.put_pixel(x, y, Rgb([15, 15, 15]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    img.save(path).unwrap();
+}
+
 #[test]
 fn rerun_is_idempotent() {
     let (h, opts) = setup(no_disk_floor());

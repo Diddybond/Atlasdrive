@@ -327,7 +327,7 @@ fn build_pipeline<'a>(
         archive,
         queue,
         paths: &ctx.paths,
-        engines: Arc::new(EngineRegistry::local_default()),
+        engines: Arc::new(EngineRegistry::local_with_vision()),
         key,
         logger: Logger::new(ctx.paths.index_log()).echo_stderr(true),
         cancel: family_archive_core::ai::CancelToken::new(),
@@ -577,7 +577,7 @@ fn doctor_cmd(ctx: &Ctx) -> Result<()> {
     }
     let free = family_archive_core::util::available_space(&ctx.paths.root)?;
     println!("  free space on data volume: {} MB", free / (1024 * 1024));
-    let engines = EngineRegistry::local_default();
+    let engines = EngineRegistry::local_with_vision();
     println!("  AI engine offline-only: {}", engines.all_offline());
     Ok(())
 }

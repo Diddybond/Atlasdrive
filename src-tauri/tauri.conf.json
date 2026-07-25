@@ -7,7 +7,7 @@
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm --prefix ../ui run dev",
-    "beforeBuildCommand": "npm --prefix ../ui run build"
+    "beforeBuildCommand": "sh ../vision/build.sh && npm --prefix ../ui run build"
   },
   "app": {
     "windows": [
@@ -25,7 +25,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
+    "targets": [
+      "dmg",
+      "app"
+    ],
     "category": "Photography",
     "shortDescription": "Private local photo catalogue across numbered drives",
     "longDescription": "AtlasDrive indexes photographs across numbered external drives, keeps them searchable offline, and never modifies originals.",
@@ -38,6 +41,9 @@
     ],
     "macOS": {
       "minimumSystemVersion": "12.0"
-    }
+    },
+    "resources": [
+      "../vision/bin/atlasdrive-vision"
+    ]
   }
 }

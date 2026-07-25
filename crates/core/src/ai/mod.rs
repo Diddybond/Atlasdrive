@@ -22,6 +22,8 @@
 
 pub mod local;
 pub mod text;
+#[cfg(target_os = "macos")]
+pub mod vision;
 pub mod types;
 
 pub use types::*;
@@ -80,6 +82,26 @@ pub trait AiEngine: Send + Sync {
         true
     }
 
+    /// True when [`AiEngine::analyse_file`] is the efficient path for this
+    /// engine, and the pipeline should prefer it over the per-capability calls.
+    fn supports_file_analysis(&self) -> bool {
+        false
+    }
+
+    /// Analyse an original in a single pass, reading it directly from disk.
+    ///
+    /// Implementations must treat the path as strictly read-only. Working from
+    /// the file rather than a decoded [`RgbImage`] lets a real model see the
+    /// photograph at full fidelity instead of a re-encode, which matters for
+    /// text recognition in particular.
+    fn analyse_file(
+        &self,
+        _abs: &std::path::Path,
+        _cancel: &CancelToken,
+    ) -> Result<Provenanced<FileAnalysis>> {
+        Err(unsupported("analyse_file"))
+    }
+
     fn visual_embedding(&self, _img: &RgbImage, _cancel: &CancelToken) -> Result<Provenanced<Embedding>> {
         Err(unsupported("visual_embedding"))
     }
@@ -136,6 +158,31 @@ impl EngineRegistry {
             engines: vec![engine.clone()],
             default: engine,
         }
+    }
+
+    /// The default registry, plus Apple Vision when its worker is available.
+    ///
+    /// This is what callers should use: it gives real image understanding when
+    /// the platform can provide it, and silently falls back to the deterministic
+    /// heuristic engine when it cannot. Indexing never depends on Vision being
+    /// present.
+    pub fn local_with_vision() -> Self {
+        let mut reg = Self::local_default();
+        #[cfg(target_os = "macos")]
+        if let Some(v) = vision::VisionEngine::detect() {
+            reg.register(Arc::new(v));
+        }
+        reg
+    }
+
+    /// The engine that should be used for whole-file analysis, if any engine
+    /// offers it (most-recently registered wins, as with capabilities).
+    pub fn file_analyser(&self) -> Option<Arc<dyn AiEngine>> {
+        self.engines
+            .iter()
+            .rev()
+            .find(|e| e.supports_file_analysis())
+            .cloned()
     }
 
     /// Register an additional engine (plugin). Later registrations take

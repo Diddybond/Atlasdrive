@@ -81,22 +81,36 @@ true and are **not** covered by the rubric:
    another machine. Signing needs an Apple Developer ID — a credential only the
    owner can supply — so this is the one genuine release blocker, and no amount
    of further coding removes it.
-2. **The default AI engine is a deterministic heuristic, not a learned model.**
-   It is real, offline and honest about its confidence, but its accuracy is what
-   colour-and-layout analysis can achieve, not what CLIP would. D-013 and D-017
-   record the drop-in replacement path.
+2. **Image understanding is now real, but it is Apple's model, with Apple's
+   limits.** Vision classifies against roughly 1,300 labels — it will recognise
+   "bicycle", "cake", "dog", "document"; it will not name your grandmother's
+   village. Abstract or low-contrast images honestly report "no recognisable
+   subject" rather than inventing one. See D-024.
 
 Neither affects a safety boundary. Originals stay read-only, indexing stays
 offline, face embeddings stay encrypted, and the verifier still exits non-zero
 on failure.
 
-## Honest limits of the current text encoder
+## How search actually works now
 
-Natural-language search is real and runs offline, but the default engine is a
-deterministic lexicon over visual priors, not a learned CLIP text tower. It
-resolves colour, lighting, setting and "is there a person in the middle" — the
-signals the heuristic image encoder actually records. Single-concept queries
-("snow", "sunset", "red") rank correctly; multi-concept queries blend their
-priors and can drift toward mid-tones. `docs/16_DECISIONS.md` D-017 records the
-replacement path: register a learned local encoder under the same capability and
-its own model version, with no database change.
+Two mechanisms, deliberately, because they are good at different things.
+
+**Content and text — Apple Vision (D-024).** Every photograph is classified
+against Apple's label set and any visible text is read. Both go into the
+full-text index, so searching "bicycle" finds bicycles, and searching a word
+that appears only *as pixels inside* a photograph finds it too. This is the leg
+that answers "what is this a picture of".
+
+**Colour and mood — the heuristic text encoder (D-017).** Vision has no text
+tower, so a free-text query cannot be projected into its 768-dimension feature
+space. The lexicon encoder still handles "snow", "sunset", "dark", "black and
+white" by rendering the query into the shared colour-layout space. Queries it
+does not understand drop this leg entirely rather than ranking by noise.
+
+The two are fused by `natural_language_search`, with confirmed text matches
+weighted above visual guesses.
+
+**Remaining honest limit:** the heuristic leg blends multi-concept queries such
+as "blue sea" and can drift towards mid-tones. That mattered a great deal when it
+was the only leg; now Vision's label index handles the object queries it was
+being asked to approximate.

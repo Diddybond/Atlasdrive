@@ -97,6 +97,25 @@ pub struct ColorResult {
     pub is_grayscale: bool,
 }
 
+/// Everything a single-pass analyser produces from one read of a file.
+///
+/// Real vision models do object classification, text recognition, face
+/// detection and embedding in one pass over the pixels. Asking for each
+/// capability separately would re-run the whole model per capability, so an
+/// engine that works this way reports it via
+/// [`super::AiEngine::supports_file_analysis`] and the pipeline takes this path
+/// instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAnalysis {
+    pub embedding: Option<Embedding>,
+    pub ocr: Option<OcrResult>,
+    pub faces: Vec<FaceDetection>,
+    pub scene: Option<SceneResult>,
+    /// Pixel dimensions as the analyser saw them.
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Signals that an image is a scan of a physical print.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanArtifactResult {

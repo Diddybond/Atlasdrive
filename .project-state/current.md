@@ -6,11 +6,24 @@
   drive details, date override)
 - Current completion score: **100/100** under `docs/15_DEFINITION_OF_DONE.md`
 - Critical gates passing: **10/10**
-- Latest test result: 100 core + 2 CLI + 10 UI = 112 passing, `cargo test` exit 0;
+- Latest test result: 109 core + 10 UI passing;
   clippy clean across the workspace and `src-tauri`, including test targets
 - Current files being changed: none (clean checkpoint)
 - Runtime safety status: all safety boundaries implemented and tested; the
   original-integrity halt was demonstrated on macOS with a real exit code 10
+
+## Image recognition is real now
+
+Apple Vision is the default analyser on macOS (D-024): object and scene
+classification, real OCR, real face detection, and a learned 768-dimension
+feature print — on-device, no download, no licence, no network. It runs as a
+long-lived Swift worker shipped inside the app bundle. A missing or crashed
+worker falls back to the heuristic engine per file, so indexing never depends on
+it.
+
+What this changed in practice: searching "bicycle" now finds bicycles, and a word
+visible only as pixels inside a photograph is findable. Abstract images honestly
+report "no recognisable subject" instead of inventing one.
 
 ## The one thing that is not done
 

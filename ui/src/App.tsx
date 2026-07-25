@@ -25,7 +25,12 @@ export function App() {
         <div className="brand">
           <img className="brand-mark" src="./atlasdrive-mark.png" alt="" width={36} height={36} />
           <span className="brand-text">
-            <span className="brand-name">AtlasDrive</span>
+            {/* Split only so the wordmark can carry two weights; it still reads
+                and copies as the single word "AtlasDrive". */}
+            <span className="brand-name">
+              <span className="wm-atlas">Atlas</span>
+              <span className="wm-drive">Drive</span>
+            </span>
             <span className="brand-tagline">Your photographs, mapped</span>
           </span>
         </div>
