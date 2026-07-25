@@ -144,6 +144,10 @@ struct IndexArgs {
     free_space_floor: String,
     #[arg(long)]
     exclude: Vec<String>,
+    /// Also index this file type, e.g. --include-type arw --include-type heic.
+    /// By default a scan takes JPEG, PNG, TIFF and PSD only — RAW is skipped.
+    #[arg(long = "include-type")]
+    include_type: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -455,6 +459,11 @@ fn index_cmd(ctx: &Ctx, args: IndexArgs) -> Result<()> {
     opts.resume = args.resume;
     opts.exclusions = args.exclude;
     opts.config = config;
+    opts.extra_extensions = args
+        .include_type
+        .iter()
+        .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
+        .collect();
 
     let pipeline = build_pipeline(ctx, &archive, &queue, &key);
     let summary = pipeline.run(&opts)?;

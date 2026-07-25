@@ -58,6 +58,9 @@ pub struct IndexOptions {
     pub mode: IndexMode,
     pub resume: bool,
     pub exclusions: Vec<String>,
+    /// Extra file types to index for this run only (RAW, HEIC, …). Empty by
+    /// default: the scan takes JPEG, PNG, TIFF and PSD unless told otherwise.
+    pub extra_extensions: Vec<String>,
     pub config: Config,
 }
 
@@ -69,6 +72,7 @@ impl IndexOptions {
             mode: IndexMode::Normal,
             resume: false,
             exclusions: Vec::new(),
+            extra_extensions: Vec::new(),
             config: Config::default(),
         }
     }
@@ -232,6 +236,7 @@ impl<'a> Pipeline<'a> {
         let scan_opts = ScanOptions {
             exclusions: opts.exclusions.clone(),
             max_files: if dry_run { Some(20) } else { None },
+            extra_extensions: opts.extra_extensions.clone(),
         };
         let discovered = scan::enumerate(&opts.path, &scan_opts)?;
         let q = Queue::new(self.queue);

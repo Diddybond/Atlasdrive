@@ -125,6 +125,22 @@ atlasdrive drive set --number 14 --physical-location "Drawer 2" \
 `--category` replaces the existing list. Passing an empty
 `--physical-location ""` clears it; omitting a flag leaves that field alone.
 
+## What gets indexed
+
+A scan takes the formats work is delivered in — **JPEG, PNG, TIFF and PSD**.
+RAW is skipped: on a real drive it outnumbers the deliverables two to one, and
+cataloguing negatives nobody searches would triple the scan.
+
+To include something else, ask for it per scan:
+
+```bash
+atlasdrive index --drive 1 --path /Volumes/Late25A --include-type arw
+atlasdrive index --drive 1 --path /Volumes/Late25A --include-type heic --include-type webp
+```
+
+Opting into one type does not admit the others, and `.xmp` sidecars are never
+treated as photographs.
+
 ## What is on a drive
 
 ```bash

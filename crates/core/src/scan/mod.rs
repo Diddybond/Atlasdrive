@@ -14,11 +14,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// Image extensions we target first (see `docs/05`). HEIC/HEIF decoding on
-/// macOS uses the system pipeline; on other platforms it is recorded as a
-/// structured "decoder unavailable" failure rather than crashing.
-pub const SUPPORTED_EXTENSIONS: &[&str] =
-    &["jpg", "jpeg", "png", "tif", "tiff", "webp", "heic", "heif", "bmp", "gif"];
+/// What a scan indexes unless told otherwise.
+///
+/// Deliberately the delivery formats a photographer actually works in. RAW is
+/// **not** here: a working drive holds far more RAW than anything else (54,083
+/// `.arw` against 26,541 `.jpg` on one real drive), they are the negatives
+/// rather than the pictures, and indexing them by default would triple the scan
+/// time to catalogue files nobody searches for.
+///
+/// Anything else — RAW, HEIC, WebP — is available per scan via
+/// [`ScanOptions::extra_extensions`], so it is included only when asked for.
+pub const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "psd"];
 
 /// The app-owned folder written to drives; never scanned as content.
 pub const APP_MANIFEST_DIR: &str = ".atlasdrive";
@@ -40,9 +46,22 @@ pub struct ScanOptions {
     pub exclusions: Vec<String>,
     /// Stop after discovering this many files (used by `--dry-run`).
     pub max_files: Option<usize>,
+    /// Extra extensions to include for this scan only, lowercase and without a
+    /// dot — e.g. `["arw", "heic"]`. Empty by default, so RAW and everything
+    /// else is indexed only when explicitly asked for.
+    pub extra_extensions: Vec<String>,
+}
+
+impl ScanOptions {
+    /// True when this scan should index `ext`.
+    pub fn accepts(&self, ext: &str) -> bool {
+        let e = ext.to_ascii_lowercase();
+        is_supported_extension(&e) || self.extra_extensions.iter().any(|x| x == &e)
+    }
 }
 
 /// True if `ext` (lowercased, no dot) is a supported media type.
+/// True when `ext` is indexed by default.
 pub fn is_supported_extension(ext: &str) -> bool {
     let e = ext.trim_start_matches('.').to_ascii_lowercase();
     SUPPORTED_EXTENSIONS.contains(&e.as_str())
@@ -153,7 +172,7 @@ pub fn enumerate(root: &Path, opts: &ScanOptions) -> Result<Vec<DiscoveredFile>>
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if !is_supported_extension(&ext) {
+        if !opts.accepts(&ext) {
             continue;
         }
         let relative = match abs.strip_prefix(&root_canon) {

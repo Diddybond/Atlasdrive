@@ -477,6 +477,38 @@ back the file up first.
 **Verified** against a real 2,393-byte Camera Raw sidecar copied off the drive:
 the write is refused and the SHA-256 is unchanged.
 
+## D-029: Index the delivery formats; RAW only on request
+
+**Status:** Settled
+
+**Supersedes:** the extension list in D-005-era `SUPPORTED_EXTENSIONS`.
+
+**Context:** A census of a real working drive found **54,083 `.arw` against
+26,541 `.jpg`** — RAW is two-thirds of the archive. Indexing it by default would
+roughly triple every scan to catalogue negatives the user does not search, and
+would fill the catalogue and the face gallery with duplicates of every delivered
+frame.
+
+**Decision:** A scan takes **`jpg`, `jpeg`, `png`, `tif`, `tiff`, `psd`** — the
+formats work is delivered in. Anything else is per-scan opt-in via
+`--include-type arw`, which is case-insensitive and additive: opting into one
+type does not admit the rest.
+
+PSD joins the system-decoder path alongside HEIC, because the `image` crate
+cannot read it but ImageIO can, and ImageIO flattens the composite exactly as
+Photoshop and Bridge display it.
+
+`.xmp` is never a photograph and is never indexed.
+
+**Consequences:** Scans are dramatically smaller and faster on a professional
+archive, and the catalogue describes deliverables rather than negatives. A user
+who does want RAW asks for it once per scan.
+
+**Verified** on real files: a 276MB layered PSD indexed in 17s and Vision
+described it as `outdoor 0.97, animal 0.93, horse 0.93, blue_sky 0.92`; a 43MB
+`.ARW` beside it was skipped by default and picked up only when
+`--include-type arw` was passed.
+
 ## New decision template
 
 ```markdown

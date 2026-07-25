@@ -22,7 +22,15 @@ use image::RgbImage;
 use crate::error::{Error, Result};
 
 /// Extensions that need the system decoder rather than the `image` crate.
-const SYSTEM_DECODE_EXTENSIONS: &[&str] = &["heic", "heif"];
+///
+/// PSD is here for the same reason as HEIC: the `image` crate cannot read it,
+/// but ImageIO can, and it flattens the composite exactly as Photoshop and
+/// Bridge display it. Verified on a real 276MB layered PSD.
+///
+/// RAW formats are listed so that a scan which *opts in* to them can decode
+/// them too — ImageIO reads all of these.
+const SYSTEM_DECODE_EXTENSIONS: &[&str] =
+    &["heic", "heif", "psd", "arw", "cr2", "cr3", "nef", "dng", "raf", "rw2", "orf"];
 
 /// True when `path` needs the platform decoder.
 pub fn needs_system_decoder(path: &Path) -> bool {

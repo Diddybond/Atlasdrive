@@ -514,7 +514,9 @@ fn a_file_vanishing_mid_run_is_isolated_not_fatal() {
 #[cfg(target_os = "macos")]
 #[test]
 fn indexes_a_real_heic_photograph_on_macos() {
-    let (h, opts) = setup(no_disk_floor());
+    let (h, mut opts) = setup(no_disk_floor());
+    // HEIC is not a default type (D-029) — a scan opts into it.
+    opts.extra_extensions = vec!["heic".into()];
 
     // Build a genuine HEIC with the system tool, then index it alongside the
     // ordinary fixtures.
@@ -907,6 +909,56 @@ fn face_crops_are_stored_locally_and_survive_disconnection() {
     assert_ne!(raw, bytes, "the stored bytes must not be the plain image");
     // Not a bare JPEG either — SOI marker would be the giveaway.
     assert_ne!(&raw[..2.min(raw.len())], b"\xff\xd8");
+}
+
+/// A scan indexes the delivery formats and leaves RAW alone unless asked.
+///
+/// This is a deliberate default, not a limitation: a working drive holds far
+/// more RAW than anything else, and cataloguing negatives nobody searches for
+/// would triple the scan for no benefit.
+#[test]
+fn raw_files_are_skipped_unless_explicitly_requested() {
+    let (h, opts) = setup(no_disk_floor());
+
+    // Delivery formats alongside their RAW negatives, as a real shoot looks.
+    write_photo(&h.drive_dir.join("shoot/_DSC0001.png"), [90, 140, 200], 60, 40);
+    std::fs::write(h.drive_dir.join("shoot/_DSC0001.arw"), b"raw bytes").unwrap();
+    std::fs::write(h.drive_dir.join("shoot/_DSC0002.cr2"), b"raw bytes").unwrap();
+    std::fs::write(h.drive_dir.join("shoot/_DSC0001.xmp"), b"<x:xmpmeta/>").unwrap();
+
+    let summary = pipeline(&h).run(&opts).unwrap();
+    // The three fixture photos plus the new PNG — no RAW, no sidecar.
+    assert_eq!(summary.files_discovered, 4);
+
+    let indexed: Vec<String> = {
+        let mut stmt = h.archive.prepare("SELECT filename FROM files").unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert!(indexed.iter().any(|f| f == "_DSC0001.png"));
+    assert!(!indexed.iter().any(|f| f.ends_with(".arw")), "RAW must be skipped");
+    assert!(!indexed.iter().any(|f| f.ends_with(".cr2")), "RAW must be skipped");
+    assert!(!indexed.iter().any(|f| f.ends_with(".xmp")), "sidecars are not photographs");
+}
+
+#[test]
+fn the_default_file_types_are_the_delivery_formats() {
+    use crate::scan::{is_supported_extension, ScanOptions};
+
+    for wanted in ["jpg", "jpeg", "png", "tif", "tiff", "psd"] {
+        assert!(is_supported_extension(wanted), "{wanted} should be indexed by default");
+    }
+    for skipped in ["arw", "cr2", "cr3", "nef", "dng", "rw2", "xmp"] {
+        assert!(!is_supported_extension(skipped), "{skipped} must not be indexed by default");
+    }
+
+    // Opting in is per scan, and case-insensitive.
+    let opts = ScanOptions { extra_extensions: vec!["arw".into()], ..Default::default() };
+    assert!(opts.accepts("ARW"));
+    assert!(opts.accepts("jpg"));
+    assert!(!opts.accepts("cr2"), "opting into one type must not open the floodgates");
 }
 
 #[test]
