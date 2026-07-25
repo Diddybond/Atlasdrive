@@ -577,7 +577,12 @@ fn search_catalogue(
 ) -> Result<SearchResponse, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
-    let repo = family_archive_core::search::SearchRepo::new(&archive);
+    // The index lives in the cache directory: it is derived entirely from the
+    // catalogue, so losing it costs a rebuild and nothing else.
+    let repo = family_archive_core::search::SearchRepo::with_index_dir(
+        &archive,
+        paths.cache_dir(),
+    );
     let filters = SearchFilters {
         drive_number: drive,
         online_only: !include_offline,

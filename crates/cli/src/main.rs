@@ -616,7 +616,7 @@ fn index_cmd(ctx: &Ctx, args: IndexArgs) -> Result<()> {
 
 fn search_cmd(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     let archive = ctx.open_archive()?;
-    let repo = SearchRepo::new(&archive);
+    let repo = SearchRepo::with_index_dir(&archive, ctx.paths.cache_dir());
     let filters = SearchFilters {
         drive_number: args.drive,
         online_only: !args.offline_included,
