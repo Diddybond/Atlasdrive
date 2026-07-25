@@ -1042,3 +1042,32 @@ ISO date; and this passed a directory that was silently discarded. All three
 produced confident green ticks over the wrong thing, and none was found by a
 failing assertion — they were found by reading output and by sampling a hung
 process.
+
+## D-044: Thumbnail re-encoding is spread across cores; the database write is not
+
+**Status:** settled.
+
+**Context.** `compact` converted 758 thumbnails in 96 seconds on one core. That
+extrapolates to roughly seven hours across a 200,000-file archive on a machine
+with sixteen cores sitting idle.
+
+**Decision.** Decoding and re-encoding is pure CPU and entirely independent per
+thumbnail, so it runs on `available_parallelism()` threads via
+`std::thread::scope` — no new dependency. The database is deliberately *not*
+parallel: a rusqlite `Connection` is not `Sync`, and interleaving writes from
+several threads would buy nothing over one writer. Workers produce finished
+bytes and checksums; the calling thread commits them.
+
+The safety property from D-033 is preserved exactly: each thumbnail is written,
+re-decoded to prove it opens, and only then does its row change and the old file
+get removed. An interrupted run still leaves every remaining row pointing at a
+file that exists.
+
+**Consequence.** A test converts sixty-four thumbnails of *distinct sizes* and
+checks each row individually — path, checksum, and the dimensions belonging to
+that file. Distinct sizes matter: with uniform fixtures, a result attributed to
+the wrong row would pass unnoticed, which is precisely the failure a
+parallel-then-collect design can introduce.
+
+Not re-measured end to end, because the real catalogue is already converted and
+the operation is one-off per catalogue.

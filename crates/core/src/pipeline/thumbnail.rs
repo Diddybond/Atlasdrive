@@ -122,57 +122,123 @@ pub fn recompress_to_jpeg(
         mapped.collect::<std::result::Result<_, _>>()?
     };
 
-    for (file_id, old_rel) in rows {
-        if !old_rel.ends_with(".png") {
-            report.already_jpeg += 1;
-            continue;
-        }
-        let old_abs = thumbnails_dir.join(&old_rel);
-        let Ok(decoded) = image::open(&old_abs) else {
-            // A thumbnail that no longer opens is the verifier's problem, not
-            // this pass's; leave the row untouched so the failure stays visible.
-            report.failed += 1;
-            continue;
-        };
-        let before = std::fs::metadata(&old_abs).map(|m| m.len()).unwrap_or(0);
-        let rgb = decoded.to_rgb8();
-        let (w, h) = rgb.dimensions();
+    let (pending, already): (Vec<_>, Vec<_>) =
+        rows.into_iter().partition(|(_, rel)| rel.ends_with(".png"));
+    report.already_jpeg = already.len() as u64;
+    if pending.is_empty() {
+        return Ok(report);
+    }
 
-        let new_rel = rel_path_for(&file_id);
-        let new_abs = thumbnails_dir.join(&new_rel);
-        if let Some(parent) = new_abs.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let bytes = match encode(&rgb) {
-            Ok(b) => b,
-            Err(_) => {
-                report.failed += 1;
-                continue;
+    // Decoding and re-encoding is pure CPU and entirely independent per
+    // thumbnail, so it is spread across the machine. The database is not: a
+    // rusqlite Connection is not Sync, and interleaving writes from several
+    // threads would buy nothing over a single writer anyway. Workers therefore
+    // produce finished bytes and the caller's thread commits them.
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(pending.len());
+    let chunk = pending.len().div_ceil(threads);
+
+    let converted: Vec<Converted> = std::thread::scope(|scope| {
+        let handles: Vec<_> = pending
+            .chunks(chunk)
+            .map(|slice| scope.spawn(move || convert_chunk(slice, thumbnails_dir)))
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .flatten()
+            .collect()
+    });
+
+    for c in converted {
+        match c {
+            Ok(done) => {
+                conn.execute(
+                    "UPDATE thumbnails
+                        SET rel_path = ?1, format = 'jpeg', checksum = ?2, width = ?3, height = ?4
+                      WHERE file_id = ?5",
+                    rusqlite::params![
+                        &done.new_rel,
+                        &done.checksum,
+                        done.width,
+                        done.height,
+                        &done.file_id
+                    ],
+                )?;
+                // The row now points at the new file, so the old one is
+                // redundant — and only now.
+                let _ = std::fs::remove_file(thumbnails_dir.join(&done.old_rel));
+                report.converted += 1;
+                report.bytes_before += done.bytes_before;
+                report.bytes_after += done.bytes_after;
             }
-        };
-        std::fs::write(&new_abs, &bytes)?;
-        if image::open(&new_abs).is_err() {
-            let _ = std::fs::remove_file(&new_abs);
-            report.failed += 1;
-            continue;
+            Err(()) => report.failed += 1,
         }
-
-        let checksum = blake3::hash(&bytes).to_hex().to_string();
-        conn.execute(
-            "UPDATE thumbnails
-                SET rel_path = ?1, format = 'jpeg', checksum = ?2, width = ?3, height = ?4
-              WHERE file_id = ?5",
-            rusqlite::params![&new_rel, &checksum, w, h, &file_id],
-        )?;
-        // Only now is the old file redundant.
-        let _ = std::fs::remove_file(&old_abs);
-
-        report.converted += 1;
-        report.bytes_before += before;
-        report.bytes_after += bytes.len() as u64;
     }
 
     Ok(report)
+}
+
+/// One successfully re-encoded thumbnail, ready to be recorded.
+struct Done {
+    file_id: String,
+    old_rel: String,
+    new_rel: String,
+    checksum: String,
+    width: u32,
+    height: u32,
+    bytes_before: u64,
+    bytes_after: u64,
+}
+
+type Converted = std::result::Result<Done, ()>;
+
+/// Re-encode a slice of thumbnails. Touches no database.
+fn convert_chunk(slice: &[(String, String)], thumbnails_dir: &Path) -> Vec<Converted> {
+    slice
+        .iter()
+        .map(|(file_id, old_rel)| convert_one(file_id, old_rel, thumbnails_dir))
+        .collect()
+}
+
+fn convert_one(file_id: &str, old_rel: &str, thumbnails_dir: &Path) -> Converted {
+    let old_abs = thumbnails_dir.join(old_rel);
+    // A thumbnail that no longer opens is the verifier's problem, not this
+    // pass's; leave the row untouched so the failure stays visible.
+    let Ok(decoded) = image::open(&old_abs) else { return Err(()) };
+    let bytes_before = std::fs::metadata(&old_abs).map(|m| m.len()).unwrap_or(0);
+    let rgb = decoded.to_rgb8();
+    let (width, height) = rgb.dimensions();
+
+    let new_rel = rel_path_for(file_id);
+    let new_abs = thumbnails_dir.join(&new_rel);
+    if let Some(parent) = new_abs.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return Err(());
+        }
+    }
+    let Ok(bytes) = encode(&rgb) else { return Err(()) };
+    if std::fs::write(&new_abs, &bytes).is_err() {
+        return Err(());
+    }
+    // Prove it opens before anything is allowed to depend on it.
+    if image::open(&new_abs).is_err() {
+        let _ = std::fs::remove_file(&new_abs);
+        return Err(());
+    }
+
+    Ok(Done {
+        file_id: file_id.to_string(),
+        old_rel: old_rel.to_string(),
+        new_rel,
+        checksum: blake3::hash(&bytes).to_hex().to_string(),
+        width,
+        height,
+        bytes_before,
+        bytes_after: bytes.len() as u64,
+    })
 }
 
 /// Verify an existing thumbnail file still matches recorded checksum/dimensions
@@ -321,6 +387,92 @@ mod tests {
 
         // And the superseded PNG is gone, which is the point of the exercise.
         assert!(!legacy.exists());
+    }
+
+    /// Conversion is spread across threads, so it has to hold up on a batch
+    /// larger than one thread's share — and every row must end up correct, not
+    /// merely most of them.
+    #[test]
+    fn converts_a_large_batch_correctly_in_parallel() {
+        let dir = tempfile::tempdir().unwrap();
+        let thumbs = dir.path().join("thumbnails");
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE thumbnails (file_id TEXT PRIMARY KEY, rel_path TEXT, width INT,
+                                      height INT, format TEXT, checksum TEXT,
+                                      decode_ok INT, created_at TEXT);",
+        )
+        .unwrap();
+
+        // Enough to span every worker, with distinct sizes so a mixed-up row
+        // would show as wrong dimensions rather than passing unnoticed.
+        const N: u32 = 64;
+        for i in 0..N {
+            let id = format!("{i:08x}");
+            let shard = &id[0..2];
+            std::fs::create_dir_all(thumbs.join(shard)).unwrap();
+            let img = photograph_like(40 + i, 30 + i);
+            img.save_with_format(
+                thumbs.join(format!("{shard}/{id}.png")),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO thumbnails VALUES (?1, ?2, ?3, ?4, 'png', 'old', 1, 'now')",
+                rusqlite::params![id, format!("{shard}/{id}.png"), 40 + i, 30 + i],
+            )
+            .unwrap();
+        }
+
+        let report = recompress_to_jpeg(&conn, &thumbs).unwrap();
+        assert_eq!(report.converted, N as u64);
+        assert_eq!(report.failed, 0);
+        assert!(report.bytes_after < report.bytes_before);
+
+        // Every row points at a JPEG that exists, opens, matches its recorded
+        // checksum, and has the dimensions belonging to *that* file.
+        let mut stmt = conn
+            .prepare("SELECT file_id, rel_path, width, height, checksum, format FROM thumbnails")
+            .unwrap();
+        let rows: Vec<(String, String, u32, u32, String, String)> = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), N as usize);
+
+        for (file_id, rel, w, h, checksum, format) in rows {
+            assert_eq!(format, "jpeg");
+            assert_eq!(rel, rel_path_for(&file_id));
+            let i = u32::from_str_radix(&file_id, 16).unwrap();
+            assert_eq!((w, h), (40 + i, 30 + i), "row {file_id} took another file's size");
+            let bytes = std::fs::read(thumbs.join(&rel)).unwrap();
+            assert_eq!(checksum, blake3::hash(&bytes).to_hex().to_string());
+            let opened = image::open(thumbs.join(&rel)).unwrap();
+            assert_eq!((opened.width(), opened.height()), (40 + i, 30 + i));
+        }
+
+        // And no PNG survives.
+        let leftovers = walk_count(&thumbs, "png");
+        assert_eq!(leftovers, 0, "old PNGs should be gone");
+    }
+
+    /// Count files with a given extension anywhere under `dir`.
+    fn walk_count(dir: &Path, ext: &str) -> usize {
+        let mut n = 0;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    n += walk_count(&p, ext);
+                } else if p.extension().and_then(|x| x.to_str()) == Some(ext) {
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
     /// Running it twice must be harmless — migrations get re-run.
