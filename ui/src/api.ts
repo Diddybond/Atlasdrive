@@ -461,8 +461,18 @@ let mockBackupSeq = 0;
 // Varied rather than constant: photographs differ in size and in how many
 // faces they contain, so real throughput wanders. A perfectly flat mock would
 // have hidden the chart drawing a solid block instead of a line.
+//
+// The variation is applied to the *speed*, integrated over elapsed time, so the
+// running total only ever increases. An earlier version multiplied the total by
+// the jitter, which let the count go backwards — something real progress never
+// does, and which correctly caused the rate to refuse to quote a figure.
 const MOCK_FILES_PER_SEC = 0.22;
-const mockJitter = () => 1 + Math.sin(Date.now() / 9000) * 0.28;
+function mockDone(): number {
+  const elapsed = (Date.now() - mockRunStarted) / 1000;
+  // Integral of 0.22 * (1 + 0.28 sin(t/9)) dt, which is monotonic in t.
+  const wobble = 0.28 * 9 * (1 - Math.cos(elapsed / 9));
+  return Math.min(8333, Math.floor(MOCK_FILES_PER_SEC * (elapsed + wobble)));
+}
 const mockRunStarted = Date.now() - 20 * 60 * 1000;
 
 let mockEvents: ArchiveEvent[] = [];
@@ -538,8 +548,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       // A run that actually advances, so the rate and finish-time working is
       // exercised rather than assumed. A frozen mock would have let a broken
       // estimate look perfectly healthy.
-      const elapsedSec = (Date.now() - mockRunStarted) / 1000;
-      const done = Math.min(8333, Math.floor(elapsedSec * MOCK_FILES_PER_SEC * mockJitter()));
+      const done = mockDone();
       return Promise.resolve({
         runId: "mock-run",
         driveNumber: 2,
@@ -558,7 +567,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case "scan_stats": {
       // Derived from the same simulated clock as get_progress, so the feed and
       // the counter cannot tell different stories.
-      const done = Math.min(8333, Math.floor(((Date.now() - mockRunStarted) / 1000) * MOCK_FILES_PER_SEC));
+      const done = mockDone();
       const subjects = ["bride", "confetti", "speech", "cake", "dance floor", "church", "bouquet"];
       return Promise.resolve({
         drive_number: 2,

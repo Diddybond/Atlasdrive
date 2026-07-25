@@ -776,44 +776,59 @@ describe("Scan progress dashboard", () => {
   it("shows how far through the drive it is", async () => {
     await openScan();
     await waitFor(() => {
-      expect(screen.getByText(/of 8,333 photographs/)).toBeDefined();
+      expect(screen.getByText(/8,333 photographs/)).toBeDefined();
     });
-    // A progress bar with a real value, not just a decorative strip.
+    // A progress bar carrying a real value, not a decorative strip.
     const bar = screen.getByRole("progressbar");
     expect(Number(bar.getAttribute("aria-valuenow"))).toBeGreaterThanOrEqual(0);
     expect(bar.getAttribute("aria-valuemax")).toBe("100");
+    // And the headline counts, as tiles.
+    expect(screen.getByText("Photographs found")).toBeDefined();
+    expect(screen.getByText("Left to read")).toBeDefined();
   });
 
   it("says it is safe to walk away", async () => {
     await openScan();
     await waitFor(() => {
-      expect(screen.getByText(/stay awake until the scan finishes/)).toBeDefined();
+      expect(screen.getByText(/stays awake while scanning/)).toBeDefined();
     });
-    expect(screen.getByText(/interrupting it loses nothing/)).toBeDefined();
+    expect(screen.getByText(/Interrupting loses nothing/)).toBeDefined();
+    expect(screen.getByText(/read-only/)).toBeDefined();
   });
 
   it("shows a live feed of the photographs it has just read", async () => {
     await openScan();
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Live feed", level: 2 })).toBeDefined();
+      expect(screen.getByRole("heading", { name: "Live feed", level: 3 })).toBeDefined();
     });
-    // Real rows, newest first, with what each photograph is of.
     const rows = document.querySelectorAll(".feed li");
     expect(rows.length).toBeGreaterThan(0);
     expect(rows[0].textContent).toMatch(/IMG_\d+\.jpg/);
-    // And the running total of what has been found alongside it.
-    expect(screen.getByRole("heading", { name: "What it has found", level: 2 })).toBeDefined();
+    // Alongside the running totals of what has been recognised.
+    expect(screen.getByRole("heading", { name: "What it has found", level: 3 })).toBeDefined();
     expect(screen.getByText("Faces")).toBeDefined();
   });
 
   it("waits for real evidence before quoting a speed", async () => {
     await openScan();
-    // With only one sample there is nothing honest to say, so it must say that
-    // rather than divide by a near-zero interval and print a wild figure.
+    // One sample proves nothing, so the gauge must say so rather than divide by
+    // a near-zero interval and swing to a wild figure.
     await waitFor(() => {
-      expect(screen.getByText("measuring…")).toBeDefined();
+      expect(screen.getByText("Measuring…")).toBeDefined();
     });
-    const times = screen.getAllByText("—").length + screen.getAllByText("…").length;
-    expect(times).toBeGreaterThan(0);
+    const gauge = screen.getByRole("img", { name: /Read speed/ });
+    expect(gauge.getAttribute("aria-label")).toContain("not yet measured");
+  });
+
+  it("scales the gauge so a slow drive still moves the needle", async () => {
+    await openScan();
+    await waitFor(() => {
+      expect(screen.getByRole("img", { name: /Read speed/ })).toBeDefined();
+    });
+    // The dial is drawn from the data, so a fixed 0-1000 face never appears.
+    const bounds = [...document.querySelectorAll(".gauge-bound")].map((n) => n.textContent);
+    expect(bounds[0]).toBe("0");
+    expect(Number(bounds[1])).toBeLessThanOrEqual(2000);
   });
 });
+

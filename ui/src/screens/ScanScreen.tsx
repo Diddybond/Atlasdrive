@@ -1,23 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { api, Progress, ScanStats } from "../api";
+import { Gauge } from "./scan/Gauge";
+import { Donut } from "./scan/Donut";
+import { AreaChart } from "./scan/AreaChart";
+import { record, ratePerSecond, secondsRemaining, type Sample } from "./scan/rate";
 
 // The scan screen only ever *observes*. Indexing is started deliberately from
 // the Drives screen or the CLI — visiting this tab must never begin a scan.
 const POLL_MS = 1500;
-
-/// A sample of how far along a run was at a moment in time.
-interface Sample {
-  at: number;
-  done: number;
-}
-
-/// How far back to measure the rate.
-///
-/// Long enough to be steady — a single photograph can take anywhere from one
-/// second to twenty depending on how many faces are in it — and short enough
-/// that the figure still reflects the drive being read now rather than an
-/// average over the whole night.
-const RATE_WINDOW_MS = 3 * 60 * 1000;
 
 export function ScanScreen() {
   const [progress, setProgress] = useState<Progress | null>(null);
@@ -29,12 +19,14 @@ export function ScanScreen() {
   const samples = useRef<Sample[]>([]);
   const [rate, setRate] = useState<number | null>(null);
   const [stats, setStats] = useState<ScanStats | null>(null);
-  // Recent throughput readings, for the activity chart. Kept as a plain array
-  // rather than a charting library: a hundred numbers drawn as an SVG polyline
-  // is a few lines of code and no dependency.
-  const [history, setHistory] = useState<number[]>([]);
   const byteSamples = useRef<Sample[]>([]);
   const [mbPerSec, setMbPerSec] = useState<number | null>(null);
+  // The gauge face is sized from the fastest reading seen, so a slow drive
+  // still swings the needle. Kept separately from the current value because a
+  // dial that rescaled downwards would make a steady drive look like it was
+  // speeding up.
+  const [peakMb, setPeakMb] = useState(0);
+  const [mbHistory, setMbHistory] = useState<number[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,20 +39,8 @@ export function ScanScreen() {
 
       if (live) {
         const now = Date.now();
-        const history = samples.current;
-        // Only record when the count actually moves, so a stalled run shows a
-        // falling rate rather than a confidently wrong one.
-        if (history.length === 0 || history[history.length - 1].done !== live.filesDone) {
-          history.push({ at: now, done: live.filesDone });
-        }
-        while (history.length > 2 && now - history[0].at > RATE_WINDOW_MS) history.shift();
-
-        const first = history[0];
-        const last = history[history.length - 1];
-        const seconds = (last.at - first.at) / 1000;
-        const fps = seconds >= 20 && last.done > first.done ? (last.done - first.done) / seconds : null;
-        setRate(fps);
-        if (fps !== null) setHistory((h) => [...h, fps * 60].slice(-120));
+        samples.current = record(samples.current, now, live.filesDone);
+        setRate(ratePerSecond(samples.current, now));
       }
 
       if (live && live.status === "running") {
@@ -72,17 +52,14 @@ export function ScanScreen() {
         // catalogued. Photographs vary from 2MB to 80MB, so a count per minute
         // says little about how hard the drive is working.
         const now = Date.now();
-        const bs = byteSamples.current;
-        if (bs.length === 0 || bs[bs.length - 1].done !== s.bytes) {
-          bs.push({ at: now, done: s.bytes });
+        byteSamples.current = record(byteSamples.current, now, s.bytes);
+        const bytesPerSec = ratePerSecond(byteSamples.current, now);
+        const mbps = bytesPerSec === null ? null : bytesPerSec / 1_048_576;
+        setMbPerSec(mbps);
+        if (mbps !== null) {
+          setPeakMb((p) => Math.max(p, mbps));
+          setMbHistory((h) => [...h, mbps].slice(-140));
         }
-        while (bs.length > 2 && now - bs[0].at > RATE_WINDOW_MS) bs.shift();
-        const bSeconds = (bs[bs.length - 1].at - bs[0].at) / 1000;
-        setMbPerSec(
-          bSeconds >= 20 && bs[bs.length - 1].done > bs[0].done
-            ? (bs[bs.length - 1].done - bs[0].done) / bSeconds / 1_048_576
-            : null,
-        );
       }
       // Keep polling only while a run is actually in flight.
       if (live && live.status === "running") {
@@ -118,7 +95,7 @@ export function ScanScreen() {
   const pct = Math.min(100, Math.round((progress.filesDone / total) * 100));
   const running = progress.status === "running";
   const remaining = Math.max(0, progress.filesDiscovered - progress.filesDone);
-  const secondsLeft = rate && rate > 0 ? remaining / rate : null;
+  const secondsLeft = secondsRemaining(remaining, rate);
 
   return (
     <section aria-labelledby="scan-heading">
@@ -128,176 +105,177 @@ export function ScanScreen() {
         batch boundary.
       </p>
 
-      <div className="card">
-        <div className="row-between">
-          <h2>Drive {progress.driveNumber}</h2>
-          <span className={running ? "status online" : "status offline"}>
+      <div className="console">
+        <div className="console-head">
+          <div>
+            <h2>Drive {progress.driveNumber}</h2>
+            <p className="console-sub">
+              {running ? "Reading photographs from this drive" : statusLabel(progress.status)}
+            </p>
+          </div>
+          <span className={running ? "pill-live" : "pill-idle"}>
+            {running && <span className="live-dot" aria-hidden />}
             {statusLabel(progress.status)}
           </span>
         </div>
-        <div
-          className="progress"
-          role="progressbar"
-          aria-valuenow={pct}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-label={`Indexing progress: ${pct}%`}
-        >
-          <div className="progress-fill" style={{ width: `${pct}%` }} />
+
+        <div className="console-top">
+          <section className="panel gauge-panel">
+            <h3>Read speed</h3>
+            <Gauge value={mbPerSec} peak={peakMb} />
+            <p className="panel-note">
+              {mbPerSec === null ? "Measuring…" : running ? "Sustained" : "Stopped"}
+            </p>
+          </section>
+
+          <div className="tiles">
+            <Tile
+              tone="blue"
+              icon="▦"
+              label="Photographs found"
+              value={progress.filesDiscovered.toLocaleString()}
+              sub="On this drive"
+            />
+            <Tile
+              tone="violet"
+              icon="◷"
+              label="Left to read"
+              value={remaining.toLocaleString()}
+              sub="Remaining"
+            />
+            <Tile
+              tone="green"
+              icon="◎"
+              label="Finishes in"
+              value={running && secondsLeft !== null ? duration(secondsLeft) : "—"}
+              sub={running && secondsLeft !== null ? finishTime(secondsLeft) : "Estimating"}
+            />
+            <Tile
+              tone="amber"
+              icon="⧗"
+              label="Been running for"
+              value={elapsed(progress.startedAt)}
+              sub={rate ? `${(rate * 60).toFixed(1)} photographs/min` : "Elapsed"}
+            />
+          </div>
         </div>
-        <p className="counter">
-          <strong>{progress.filesDone.toLocaleString()}</strong>
-          <span className="counter-of"> of {progress.filesDiscovered.toLocaleString()} photographs</span>
-          <span className="counter-pct">{pct}%</span>
-        </p>
 
-        <dl className="stats">
-          <div>
-            <dt>Remaining</dt>
-            <dd>{remaining.toLocaleString()}</dd>
-          </div>
-          <div>
-            <dt>Speed</dt>
-            <dd>{running ? (rate ? `${(rate * 60).toFixed(1)}/min` : "measuring…") : "—"}</dd>
-          </div>
-          <div>
-            <dt>Time left</dt>
-            <dd>{running ? (secondsLeft !== null ? duration(secondsLeft) : "…") : "—"}</dd>
-          </div>
-          <div>
-            <dt>Should finish</dt>
-            <dd>{running && secondsLeft !== null ? finishTime(secondsLeft) : "—"}</dd>
-          </div>
-          <div>
-            <dt>Running for</dt>
-            <dd>{elapsed(progress.startedAt)}</dd>
-          </div>
-          <div>
-            <dt>Failed</dt>
-            <dd className={progress.filesFailed > 0 ? "bad" : undefined}>
-              {progress.filesFailed.toLocaleString()}
-            </dd>
-          </div>
-        </dl>
-
-        {running && history.length > 3 && (
-          <div className="activity">
+        {mbHistory.length > 3 && (
+          <section className="panel">
             <div className="row-between">
               <h3>Read activity</h3>
-              <span className="check-detail">
-                {mbPerSec !== null ? `${mbPerSec.toFixed(1)} MB/s` : "measuring…"}
+              <span className="realtime">
+                Real-time <span className="live-dot" aria-hidden />
               </span>
             </div>
-            <Sparkline values={history} />
-          </div>
+            <AreaChart values={mbHistory} unit="MB/s" />
+          </section>
         )}
 
-        {running && (
-          <p className="footnote">
-            This Mac will stay awake until the scan finishes. You can close this window — indexing
-            carries on, and interrupting it loses nothing.
-          </p>
-        )}
-        {progress.status === "interrupted" && (
-          <p className="offline-note">
-            This scan was interrupted. Nothing was lost — start it again to pick up where it left
-            off.
-          </p>
-        )}
-        <p className="footnote">
-          Original files are opened read-only. If anything about an original changes during a scan,
-          the app stops immediately and writes a safety report.
-        </p>
-      </div>
-
-      {stats && stats.files > 0 && (
-        <div className="scan-grid">
-          <div className="card">
-            <h2>What it has found</h2>
-            <dl className="stats">
-              <div><dt>Faces</dt><dd>{stats.faces.toLocaleString()}</dd></div>
-              <div><dt>Tags applied</dt><dd>{stats.tags.toLocaleString()}</dd></div>
-              <div><dt>People known</dt><dd>{stats.people_recognised.toLocaleString()}</dd></div>
-              <div><dt>Read so far</dt><dd>{gb(stats.bytes)}</dd></div>
-            </dl>
-
-            <h3>File types</h3>
-            <ul className="type-bars">
-              {stats.by_extension.slice(0, 5).map(([ext, n]) => (
-                <li key={ext}>
-                  <span className="type-name">{ext.toUpperCase()}</span>
-                  <span className="type-bar">
-                    <span
-                      className="type-fill"
-                      style={{ width: `${Math.max(2, (n / Math.max(1, stats.files)) * 100)}%` }}
-                    />
-                  </span>
-                  <span className="type-count">
-                    {((n / Math.max(1, stats.files)) * 100).toFixed(1)}%
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div className="card">
+        <div className="console-bottom">
+          <section className="panel">
             <div className="row-between">
-              <h2>Live feed</h2>
-              {running && <span className="live-dot" aria-label="Live" role="img" />}
+              <h3>Overall progress</h3>
+              <span className="big-pct">{pct}%</span>
             </div>
-            <p className="check-detail">The photographs it has just read, newest first.</p>
-            <ul className="feed">
-              {stats.recent.map((f) => (
-                <li key={f.file_id}>
-                  <span className="feed-name" title={f.relative_path}>
-                    {f.filename}
-                  </span>
-                  <span className="feed-meta">
-                    {f.top_tag && <span className="feed-tag">{f.top_tag}</span>}
-                    {f.faces > 0 && (
-                      <span className="feed-faces">
-                        {f.faces} {f.faces === 1 ? "face" : "faces"}
-                      </span>
-                    )}
-                    <span className="feed-size">{mb(f.size_bytes)}</span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
+            <p className="panel-note">
+              Reading JPEG, PNG, TIFF and PSD — RAW files are skipped unless you ask for them.
+            </p>
+            <div
+              className="bar"
+              role="progressbar"
+              aria-valuenow={pct}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={`Indexing progress: ${pct}%`}
+            >
+              <div className="bar-fill" style={{ width: `${pct}%` }} />
+            </div>
+            <div className="bar-legend">
+              <span>
+                <strong>{progress.filesDone.toLocaleString()}</strong> / {progress.filesDiscovered.toLocaleString()} photographs
+              </span>
+              {stats && <span>{gb(stats.bytes)} read</span>}
+            </div>
+          </section>
+
+          {stats && stats.by_extension.length > 0 && (
+            <section className="panel">
+              <h3>File types</h3>
+              <Donut slices={stats.by_extension.slice(0, 5)} />
+            </section>
+          )}
         </div>
-      )}
+
+        {stats && stats.files > 0 && (
+          <div className="console-bottom">
+            <section className="panel">
+              <h3>What it has found</h3>
+              <dl className="found">
+                <div><dt>Faces</dt><dd>{stats.faces.toLocaleString()}</dd></div>
+                <div><dt>Tags applied</dt><dd>{stats.tags.toLocaleString()}</dd></div>
+                <div><dt>People known</dt><dd>{stats.people_recognised.toLocaleString()}</dd></div>
+                <div><dt>Failed</dt><dd className={progress.filesFailed > 0 ? "bad" : undefined}>{progress.filesFailed.toLocaleString()}</dd></div>
+              </dl>
+            </section>
+
+            <section className="panel">
+              <div className="row-between">
+                <h3>Live feed</h3>
+                {running && <span className="live-dot" aria-label="Live" role="img" />}
+              </div>
+              <ul className="feed">
+                {stats.recent.map((f) => (
+                  <li key={f.file_id}>
+                    <span className="feed-name" title={f.relative_path}>{f.filename}</span>
+                    <span className="feed-meta">
+                      {f.top_tag && <span className="feed-tag">{f.top_tag}</span>}
+                      {f.faces > 0 && <span className="feed-faces">{f.faces} {f.faces === 1 ? "face" : "faces"}</span>}
+                      <span className="feed-size">{mb(f.size_bytes)}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          </div>
+        )}
+
+        <footer className="console-foot">
+          <span>Originals opened read-only</span>
+          <span>This Mac stays awake while scanning</span>
+          <span>Interrupting loses nothing</span>
+          {progress.status === "interrupted" && <span className="warn">Paused — start it again to continue</span>}
+        </footer>
+      </div>
     </section>
   );
 }
 
-/// A throughput chart, drawn as a plain SVG polyline.
-///
-/// A charting library would be a dependency and a bundle for one line on one
-/// screen. The y-axis is scaled to the data rather than fixed, so a slow drive
-/// still shows its shape instead of a flat line along the bottom.
-function Sparkline({ values }: { values: number[] }) {
-  const w = 600;
-  const h = 64;
-  // Headroom above the peak, so a perfectly steady rate draws a line across
-  // the upper third rather than filling the box to the brim and reading as a
-  // solid block. Indexing is often steady for long stretches.
-  const peak = Math.max(...values, 1) * 1.35;
-  const step = w / Math.max(1, values.length - 1);
-  const points = values
-    .map((v, i) => `${(i * step).toFixed(1)},${(h - (v / peak) * (h - 6) - 3).toFixed(1)}`)
-    .join(" ");
+/// One statistic, as a card with a coloured icon tile.
+function Tile({
+  tone,
+  icon,
+  label,
+  value,
+  sub,
+}: {
+  tone: string;
+  icon: string;
+  label: string;
+  value: string;
+  sub: string;
+}) {
   return (
-    <svg
-      className="sparkline"
-      viewBox={`0 0 ${w} ${h}`}
-      preserveAspectRatio="none"
-      role="img"
-      aria-label={`Read activity, currently ${values[values.length - 1].toFixed(0)} photographs per minute`}
-    >
-      <polyline className="spark-line" points={points} />
-      <polyline className="spark-fill" points={`0,${h} ${points} ${w},${h}`} />
-    </svg>
+    <div className="tile">
+      <span className={`tile-icon ${tone}`} aria-hidden>
+        {icon}
+      </span>
+      <span className="tile-body">
+        <span className="tile-label">{label}</span>
+        <strong className="tile-value">{value}</strong>
+        <span className="tile-sub">{sub}</span>
+      </span>
+    </div>
   );
 }
 

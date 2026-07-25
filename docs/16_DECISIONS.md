@@ -1420,3 +1420,47 @@ itself: opening a folder and answering "who is this?" are different intentions,
 and one click target serving both would make each of them worse. The existing
 `reveal_in_finder` already refuses gracefully when the drive is not connected,
 which is the common case for a face found on a disk now sitting on a shelf.
+
+## D-055: The scan console, and arithmetic that is tested rather than watched
+
+**Status:** settled.
+
+**Context.** The owner supplied a reference dashboard and asked for the same
+treatment. The previous version had the right figures in a plain layout.
+
+**Decision.** Scan activity is a dark instrument panel — dark in both app themes,
+because it is looked at across a room at two in the morning while a drive grinds
+through ten thousand photographs, and a bright panel at that hour is hostile.
+
+It carries a read-speed gauge, four stat tiles, a read-activity area chart with a
+labelled axis, a gradient progress bar, a file-type ring, the running totals, and
+the live feed.
+
+**Two things are derived rather than decorative.** The gauge face is scaled from
+the fastest reading seen, not fixed: a dial marked 0–1000 MB/s looks handsome and
+says nothing when the drive sustains three, and the needle would sit pinned at
+the bottom for ten hours. The chart's axis labels come from the data for the same
+reason. The reference prints fixed scales; copying that would have been
+decoration wearing the costume of instrumentation.
+
+Charts are hand-drawn SVG. A charting library is a dependency and a bundle for
+three shapes on one screen.
+
+**The arithmetic moved out of the component.** Verifying the rate meant watching
+a browser tab, and a *hidden* tab has its timers throttled to roughly once a
+minute, which starves the sample window and makes a working calculation look
+broken — as it did here. `scan/rate.ts` is now a plain module with tests: too
+short a span, a normal window, a stalled scan falling towards zero, window
+eviction, and the real figures measured on the owner's drive (0.222 files/sec
+over 45 seconds, giving just under ten hours — which the catalogue independently
+confirmed).
+
+The component then *uses* that module. Writing tested logic and leaving the
+screen with its own copy is precisely D-049, and it would have been an easy
+mistake to repeat here.
+
+**Also fixed:** the mock multiplied its running total by a jitter factor, letting
+the count go *backwards* — something real progress never does. It correctly made
+the rate refuse to quote a figure, which looked like a bug in the dashboard and
+was a bug in the fixture. The variation now applies to the speed and is
+integrated over elapsed time, so the total only ever increases.

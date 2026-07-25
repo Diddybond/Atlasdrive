@@ -376,7 +376,13 @@ h2 {
    arriving. It must never look broken at rest. */
 .feed li:first-child { animation: feed-in 0.5s ease-out; }
 @keyframes feed-in { from { opacity: 0.35; } to { opacity: 1; } }
-.feed-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+/* Truncate rather than wrap: a filename breaking mid-word turns a tidy list
+   into a ragged one, and the full path is on the row's title anyway. */
+.feed-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.feed li { min-width: 0; }
 .feed-meta { display: flex; gap: 8px; align-items: center; flex: none; color: var(--ink-soft); }
 .feed-tag { background: rgba(61, 169, 252, 0.14); color: var(--link); border-radius: 999px; padding: 2px 8px; font-size: 0.78rem; }
 .feed-faces { font-size: 0.78rem; }
@@ -499,3 +505,153 @@ h2 {
 }
 .tag-chip:hover { border-color: var(--accent); background: rgba(61, 169, 252, 0.1); }
 .tag-count { color: var(--ink-soft); font-size: 0.76rem; font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------------------
+   Scan console
+   ---------------------------------------------------------------------------
+   A dark instrument panel, dark in both app themes. This is a screen someone
+   glances at across a room at two in the morning while a drive grinds through
+   ten thousand photographs; a bright panel at that hour is hostile, and the
+   readings show up far better against dark.
+   --------------------------------------------------------------------------- */
+
+.console {
+  --c-bg: #0d1117;
+  --c-panel: #141b24;
+  --c-panel-2: #18202b;
+  --c-line: #232d3a;
+  --c-ink: #e8eef6;
+  --c-soft: #8b9bb0;
+  --c-blue: #3da9fc;
+  --c-violet: #8b7bf7;
+  --c-green: #39c07a;
+  --c-amber: #f0b23c;
+
+  background: var(--c-bg);
+  color: var(--c-ink);
+  border-radius: 16px;
+  padding: 20px;
+  display: grid;
+  gap: 16px;
+}
+
+.console h2, .console h3 { color: var(--c-ink); margin: 0; }
+.console h3 { font-size: 0.92rem; font-weight: 600; }
+.console-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.console-sub { margin: 4px 0 0; color: var(--c-soft); font-size: 0.88rem; }
+
+.pill-live, .pill-idle {
+  display: inline-flex; align-items: center; gap: 8px;
+  border-radius: 999px; padding: 6px 14px; font-size: 0.8rem; font-weight: 600;
+}
+.pill-live { background: rgba(57, 192, 122, 0.14); color: var(--c-green); }
+.pill-idle { background: rgba(139, 155, 176, 0.14); color: var(--c-soft); }
+
+.panel {
+  background: var(--c-panel);
+  border: 1px solid var(--c-line);
+  border-radius: 14px;
+  padding: 16px;
+}
+.panel-note { color: var(--c-soft); font-size: 0.82rem; margin: 8px 0 0; }
+
+.console-top { display: grid; grid-template-columns: minmax(260px, 1fr) 2fr; gap: 16px; }
+/* align-items: start, or a short panel stretches to match a tall neighbour and
+   ends in a field of empty dark. */
+.console-bottom { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 1100px) {
+  .console-top, .console-bottom { grid-template-columns: 1fr; }
+}
+
+/* Gauge -------------------------------------------------------------------- */
+.gauge { position: relative; }
+.gauge svg { width: 100%; height: auto; display: block; }
+.gauge-track { fill: none; stroke: var(--c-line); stroke-width: 12; stroke-linecap: round; }
+.gauge-value { fill: none; stroke: url(#gauge-grad); stroke-width: 12; stroke-linecap: round; }
+.gauge-tick { stroke: #33415a; stroke-width: 1.5; }
+.gauge-tick.major { stroke: #56688a; stroke-width: 2.5; }
+.gauge-needle { stroke: var(--c-ink); stroke-width: 3; opacity: 0.9; stroke-linecap: round; transition: all 0.6s cubic-bezier(0.22, 1, 0.36, 1); }
+.gauge-hub { fill: var(--c-ink); }
+.gauge-bound { fill: var(--c-soft); font-size: 12px; text-anchor: middle; }
+/* Inside the arc, below the hub — where a dial prints its reading. Anchored
+   from the top rather than the bottom so it does not drift when the panel
+   height changes. */
+.gauge-readout { position: absolute; left: 0; right: 0; top: 62%; text-align: center; pointer-events: none; }
+.gauge-readout strong {
+  display: block; font-family: var(--font-display); font-size: 2.2rem; line-height: 1;
+  font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+}
+.gauge-readout span { color: var(--c-blue); font-size: 0.9rem; font-weight: 600; }
+
+/* Stat tiles --------------------------------------------------------------- */
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-content: start; }
+@media (max-width: 720px) { .tiles { grid-template-columns: 1fr; } }
+.tile {
+  display: flex; gap: 14px; align-items: center;
+  background: var(--c-panel); border: 1px solid var(--c-line);
+  border-radius: 14px; padding: 16px;
+}
+.tile-icon {
+  width: 46px; height: 46px; border-radius: 12px; flex: none;
+  display: grid; place-items: center; font-size: 1.2rem;
+}
+.tile-icon.blue { background: rgba(61, 169, 252, 0.16); color: var(--c-blue); }
+.tile-icon.violet { background: rgba(139, 123, 247, 0.16); color: var(--c-violet); }
+.tile-icon.green { background: rgba(57, 192, 122, 0.16); color: var(--c-green); }
+.tile-icon.amber { background: rgba(240, 178, 60, 0.16); color: var(--c-amber); }
+.tile-body { display: grid; gap: 2px; min-width: 0; }
+.tile-label { color: var(--c-soft); font-size: 0.8rem; }
+.tile-value {
+  font-family: var(--font-display); font-size: 1.7rem; line-height: 1.1;
+  font-variant-numeric: tabular-nums; letter-spacing: -0.01em;
+}
+.tile-sub { color: var(--c-soft); font-size: 0.76rem; }
+
+/* Area chart --------------------------------------------------------------- */
+.area-chart { width: 100%; height: 180px; display: block; margin-top: 10px; }
+.grid-line { stroke: var(--c-line); stroke-dasharray: 3 5; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.grid-label { fill: var(--c-soft); font-size: 11px; text-anchor: end; }
+.area-line { fill: none; stroke: var(--c-blue); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.area-fill { fill: url(#area-grad); stroke: none; }
+.realtime { color: var(--c-soft); font-size: 0.8rem; display: inline-flex; align-items: center; gap: 7px; }
+
+/* Progress ----------------------------------------------------------------- */
+.big-pct { font-family: var(--font-display); font-size: 1.9rem; font-variant-numeric: tabular-nums; }
+.bar { background: var(--c-panel-2); border-radius: 999px; height: 14px; overflow: hidden; margin-top: 14px; border: 1px solid var(--c-line); }
+.bar-fill {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, #3da9fc, #6f7bf7 55%, #b06ef0);
+  transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.bar-legend { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 0.84rem; color: var(--c-soft); }
+.bar-legend strong { color: var(--c-blue); font-variant-numeric: tabular-nums; }
+
+/* Donut -------------------------------------------------------------------- */
+.donut { display: flex; align-items: center; gap: 16px; margin-top: 10px; }
+.donut svg { width: 118px; height: 118px; flex: none; }
+.donut-slice { fill: none; stroke-width: 16; }
+.donut-legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; flex: 1; font-size: 0.82rem; }
+.donut-legend li { display: grid; grid-template-columns: 10px 1fr auto; align-items: center; gap: 9px; }
+.donut-legend .dot { width: 9px; height: 9px; border-radius: 50%; }
+.legend-name { color: var(--c-soft); }
+.legend-pct { font-variant-numeric: tabular-nums; }
+
+/* Found + feed, inside the console ----------------------------------------- */
+.found { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin: 12px 0 0; }
+.found div { background: var(--c-panel-2); border-radius: 10px; padding: 10px 12px; }
+.found dt { color: var(--c-soft); font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.found dd { margin: 3px 0 0; font-family: var(--font-display); font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+.found dd.bad { color: #ff6b6b; }
+
+.console .feed { max-height: 260px; }
+.console .feed li { border-bottom-color: var(--c-line); }
+.console .feed-name { color: var(--c-ink); }
+.console .feed-meta { color: var(--c-soft); }
+.console .feed-tag { background: rgba(61, 169, 252, 0.16); color: var(--c-blue); }
+
+.console-foot {
+  display: flex; flex-wrap: wrap; gap: 22px;
+  border-top: 1px solid var(--c-line); padding-top: 14px;
+  color: var(--c-soft); font-size: 0.8rem;
+}
+.console-foot .warn { color: var(--c-amber); }
