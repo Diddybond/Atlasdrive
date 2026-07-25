@@ -93,6 +93,12 @@ which Bridge, Lightroom and Capture One all read. **This puts new files on the
 drive**, so `--write-to-drive` is required — it is refused without it. The
 original photograph is never opened for writing.
 
+**An existing sidecar is never modified.** In a working archive that file belongs
+to Camera Raw, Lightroom or Capture One and holds the develop settings for that
+photograph — overwriting it would throw the edit away. AtlasDrive only ever
+*creates* a sidecar where none exists, and reports how many it left alone. There
+is deliberately no flag to force it.
+
 ## Renaming a drive
 
 ```bash

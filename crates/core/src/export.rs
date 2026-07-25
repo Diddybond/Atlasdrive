@@ -239,15 +239,72 @@ pub struct SidecarSummary {
     pub written: u64,
     pub skipped_offline: u64,
     pub skipped_nothing_to_say: u64,
+    /// A sidecar already existed and was left completely untouched.
+    pub skipped_existing: u64,
     pub paths: Vec<String>,
 }
 
-/// Write `.xmp` sidecars next to the originals.
+impl SidecarSummary {
+    pub fn summary(&self) -> String {
+        let mut s = format!("Wrote {} new sidecar(s).", self.written);
+        if self.skipped_existing > 0 {
+            s.push_str(&format!(
+                " {} photograph(s) already had a sidecar — those files were not touched.",
+                self.skipped_existing
+            ));
+        }
+        if self.skipped_offline > 0 {
+            s.push_str(&format!(" {} are on a disconnected drive.", self.skipped_offline));
+        }
+        s
+    }
+}
+
+/// Create a file only if nothing is there, and write it.
+///
+/// **This is the safeguard that protects existing edits.** A photographer's
+/// `.xmp` beside a RAW is not metadata AtlasDrive owns — it holds Camera Raw
+/// develop settings (`crs:Blacks`, `crs:Clarity`, `crs:ColorGrade`, and hundreds
+/// more) that represent hours of work. Replacing one would destroy that edit
+/// silently and irreversibly.
+///
+/// `create_new` is used deliberately instead of checking `exists()` first: the
+/// check-then-write version has a race, and more importantly it puts the
+/// guarantee in a conditional that a later edit could quietly remove. Here the
+/// operating system enforces it — if the path exists, the call fails, and there
+/// is no code path in which an existing file can be truncated or replaced.
+///
+/// Returns `Ok(false)` when a file was already there.
+fn write_new_file_only(path: &Path, contents: &[u8]) -> Result<bool> {
+    use std::io::Write;
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut f) => {
+            f.write_all(contents)?;
+            f.sync_all()?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Write `.xmp` sidecars next to the originals, **only where none exists**.
 ///
 /// **This writes to the source drive**, which is why it is never automatic.
-/// The original photograph is not opened for writing and is not modified; a new
-/// file appears beside it. A file with nothing to say gets no sidecar rather
-/// than an empty one.
+/// The original photograph is never opened for writing.
+///
+/// ## An existing sidecar is never modified
+///
+/// If a `.xmp` is already beside the photograph it is left exactly as it is and
+/// counted in `skipped_existing`. In a working archive that file belongs to
+/// Camera Raw, Lightroom or Capture One and contains the develop settings for
+/// that image; overwriting it would throw away the edit. There is deliberately
+/// no flag to force it — see [`write_new_file_only`].
 pub fn write_xmp_sidecars(conn: &Connection, file_ids: &[String]) -> Result<SidecarSummary> {
     let subjects = sidecar_subjects(conn, file_ids)?;
     let mut summary = SidecarSummary::default();
@@ -262,9 +319,12 @@ pub fn write_xmp_sidecars(conn: &Connection, file_ids: &[String]) -> Result<Side
             continue;
         };
         let sidecar: PathBuf = original.with_extension("xmp");
-        crate::util::atomic_write(&sidecar, render_xmp(&subject).as_bytes())?;
-        summary.written += 1;
-        summary.paths.push(sidecar.display().to_string());
+        if write_new_file_only(&sidecar, render_xmp(&subject).as_bytes())? {
+            summary.written += 1;
+            summary.paths.push(sidecar.display().to_string());
+        } else {
+            summary.skipped_existing += 1;
+        }
     }
     Ok(summary)
 }
@@ -297,6 +357,73 @@ mod tests {
         let xmp = render_xmp(&subject(&["Bob & Sue <the neighbours>"], &[]));
         assert!(xmp.contains("Bob &amp; Sue &lt;the neighbours&gt;"), "{xmp}");
         assert!(!xmp.contains("<the neighbours>"));
+    }
+
+    /// A realistic Camera Raw sidecar: what actually sits beside a RAW in a
+    /// working archive, holding the develop settings for that photograph.
+    const EXISTING_SIDECAR: &str = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+    crs:Blacks="-14" crs:Clarity="+22" crs:CameraProfile="Camera Neutral"
+    crs:ColorGradeGlobalHue="212" crs:AlreadyApplied="True"/>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#;
+
+    /// The safeguard. An existing sidecar holds someone's edit; it must come
+    /// through byte-for-byte identical, and be reported rather than silently
+    /// skipped.
+    #[test]
+    fn an_existing_sidecar_is_never_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("_DSC2992.xmp");
+        std::fs::write(&sidecar, EXISTING_SIDECAR).unwrap();
+        let before = std::fs::read(&sidecar).unwrap();
+        let before_meta = std::fs::metadata(&sidecar).unwrap();
+
+        let wrote = write_new_file_only(&sidecar, b"keywords only, would destroy the edit").unwrap();
+
+        assert!(!wrote, "must refuse to write over an existing sidecar");
+        assert_eq!(
+            std::fs::read(&sidecar).unwrap(),
+            before,
+            "the develop settings must be byte-for-byte unchanged"
+        );
+        assert_eq!(
+            std::fs::metadata(&sidecar).unwrap().len(),
+            before_meta.len()
+        );
+        // And the content that matters is demonstrably still there.
+        let after = std::fs::read_to_string(&sidecar).unwrap();
+        assert!(after.contains("crs:Clarity=\"+22\""));
+        assert!(after.contains("crs:CameraProfile"));
+    }
+
+    #[test]
+    fn a_sidecar_is_written_only_where_none_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("_DSC3000.xmp");
+
+        assert!(write_new_file_only(&fresh, b"new").unwrap(), "should write");
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"new");
+
+        // A second attempt must not replace what is now there.
+        assert!(!write_new_file_only(&fresh, b"replacement").unwrap());
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"new");
+    }
+
+    /// There must be no way to ask for an overwrite. If this ever compiles
+    /// against an `overwrite`/`force` parameter, the safeguard has been undone.
+    #[test]
+    fn the_writer_exposes_no_way_to_force_an_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.xmp");
+        std::fs::write(&p, "original").unwrap();
+        // The only entry point takes a path and bytes — nothing else.
+        let _: fn(&Path, &[u8]) -> Result<bool> = write_new_file_only;
+        assert!(!write_new_file_only(&p, b"x").unwrap());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "original");
     }
 
     #[test]

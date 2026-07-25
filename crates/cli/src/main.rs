@@ -693,11 +693,14 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
                 .map(|p| p.file_id)
                 .collect();
             let summary = family_archive_core::export::write_xmp_sidecars(&archive, &ids)?;
+            println!("{}", summary.summary());
+            if summary.skipped_nothing_to_say > 0 {
+                println!("{} had nothing to record.", summary.skipped_nothing_to_say);
+            }
             println!(
-                "Wrote {} sidecar(s). {} skipped (drive not connected), {} had nothing to record.",
-                summary.written, summary.skipped_offline, summary.skipped_nothing_to_say
+                "Originals were not modified, and no existing .xmp was altered — \
+                 AtlasDrive only ever creates a sidecar where none exists."
             );
-            println!("Originals were not modified — each .xmp is a new file beside its photograph.");
             Ok(())
         }
         FaceAction::People => {

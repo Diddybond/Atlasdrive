@@ -448,6 +448,35 @@ file beside the photograph; the original is never opened for writing.
 selections leave the app in a form other software can use. The one safety line —
 originals are read-only — holds in all three paths.
 
+## D-028: An existing XMP sidecar is never modified
+
+**Status:** Settled
+
+**Context:** D-027 added opt-in XMP sidecars and I checked that it never opened
+the *photograph* for writing — but not what it did to a sidecar that was already
+there. A census of a real working drive found **4,726 existing `.xmp` files at
+~11.6KB each**, full of `crs:` Camera Raw develop settings: Blacks, Clarity,
+ColorGrade, CameraProfile. The implementation used `atomic_write`, which
+replaces. Running it would have destroyed the edit on thousands of photographs.
+
+**Decision:** Sidecars are written with `OpenOptions::create_new`, so the
+operating system refuses if the path exists. Existing sidecars are counted and
+reported, never touched. There is **no** force or overwrite flag.
+
+`create_new` rather than an `exists()` check on purpose: the check-then-write
+form has a race, and — more importantly — it puts the guarantee inside a
+conditional that a later edit could quietly remove. Here no code path exists in
+which an existing file can be truncated or replaced.
+
+**Consequences:** A photograph that already has a sidecar gets no AtlasDrive
+keywords. That is the correct trade: the user's edit is irreplaceable, the
+keywords are regenerable. Merging keywords into an existing sidecar without
+disturbing the `crs:` settings would be the richer behaviour, and would need to
+back the file up first.
+
+**Verified** against a real 2,393-byte Camera Raw sidecar copied off the drive:
+the write is refused and the SHA-256 is unchanged.
+
 ## New decision template
 
 ```markdown
