@@ -1210,3 +1210,40 @@ Read from `/sbin/mount` rather than by probing with a temporary file: listing
 the drives someone *might* register must not write to every disk attached to
 their machine. A test cross-checks the parse against `mount`'s own output rather
 than against this machine's particular disks.
+
+## D-049: A rule lives in one place, or it will be wrong in the other
+
+**Status:** settled. Both defects were spotted by the owner on screen, not by a
+test.
+
+**Two bugs, one cause.**
+
+*A never-scanned drive said "Finished — all 0 photographs indexed. Safe to
+unplug."* `DriveCoverage::summary()` handled that case correctly and was never
+serialised, so the screen reimplemented the rule in TypeScript and missed it.
+The Rust test asserting that "Safe to unplug" never appears on unfinished work
+passed the entire time — it was testing code the interface was not using. This
+is precisely the failure D-045 was written to prevent, reintroduced one layer
+up.
+
+*A drive that was plugged in showed as DISCONNECTED.* `drives.status` records
+what was true during the last scan, which is a different question from whether
+the drive is connected now: a drive registered and never scanned stays "offline"
+while mounted. The badge claimed to answer the live question and did not look.
+Worse, the first fix was applied in the Tauri command only — so the interface
+and the command line then disagreed with each other, which is the same mistake
+again.
+
+**Decision.** `summary` and `can_unplug` are serialised *fields* computed by one
+private function, not methods the interface cannot reach. `DriveRepo::list`
+resolves live connection status itself, so every caller gets it and nothing has
+to remember; `list_as_recorded` remains for the few callers that want the stored
+state.
+
+**The pattern, and it is now the session's most frequent defect.** Three test
+fixtures whose names disagreed with their behaviour, and two rules implemented
+twice in two languages. Five defects, none found by a failing test — all found
+by reading output or by looking at the screen. Where a rule carries safety
+weight, it belongs in one place, and the boundary that crosses languages is
+where to be most suspicious: a green Rust test says nothing about what
+TypeScript decided to do instead.

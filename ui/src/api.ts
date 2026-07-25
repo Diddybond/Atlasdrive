@@ -22,6 +22,11 @@ export interface DriveCoverage {
   failed: number;
   last_outcome?: string | null;
   last_scan_at?: string | null;
+  /// The sentence to display. Computed in Rust so the rule exists once —
+  /// reimplementing it here is what produced "Finished — all 0 photographs
+  /// indexed. Safe to unplug." on a drive that had never been scanned.
+  summary: string;
+  can_unplug: boolean;
 }
 
 export interface IndexEstimate {
@@ -625,9 +630,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       );
     case "drive_coverage":
       return Promise.resolve([
-        { drive_number: 7, drive_name: "Holidays 2004-2011", discovered: 15000, complete: 11000, outstanding: 4000, failed: 0, last_outcome: "cancelled", last_scan_at: "2026-07-20" },
-        { drive_number: 14, drive_name: "AtlasDrive A", discovered: 4213, complete: 4213, outstanding: 0, failed: 0, last_outcome: "ok", last_scan_at: "2026-07-24" },
-        { drive_number: 22, drive_name: "Scanned prints", discovered: 1502, complete: 1502, outstanding: 0, failed: 0, last_outcome: "ok", last_scan_at: "2026-05-12" },
+        { drive_number: 7, drive_name: "Holidays 2004-2011", discovered: 15000, complete: 11000, outstanding: 4000, failed: 0, last_outcome: "cancelled", last_scan_at: "2026-07-20", can_unplug: false, summary: "11,000 of 15,000 indexed (73%). 4,000 still to do — leave this drive connected." },
+        { drive_number: 14, drive_name: "AtlasDrive A", discovered: 4213, complete: 4213, outstanding: 0, failed: 0, last_outcome: "ok", last_scan_at: "2026-07-24", can_unplug: true, summary: "Finished — all 4,213 photographs indexed. Safe to unplug." },
+        { drive_number: 22, drive_name: "Scanned prints", discovered: 0, complete: 0, outstanding: 0, failed: 0, last_outcome: null, last_scan_at: null, can_unplug: false, summary: "Never indexed — start a scan from Scan activity." },
       ] as unknown as T);
     case "estimate_index": {
       const files = 14320;

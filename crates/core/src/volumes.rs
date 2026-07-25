@@ -185,6 +185,19 @@ fn device_of(_path: &Path) -> Option<u64> {
     None
 }
 
+/// Drive numbers whose volume is mounted right now.
+///
+/// The `drives.status` column records what was true during the last scan, which
+/// is not the same as what is true now: a drive registered and never scanned
+/// stays "offline" while plugged in, and a drive unplugged after a scan stays
+/// "online". A badge that claims to say whether a drive is connected has to
+/// actually look.
+pub fn mounted_drive_numbers(conn: &rusqlite::Connection) -> std::collections::HashSet<i64> {
+    connected(Some(conn))
+        .map(|vols| vols.iter().filter_map(|v| v.registered_as).collect())
+        .unwrap_or_default()
+}
+
 /// Where photographs most likely live on a freshly picked volume.
 ///
 /// Offered as a starting point, never imposed: scanning the whole disk works,
@@ -365,6 +378,44 @@ mod tests {
         }];
         annotate_registered(&conn, &mut volumes);
         assert_eq!(volumes[0].registered_as, None, "prefix match must not count");
+    }
+
+    /// A drive plugged in but never scanned must read as connected. The stored
+    /// status column says "offline" from registration and never changes, which
+    /// is what made a mounted drive show as DISCONNECTED.
+    #[test]
+    fn a_mounted_drive_is_recognised_whatever_the_stored_status_says() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        // Registered, never scanned: status is 'offline' and stays that way.
+        conn.execute(
+            "INSERT INTO drives (id, drive_number, volume_name, status, first_seen_at)
+             VALUES ('d2', 2, 'New Volume', 'offline', 'now')",
+            [],
+        )
+        .unwrap();
+        // A drive that is not plugged in at all.
+        conn.execute(
+            "INSERT INTO drives (id, drive_number, volume_name, status, first_seen_at)
+             VALUES ('d9', 9, 'Not Plugged In', 'online', 'now')",
+            [],
+        )
+        .unwrap();
+
+        // Stand in for the mount table: match by volume name, as connected()
+        // does when there is no scan root yet.
+        let mut volumes = vec![Volume {
+            name: "New Volume".into(),
+            path: "/Volumes/New Volume".into(),
+            is_startup_disk: false,
+            registered_as: None,
+            is_read_only: true,
+        }];
+        annotate_registered(&conn, &mut volumes);
+
+        let mounted: std::collections::HashSet<i64> =
+            volumes.iter().filter_map(|v| v.registered_as).collect();
+        assert!(mounted.contains(&2), "a mounted drive must read as connected");
+        assert!(!mounted.contains(&9), "an unmounted drive must not");
     }
 
     #[test]

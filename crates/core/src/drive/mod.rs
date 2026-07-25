@@ -341,7 +341,38 @@ impl<'a> DriveRepo<'a> {
         self.query_one("SELECT * FROM drives WHERE drive_number=?1", params![number])
     }
 
+    /// Every registered drive, with `status` reflecting what is plugged in now.
+    ///
+    /// The stored `status` records what was true during the last scan, which is
+    /// a different question from whether the drive is connected at this moment:
+    /// a drive registered and never scanned stays "offline" while plugged in,
+    /// and one unplugged after a scan stays "online". Resolving it here rather
+    /// than in each caller is deliberate — the same rule implemented twice is
+    /// how the interface came to show a mounted drive as DISCONNECTED while the
+    /// command line showed something else again.
+    ///
+    /// `retired` and `conflict` are left alone: those are judgements about a
+    /// drive, not observations about a cable.
     pub fn list(&self) -> Result<Vec<Drive>> {
+        let mut drives = self.list_as_recorded()?;
+        let mounted = crate::volumes::mounted_drive_numbers(self.conn);
+        for d in &mut drives {
+            if d.status == "online" || d.status == "offline" {
+                d.status = if mounted.contains(&d.drive_number) {
+                    "online".to_string()
+                } else {
+                    "offline".to_string()
+                };
+            }
+        }
+        Ok(drives)
+    }
+
+    /// Drives exactly as stored, without consulting what is mounted.
+    ///
+    /// For callers that need the recorded state rather than the live one —
+    /// and for [`crate::volumes`], which must not recurse back into `list`.
+    pub fn list_as_recorded(&self) -> Result<Vec<Drive>> {
         let mut stmt = self
             .conn
             .prepare("SELECT * FROM drives ORDER BY drive_number")?;

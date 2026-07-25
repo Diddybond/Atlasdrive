@@ -598,9 +598,21 @@ describe("Knowing when a drive can be unplugged", () => {
     await waitFor(() => {
       expect(screen.getByText(/Finished — all 4,213 photographs indexed/)).toBeDefined();
     });
-    // Two of the three mock drives are finished; both must say so, and the
-    // unfinished one must not.
-    expect(screen.getAllByText(/Safe to unplug/)).toHaveLength(2);
+    // Exactly one mock drive is finished. The others -- one part-indexed, one
+    // never scanned -- must not claim to be.
+    expect(screen.getAllByText(/Safe to unplug/)).toHaveLength(1);
+  });
+
+  it("never calls a drive that has not been scanned safe to unplug", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/Never indexed/)).toBeDefined();
+    });
+    const row = screen.getByText(/Never indexed/);
+    expect(row.textContent).not.toContain("Safe to unplug");
+    // And it is styled as outstanding work, not as done.
+    expect(row.className).toContain("working");
   });
 
   it("says an unfinished drive must stay connected, and never says safe", async () => {
@@ -610,7 +622,7 @@ describe("Knowing when a drive can be unplugged", () => {
       expect(screen.getByText(/4,000 still to do/)).toBeDefined();
     });
     const row = screen.getByText(/4,000 still to do/);
-    expect(row.textContent).toContain("Leave this drive connected");
+    expect(row.textContent).toContain("leave this drive connected");
     // The reassuring phrase must never appear on unfinished work.
     expect(row.textContent).not.toContain("Safe to unplug");
     expect(row.textContent).toContain("73%");

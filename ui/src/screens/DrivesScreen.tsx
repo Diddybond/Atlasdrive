@@ -246,24 +246,13 @@ export function DrivesScreen() {
               </p>
               {coverage[d.drive_number] && (
                 <p
-                  className={
-                    coverage[d.drive_number].outstanding > 0
-                      ? "coverage working"
-                      : "coverage done"
-                  }
+                  // The wording and the verdict both come from the backend.
+                  // Deciding here is what produced "Safe to unplug" on a drive
+                  // that had never been scanned.
+                  className={coverage[d.drive_number].can_unplug ? "coverage done" : "coverage working"}
                   role="status"
                 >
-                  {coverage[d.drive_number].outstanding > 0
-                    ? `${coverage[d.drive_number].complete.toLocaleString()} of ` +
-                      `${coverage[d.drive_number].discovered.toLocaleString()} indexed ` +
-                      `(${Math.round(
-                        (coverage[d.drive_number].complete /
-                          Math.max(1, coverage[d.drive_number].discovered)) *
-                          100,
-                      )}%) — ${coverage[d.drive_number].outstanding.toLocaleString()} still to do. ` +
-                      `Leave this drive connected.`
-                    : `Finished — all ${coverage[d.drive_number].complete.toLocaleString()} ` +
-                      `photographs indexed. Safe to unplug.`}
+                  {coverage[d.drive_number].summary}
                 </p>
               )}
               {d.categories && d.categories.length > 0 && (

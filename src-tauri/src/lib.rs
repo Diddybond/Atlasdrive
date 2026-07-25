@@ -62,6 +62,8 @@ fn list_drives(state: State<AppState>) -> Result<Vec<DriveDto>, String> {
     let archive = open_archive(&paths)?;
     let repo = DriveRepo::new(&archive);
     let drives = repo.list().map_err(map_err)?;
+    // DriveRepo::list already resolves live connection status; doing it again
+    // here is how the two ended up disagreeing in the first place.
     let mut out = Vec::new();
     for d in drives {
         let image_count: i64 = archive
@@ -73,9 +75,9 @@ fn list_drives(state: State<AppState>) -> Result<Vec<DriveDto>, String> {
             .unwrap_or(0);
         out.push(DriveDto {
             id: d.id,
-            drive_number: d.drive_number,
             friendly_name: d.friendly_name,
             status: d.status,
+            drive_number: d.drive_number,
             physical_location: d.physical_location,
             categories: d.categories,
             last_scan_at: d.last_scan_at,

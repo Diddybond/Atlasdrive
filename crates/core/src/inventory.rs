@@ -449,9 +449,44 @@ pub struct DriveCoverage {
     /// How the last scan ended, when it recorded an outcome.
     pub last_outcome: Option<String>,
     pub last_scan_at: Option<String>,
+
+    // The two fields below are computed, and are *fields* rather than methods
+    // on purpose. When they were methods the interface could not reach them, so
+    // it reimplemented the rule in TypeScript — and got the never-scanned case
+    // wrong, telling the owner a drive that had never been touched was
+    // "Finished — all 0 photographs indexed. Safe to unplug." The Rust test for
+    // that wording passed the whole time, because it tested code the screen was
+    // not using. Serialising the answer leaves nothing to reimplement.
+    /// The sentence to show. Never says "safe to unplug" unless it is.
+    pub summary: String,
+    /// Whether this drive can be disconnected without losing work.
+    pub can_unplug: bool,
 }
 
 impl DriveCoverage {
+    /// Fill in the computed fields. The only place the rule is written.
+    fn finish(mut self) -> Self {
+        let never_scanned = self.discovered == 0 && self.complete == 0;
+        self.can_unplug = !never_scanned && !self.is_incomplete();
+        self.summary = if never_scanned {
+            "Never indexed — start a scan from Scan activity.".to_string()
+        } else if self.is_incomplete() {
+            format!(
+                "{} of {} indexed ({:.0}%). {} still to do — leave this drive connected.",
+                self.complete,
+                self.discovered,
+                self.percent(),
+                self.outstanding
+            )
+        } else {
+            format!(
+                "Finished — all {} photographs indexed. Safe to unplug.",
+                self.complete
+            )
+        };
+        self
+    }
+
     pub fn percent(&self) -> f64 {
         if self.discovered <= 0 {
             return if self.complete > 0 { 100.0 } else { 0.0 };
@@ -467,25 +502,6 @@ impl DriveCoverage {
         self.outstanding > 0
     }
 
-    /// The answer to "can I unplug this yet?", in one sentence.
-    pub fn summary(&self) -> String {
-        if self.discovered == 0 && self.complete == 0 {
-            return "Never indexed.".to_string();
-        }
-        if !self.is_incomplete() {
-            return format!(
-                "Finished — all {} photographs indexed. Safe to unplug.",
-                self.complete
-            );
-        }
-        format!(
-            "{} of {} indexed ({:.0}%). {} still to do — leave this drive connected.",
-            self.complete,
-            self.discovered,
-            self.percent(),
-            self.outstanding
-        )
-    }
 }
 
 /// Coverage for every registered drive, least complete first.
@@ -522,7 +538,10 @@ pub fn drive_coverage(conn: &Connection) -> Result<Vec<DriveCoverage>> {
             outstanding: (discovered - complete).max(0),
             discovered,
             last_outcome: r.get(6)?,
-        })
+            summary: String::new(),
+            can_unplug: false,
+        }
+        .finish())
     })?;
     let mut all: Vec<DriveCoverage> = rows.collect::<std::result::Result<_, _>>()?;
     all.sort_by(|a, b| {
@@ -655,13 +674,15 @@ mod coverage_tests {
         assert!(all[0].is_incomplete());
         assert_eq!(all[0].outstanding, 4000);
         assert!((all[0].percent() - 73.3).abs() < 0.5, "{}", all[0].percent());
-        assert!(all[0].summary().contains("leave this drive connected"), "{}", all[0].summary());
+        assert!(all[0].summary.contains("leave this drive connected"), "{}", all[0].summary);
+        assert!(!all[0].can_unplug);
 
         // And the finished ones say so plainly.
         assert!(!all[1].is_incomplete());
         // "Safe to unplug" is the phrase that must never appear on unfinished work.
-        assert!(all[1].summary().contains("Safe to unplug"), "{}", all[1].summary());
-        assert!(!all[0].summary().contains("Safe to unplug"), "{}", all[0].summary());
+        assert!(all[1].summary.contains("Safe to unplug"), "{}", all[1].summary);
+        assert!(all[1].can_unplug);
+        assert!(!all[0].summary.contains("Safe to unplug"), "{}", all[0].summary);
     }
 
     /// Photographs deleted from a drive since the last scan must not read as
@@ -686,7 +707,11 @@ mod coverage_tests {
         )
         .unwrap();
         let all = drive_coverage(&conn).unwrap();
-        assert_eq!(all[0].summary(), "Never indexed.");
+        // The bug this replaced: a drive that had never been touched reported
+        // "Finished — all 0 photographs indexed. Safe to unplug."
+        assert!(all[0].summary.starts_with("Never indexed"), "{}", all[0].summary);
+        assert!(!all[0].summary.contains("Safe to unplug"), "{}", all[0].summary);
+        assert!(!all[0].can_unplug, "a never-scanned drive is not finished");
     }
 
     /// The estimate exists so the time can be planned for, not to warn.
