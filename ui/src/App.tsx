@@ -11,7 +11,7 @@ type Section = "search" | "drives" | "review" | "scan" | "settings";
 const NAV: { id: Section; label: string; hint: string }[] = [
   { id: "search", label: "Search", hint: "Find any photograph" },
   { id: "drives", label: "Drives", hint: "Your numbered drives" },
-  { id: "review", label: "Review", hint: "Name people, check suggestions" },
+  { id: "review", label: "People", hint: "Name faces, check suggestions" },
   { id: "scan", label: "Scan activity", hint: "Indexing progress" },
   { id: "settings", label: "Settings", hint: "Diagnostics and safety" },
 ];

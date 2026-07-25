@@ -287,3 +287,10 @@ h2 {
 .drive-hit-count { font-weight: 600; font-variant-numeric: tabular-nums; }
 .drive-hit-name { color: var(--ink-soft); }
 .drive-hit-where { color: var(--offline); font-size: 0.85rem; font-weight: 600; }
+
+/* People you have named. Confirmed counts matter: they are what future scans
+   match against, so a person with one confirmed face is weak evidence. */
+.people-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.people-list li { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.person-name { font-family: var(--font-display); font-weight: 600; }
+.person-counts { color: var(--ink-soft); font-size: 0.85rem; font-variant-numeric: tabular-nums; }

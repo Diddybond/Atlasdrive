@@ -60,6 +60,10 @@ pub struct FaceDetection {
     pub w: f32,
     pub h: f32,
     pub quality: f32,
+    /// Identity embedding for this face, when the analyser produced one.
+    /// `None` means the caller must fall back to `AiEngine::face_embedding`.
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
 }
 
 /// OCR output. `text` may be empty; the catalogue does not log it by default.

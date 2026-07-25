@@ -67,6 +67,12 @@ struct WorkerFace {
     w: f32,
     h: f32,
     c: f32,
+    /// Vision's capture-quality score for the face.
+    #[serde(default)]
+    q: f32,
+    /// Feature print of the face crop — the identity embedding.
+    #[serde(default)]
+    fp: Vec<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,7 +336,16 @@ impl AiEngine for VisionEngine {
         let faces: Vec<FaceDetection> = raw
             .faces
             .iter()
-            .map(|f| FaceDetection { x: f.x, y: f.y, w: f.w, h: f.h, quality: f.c })
+            .map(|f| FaceDetection {
+                x: f.x,
+                y: f.y,
+                w: f.w,
+                h: f.h,
+                // Capture quality is the useful signal for "is this face worth
+                // identifying"; detection confidence is near 1.0 for everything.
+                quality: if f.q > 0.0 { f.q } else { f.c },
+                embedding: (!f.fp.is_empty()).then(|| f.fp.clone()),
+            })
             .collect();
         let scene = scene_from_labels(&raw.labels, faces.len());
         // Top-label confidence is the honest summary of "did it recognise this".

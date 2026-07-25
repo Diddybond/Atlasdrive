@@ -35,6 +35,17 @@ struct FaceBox: Encodable {
     let w: Float
     let h: Float
     let c: Float
+    /// Vision's capture-quality score for this face, when available. Low-quality
+    /// faces (motion blur, extreme angle, tiny) make terrible identity evidence.
+    let q: Float
+    /// A feature print of the cropped face, used as the identity embedding.
+    ///
+    /// Apple's public Vision API has no face-recognition model — it offers
+    /// rectangles, landmarks and capture quality only. This is therefore a
+    /// *general* image embedding of a face crop, which carries real identity
+    /// signal but also pose, lighting and hair. Good enough to group one person
+    /// across a single event; weaker across years. See D-026.
+    let fp: [Float]
 }
 
 struct Analysis: Encodable {
@@ -77,6 +88,47 @@ func floats(from observation: VNFeaturePrintObservation) -> [Float] {
     }
 }
 
+// MARK: - Faces
+
+/// Cap per photograph. A crowd shot can contain dozens of faces, each costing a
+/// separate Vision pass; beyond a point they are too small to identify anyway.
+let maxFaces = 12
+/// Vision's face box is tight to the features. Widen it so the crop includes
+/// hair and jaw, which is where much of the distinguishing signal lives.
+let faceCropMargin: CGFloat = 0.45
+/// Below this many pixels a face carries no usable identity signal.
+let minFaceCropPixels = 32
+
+/// A feature print of one face, cropped from the full-resolution original.
+///
+/// Cropping from the original rather than a downscale matters: a face is often a
+/// small fraction of a wedding photograph, and detail lost before the embedding
+/// cannot be recovered.
+func facePrint(image: CGImage, boundingBox: CGRect) -> [Float] {
+    let w = CGFloat(image.width), h = CGFloat(image.height)
+    // Vision's normalised, bottom-left box -> pixel, top-left.
+    var rect = CGRect(x: boundingBox.origin.x * w,
+                      y: (1.0 - boundingBox.origin.y - boundingBox.size.height) * h,
+                      width: boundingBox.size.width * w,
+                      height: boundingBox.size.height * h)
+    rect = rect.insetBy(dx: -rect.width * faceCropMargin, dy: -rect.height * faceCropMargin)
+    // Keep the crop inside the image, or cropping returns nil.
+    rect = rect.intersection(CGRect(x: 0, y: 0, width: w, height: h)).integral
+
+    guard rect.width >= CGFloat(minFaceCropPixels),
+          rect.height >= CGFloat(minFaceCropPixels),
+          let crop = image.cropping(to: rect) else {
+        return []
+    }
+
+    let request = VNGenerateImageFeaturePrintRequest()
+    guard (try? VNImageRequestHandler(cgImage: crop, options: [:]).perform([request])) != nil,
+          let observation = request.results?.first else {
+        return []
+    }
+    return floats(from: observation)
+}
+
 // MARK: - Analysis
 
 /// Labels below this are noise; Vision emits a long tail of near-zero guesses.
@@ -96,7 +148,9 @@ func analyse(path: String) -> Analysis {
     let ocr = VNRecognizeTextRequest()
     ocr.recognitionLevel = .accurate
     ocr.usesLanguageCorrection = true
-    let faces = VNDetectFaceRectanglesRequest()
+    // Capture quality subsumes plain rectangle detection: its observations carry
+    // the same bounding boxes plus a usability score per face.
+    let faces = VNDetectFaceCaptureQualityRequest()
     let featurePrint = VNGenerateImageFeaturePrintRequest()
 
     do {
@@ -116,14 +170,20 @@ func analyse(path: String) -> Analysis {
         .joined(separator: "\n")
 
     // Vision's origin is bottom-left; the catalogue's is top-left.
-    let faceBoxes: [FaceBox] = (faces.results ?? []).map { face in
-        let b = face.boundingBox
-        return FaceBox(x: Float(b.origin.x),
-                       y: Float(1.0 - b.origin.y - b.size.height),
-                       w: Float(b.size.width),
-                       h: Float(b.size.height),
-                       c: face.confidence)
-    }
+    let faceBoxes: [FaceBox] = (faces.results ?? [])
+        // Largest first, so the cap keeps the faces most worth identifying.
+        .sorted { $0.boundingBox.size.width > $1.boundingBox.size.width }
+        .prefix(maxFaces)
+        .map { face in
+            let b = face.boundingBox
+            return FaceBox(x: Float(b.origin.x),
+                           y: Float(1.0 - b.origin.y - b.size.height),
+                           w: Float(b.size.width),
+                           h: Float(b.size.height),
+                           c: face.confidence,
+                           q: face.faceCaptureQuality ?? 0,
+                           fp: facePrint(image: image, boundingBox: b))
+        }
 
     let print_ = featurePrint.results?.first.map { floats(from: $0) } ?? []
 

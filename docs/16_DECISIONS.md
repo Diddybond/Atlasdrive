@@ -356,6 +356,49 @@ business (D-007), and a drive inventory is not the place to surface it.
 than inferable. Surfaced as `atlasdrive drive contents`, a banner above search
 results, and the drive cards in the interface.
 
+## D-026: Face recognition uses Vision feature prints on face crops
+
+**Status:** Settled
+
+**Context:** The user needs to tag a face with a name and have that person
+recognised on later scans. The heuristic engine's face embedding was a 32-number
+colour grid of the crop — worthless for identity.
+
+**Apple's public Vision API has no face-recognition model.** It offers
+`VNDetectFaceRectangles`, `VNDetectFaceLandmarks` and
+`VNDetectFaceCaptureQuality` — detection and quality, no identity embedding.
+Photos.app uses a private framework that is not available to us.
+
+**Decision:** Each detected face is cropped from the **full-resolution original**
+with a 45% margin (hair and jaw carry identity signal) and embedded with
+`VNGenerateImageFeaturePrint`, giving a 768-dimension vector stored encrypted
+like any other face embedding. Faces are capped at 12 per photograph, largest
+first, and crops below 32px are skipped.
+
+Recognition compares a new face against the embeddings of faces the user has
+**confirmed**, and records a match as a *suggestion* on an unnamed cluster.
+Naming stays a human act (D-007), and suggested faces are never used as
+exemplars — otherwise one bad match would compound across future scans.
+
+**The threshold is measured, not chosen.** Across 24 real wedding photographs
+(43 usable faces), unrelated pairs sat at a median cosine of 0.53 (p95 0.75),
+while the top-scoring pairs — consecutive frames of the same person — scored
+0.87–0.94. `PERSON_MATCH_THRESHOLD` is 0.82.
+
+**Consequences, stated plainly:** this is a *general* image embedding of a face,
+not a face-recognition model. It carries real identity signal, but also pose,
+lighting, hair and clothing. Expect it to group one person reliably **within an
+event**, and to weaken across years and lighting conditions — precisely because
+the measured same-person scores came from photographs that share a room and an
+outfit.
+
+The upgrade is a real face-recognition model (ArcFace/FaceNet) via CoreML or
+ONNX. The plumbing already exists: register an engine with its own
+`model_id`/`model_version`, and `Error::ModelMissing` plus exit code 30 already
+describe a required-model-absent state. That is a model *download*, which is why
+it is a separate explicit setup action rather than the default (see
+`docs/SETUP.md`).
+
 ## New decision template
 
 ```markdown

@@ -225,6 +225,21 @@ impl<'a> DriveRepo<'a> {
         Ok(())
     }
 
+    /// Rename a drive, keeping its number and identity.
+    ///
+    /// The friendly name is a label for the user's benefit; the drive number and
+    /// internal id are what the catalogue keys on (D-004), so renaming is always
+    /// safe and never invalidates indexed photographs. An empty name clears it.
+    pub fn rename(&self, drive_id: &str, friendly_name: &str) -> Result<()> {
+        let trimmed = friendly_name.trim();
+        self.conn.execute(
+            "UPDATE drives SET friendly_name=?2 WHERE id=?1",
+            params![drive_id, (!trimmed.is_empty()).then_some(trimmed)],
+        )?;
+        self.audit(drive_id, "renamed", None)?;
+        Ok(())
+    }
+
     /// Renumber a drive, preserving history in the audit table.
     pub fn renumber(&self, drive_id: &str, new_number: i64) -> Result<()> {
         if new_number <= 0 {

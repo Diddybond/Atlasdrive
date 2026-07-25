@@ -57,6 +57,26 @@ atlasdrive verify --drive 14 --full
 
 Verifier exits zero only when all selected critical checks pass.
 
+## Naming people
+
+```bash
+atlasdrive faces prepare-review --limit 100   # candidate groups
+atlasdrive faces name --cluster <ID> --name "Aimee"
+atlasdrive faces people                       # who you have named
+```
+
+Naming a group confirms it, and those faces become the exemplars future scans
+match against. A match on a later scan is recorded as a *suggestion* for you to
+confirm — AtlasDrive never names anyone on its own.
+
+## Renaming a drive
+
+```bash
+atlasdrive drive set --number 1 --name "Weddings 2026"
+```
+
+The number and everything indexed from the drive are unaffected.
+
 ## Face review preparation
 
 ```bash

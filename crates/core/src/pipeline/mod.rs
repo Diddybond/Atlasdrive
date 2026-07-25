@@ -598,6 +598,7 @@ impl<'a> Pipeline<'a> {
         self.commit_file(
             &tx, &file_id, drive, item, &snap, &content_hash, &phash, &md, &color.value,
             &scene.value, &scan_art.value, &embedding, &date_est, &thumb, &faces.value,
+            &(faces.meta.model_id.clone(), faces.meta.model_version.clone()),
             ocr_text.as_deref(), &rgb,
             &face_engine, cancel,
         )?;
@@ -636,6 +637,8 @@ impl<'a> Pipeline<'a> {
         date_est: &dates::DateEstimate,
         thumb: &thumbnail::ThumbnailInfo,
         faces: &[crate::ai::FaceDetection],
+        // (model_id, model_version) of the analyser that produced the faces.
+        analysis_model: &(String, String),
         ocr_text: Option<&str>,
         rgb: &image::RgbImage,
         face_engine: &Arc<dyn crate::ai::AiEngine>,
@@ -766,16 +769,37 @@ impl<'a> Pipeline<'a> {
         tx.execute("DELETE FROM faces WHERE file_id=?1", [file_id])?;
         let face_repo = FaceRepo::new(tx);
         for f in faces {
-            let fe = face_engine.face_embedding(rgb, f, cancel)?;
-            face_repo.insert_face(
+            // Prefer the identity embedding the analyser produced from the
+            // full-resolution original; only fall back to re-embedding the
+            // decoded copy when it did not provide one.
+            let (vector, model_id, model_version) = match &f.embedding {
+                Some(v) => (v.clone(), analysis_model.0.clone(), analysis_model.1.clone()),
+                None => {
+                    let fe = face_engine.face_embedding(rgb, f, cancel)?;
+                    (fe.value.vector, fe.meta.model_id, fe.meta.model_version)
+                }
+            };
+            let face_id = face_repo.insert_face(
                 file_id,
                 (f.x, f.y, f.w, f.h),
                 f.quality,
-                &fe.meta.model_id,
-                &fe.meta.model_version,
-                &fe.value.vector,
+                &model_id,
+                &model_version,
+                &vector,
                 self.key,
             )?;
+
+            // Recognise people the user has already named. This is only ever a
+            // suggestion — naming stays a human decision (D-007).
+            if let Some(hit) = face_repo.suggest_person(
+                &vector,
+                &model_id,
+                &model_version,
+                self.key,
+                crate::faces::PERSON_MATCH_THRESHOLD,
+            )? {
+                face_repo.suggest_face_is_person(&face_id, &hit.person_id, hit.score)?;
+            }
         }
 
         // Automatic concept tags with provenance.

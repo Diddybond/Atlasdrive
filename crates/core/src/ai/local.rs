@@ -307,7 +307,7 @@ fn detect_skin_blobs(img: &RgbImage) -> Vec<FaceDetection> {
             let fw = (max_gx - min_gx + 1) as f32 / grid as f32;
             let fh = (max_gy - min_gy + 1) as f32 / grid as f32;
             let quality = (count as f32 / (grid * grid) as f32).min(1.0);
-            faces.push(FaceDetection { x, y, w: fw, h: fh, quality });
+            faces.push(FaceDetection { x, y, w: fw, h: fh, quality, embedding: None });
         }
     }
     // Deterministic ordering: top-to-bottom, left-to-right.

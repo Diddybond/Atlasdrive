@@ -104,6 +104,9 @@ enum DriveAction {
     Set {
         #[arg(long)]
         number: i64,
+        /// Rename the drive. The number stays the same.
+        #[arg(long)]
+        name: Option<String>,
         /// Where the drive physically is, e.g. "Drawer 2". Pass "" to clear.
         #[arg(long)]
         physical_location: Option<String>,
@@ -179,6 +182,15 @@ enum FaceAction {
     },
     /// Rebuild face clusters without reopening originals.
     Rebuild,
+    /// Tag a face cluster with a person's name. Recognised from then on.
+    Name {
+        #[arg(long)]
+        cluster: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// People you have named, and how many faces each has.
+    People,
 }
 
 fn main() -> ExitCode {
@@ -274,6 +286,7 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
         }
         DriveAction::Set {
             number,
+            name,
             physical_location,
             category,
         } => {
@@ -285,10 +298,14 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
             // empty string.
             let categories = (!category.is_empty()).then_some(category.as_slice());
             repo.update_details(&drive.id, physical_location.as_deref(), categories)?;
+            if let Some(new_name) = name.as_deref() {
+                repo.rename(&drive.id, new_name)?;
+            }
             let updated = repo.get_by_number(number)?.expect("drive still present");
             println!(
-                "Drive {}: {} · {}",
+                "Drive {} — {}: {} · {}",
                 updated.drive_number,
+                updated.friendly_name.clone().unwrap_or_else(|| "unnamed".into()),
                 updated
                     .physical_location
                     .unwrap_or_else(|| "no location recorded".into()),
@@ -570,6 +587,29 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
                 faces::DEFAULT_CLUSTER_THRESHOLD,
             )?;
             println!("Rebuilt {n} cluster(s) without reopening originals.");
+            Ok(())
+        }
+        FaceAction::Name { cluster, name } => {
+            let person = repo.tag_cluster_with_name(&cluster, &name)?;
+            println!("Tagged as {}.", person.display_name);
+            println!(
+                "AtlasDrive will suggest {} when it sees a similar face on the next scan.",
+                person.display_name
+            );
+            Ok(())
+        }
+        FaceAction::People => {
+            let people = repo.people()?;
+            if people.is_empty() {
+                println!("Nobody named yet. Run `atlasdrive faces prepare-review` to see candidates.");
+                return Ok(());
+            }
+            for p in people {
+                println!(
+                    "{:<28} {} confirmed, {} awaiting your confirmation",
+                    p.display_name, p.confirmed_faces, p.suggested_faces
+                );
+            }
             Ok(())
         }
     }

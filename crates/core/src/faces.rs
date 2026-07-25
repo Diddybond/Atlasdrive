@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{self, MasterKey, Sealed};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::util::{cosine_similarity, new_uuid, now_iso8601};
 
 pub const CLUSTER_ALGO_VERSION: &str = "greedy-cosine-0.1.0";
@@ -34,7 +34,40 @@ pub struct ClusterSummary {
     pub label: Option<String>,
 }
 
-/// Repository for face operations over `archive.db`.
+// (doc for FaceRepo moved below; the following types support recognition)
+/// A proposed identity for a face, pending human confirmation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonSuggestion {
+    pub person_id: String,
+    pub display_name: String,
+    /// Cosine similarity to the closest confirmed face of that person.
+    pub score: f32,
+}
+
+/// A person the user has named, and how well established they are.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedPerson {
+    pub id: String,
+    pub display_name: String,
+    pub relationship: Option<String>,
+    /// Faces the user confirmed. These are the exemplars used for recognition.
+    pub confirmed_faces: i64,
+    /// Faces proposed as this person, awaiting confirmation.
+    pub suggested_faces: i64,
+}
+
+/// Similarity above which a new face is worth proposing as a known person.
+///
+/// Derived from measurement rather than taste: across a real 758-photograph
+/// wedding, unrelated face pairs sat at a median cosine of 0.53 (p95 0.75),
+/// while faces of the same person scored 0.87–0.94. 0.82 sits above the noise
+/// with headroom, and because a match is only ever a *suggestion*, the cost of
+/// being slightly generous is a review prompt rather than a wrong name.
+///
+/// Note the honest limit this number encodes: those same-person scores came
+/// from one event, where lighting and clothing are shared. See D-026.
+pub const PERSON_MATCH_THRESHOLD: f32 = 0.82;
+
 pub struct FaceRepo<'a> {
     conn: &'a Connection,
 }
@@ -193,6 +226,138 @@ impl<'a> FaceRepo<'a> {
     }
 
     /// Create a person (explicit human action).
+    /// The best match for `embedding` among faces the user has already named,
+    /// if any is close enough to be worth suggesting.
+    ///
+    /// This is what makes "recognise this person on the next scan" work: every
+    /// new face is compared against the embeddings of faces already attached to
+    /// a named person. It returns a *suggestion* — never a decision. Naming a
+    /// person is the user's act (D-007), so a match is recorded for review and
+    /// the face is left unconfirmed until a human says otherwise.
+    ///
+    /// Only faces the user actually confirmed are used as exemplars, so one
+    /// mistaken auto-match cannot compound into a drifting cluster.
+    pub fn suggest_person(
+        &self,
+        embedding: &[f32],
+        model_id: &str,
+        model_version: &str,
+        key: &MasterKey,
+        threshold: f32,
+    ) -> Result<Option<PersonSuggestion>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.display_name, fe.ciphertext, fe.nonce, fe.enc_version, fe.key_version
+               FROM face_embeddings fe
+               JOIN faces f            ON f.id = fe.face_id
+               JOIN face_clusters c    ON c.id = f.cluster_id
+               JOIN people p           ON p.id = c.person_id
+              WHERE fe.model_id = ?1 AND fe.model_version = ?2
+                AND c.status = 'confirmed'
+                AND f.is_false_detection = 0 AND f.is_ignored = 0",
+        )?;
+        let rows = stmt.query_map(params![model_id, model_version], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })?;
+
+        let mut best: Option<PersonSuggestion> = None;
+        for row in rows {
+            let (person_id, display_name, ciphertext, nonce, enc_version, key_version) = row?;
+            let sealed = Sealed { ciphertext, nonce, enc_version, key_version };
+            // A single undecryptable exemplar must not abort recognition.
+            let Ok(known) = crypto::open_vector(key, &sealed) else { continue };
+            let score = crate::util::cosine_similarity(embedding, &known);
+            if score >= threshold && best.as_ref().is_none_or(|b| score > b.score) {
+                best = Some(PersonSuggestion { person_id, display_name, score });
+            }
+        }
+        Ok(best)
+    }
+
+    /// Attach a face to a named person's cluster as an unconfirmed suggestion.
+    ///
+    /// The cluster keeps `status = 'unnamed'` deliberately: the person is
+    /// proposed, not decided, and only confirmed faces are ever used as
+    /// exemplars for future matching.
+    pub fn suggest_face_is_person(&self, face_id: &str, person_id: &str, score: f32) -> Result<()> {
+        let cluster_id = new_uuid();
+        self.conn.execute(
+            "INSERT INTO face_clusters (id, label, status, person_id, algorithm_version, created_at, updated_at)
+             VALUES (?1, ?2, 'unnamed', ?3, ?4, ?5, ?5)",
+            params![
+                cluster_id,
+                format!("suggested ({:.0}% match)", score * 100.0),
+                person_id,
+                CLUSTER_ALGO_VERSION,
+                now_iso8601()
+            ],
+        )?;
+        self.conn.execute(
+            "UPDATE faces SET cluster_id=?2 WHERE id=?1",
+            params![face_id, cluster_id],
+        )?;
+        Ok(())
+    }
+
+    /// Every person the user has named, with how many faces are attached.
+    pub fn people(&self) -> Result<Vec<NamedPerson>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, p.display_name, p.relationship,
+                    (SELECT count(*) FROM faces f
+                       JOIN face_clusters c ON c.id = f.cluster_id
+                      WHERE c.person_id = p.id AND c.status = 'confirmed') AS confirmed,
+                    (SELECT count(*) FROM faces f
+                       JOIN face_clusters c ON c.id = f.cluster_id
+                      WHERE c.person_id = p.id AND c.status <> 'confirmed') AS suggested
+               FROM people p ORDER BY p.display_name",
+        )?;
+        let out = stmt
+            .query_map([], |r| {
+                Ok(NamedPerson {
+                    id: r.get(0)?,
+                    display_name: r.get(1)?,
+                    relationship: r.get(2)?,
+                    confirmed_faces: r.get(3)?,
+                    suggested_faces: r.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(out)
+    }
+
+    /// Name a cluster in one step: find or create the person, then confirm.
+    ///
+    /// Confirming is what promotes the cluster's faces to exemplars, so from
+    /// this point the person is recognised on future scans.
+    pub fn tag_cluster_with_name(&self, cluster_id: &str, display_name: &str) -> Result<Person> {
+        let name = display_name.trim();
+        if name.is_empty() {
+            return Err(Error::InvalidArgs("a person needs a name".into()));
+        }
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM people WHERE display_name = ?1 COLLATE NOCASE",
+                [name],
+                |r| r.get(0),
+            )
+            .ok();
+        let person = match existing {
+            Some(id) => self
+                .get_person(&id)?
+                .ok_or_else(|| Error::Other("person vanished".into()))?,
+            None => self.create_person(name, None)?,
+        };
+        self.name_cluster(cluster_id, &person.id)?;
+        Ok(person)
+    }
+
     pub fn create_person(&self, display_name: &str, relationship: Option<&str>) -> Result<Person> {
         let id = new_uuid();
         self.conn.execute(
@@ -461,5 +626,167 @@ mod tests {
         assert_eq!(h.dim, 4);
         assert_eq!(h.non_finite, 0);
         assert_eq!(h.max_identical, 2);
+    }
+}
+
+#[cfg(test)]
+mod recognition_tests {
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
+
+    /// Seed a file row so faces have something to hang off.
+    fn seed_file(conn: &Connection, file_id: &str) {
+        conn.execute(
+            "INSERT OR IGNORE INTO drives(id, drive_number, status, first_seen_at)
+             VALUES ('d1', 1, 'online', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO roots(id, drive_id, relative_root, created_at)
+             VALUES ('r1','d1','','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(id, drive_id, root_id, relative_path, filename, size_bytes,
+                               source_mtime_ns, status, created_at, updated_at)
+             VALUES (?1,'d1','r1',?1,?1,1,1,'complete','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            [file_id],
+        )
+        .unwrap();
+    }
+
+    /// A vector pointing mostly along `axis`, with a little noise, so two faces
+    /// of the "same person" are close but not identical.
+    fn face_vector(axis: usize, jitter: f32) -> Vec<f32> {
+        let mut v = vec![0.05f32; 24];
+        v[axis] = 1.0;
+        v[(axis + 1) % 24] = jitter;
+        v
+    }
+
+    #[test]
+    fn a_named_person_is_recognised_in_a_later_photograph() {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        let key = MasterKey::generate(1);
+        let repo = FaceRepo::new(&conn);
+        seed_file(&conn, "photo-1");
+        seed_file(&conn, "photo-2");
+
+        // A face from the first scan, which the user then names.
+        let face1 = repo
+            .insert_face("photo-1", (0.1, 0.1, 0.2, 0.2), 0.9, "apple-vision", "1.0.0",
+                         &face_vector(3, 0.1), &key)
+            .unwrap();
+        let cluster = new_uuid();
+        conn.execute(
+            "INSERT INTO face_clusters(id, status, created_at, updated_at)
+             VALUES (?1,'unnamed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            [&cluster],
+        )
+        .unwrap();
+        conn.execute("UPDATE faces SET cluster_id=?2 WHERE id=?1", params![face1, cluster])
+            .unwrap();
+
+        // Before naming, nothing is recognised — there are no exemplars.
+        assert!(repo
+            .suggest_person(&face_vector(3, 0.12), "apple-vision", "1.0.0", &key, PERSON_MATCH_THRESHOLD)
+            .unwrap()
+            .is_none());
+
+        // The user tags the cluster.
+        let person = repo.tag_cluster_with_name(&cluster, "Aimee").unwrap();
+        assert_eq!(person.display_name, "Aimee");
+
+        // A similar face from a later scan is now recognised.
+        let hit = repo
+            .suggest_person(&face_vector(3, 0.12), "apple-vision", "1.0.0", &key, PERSON_MATCH_THRESHOLD)
+            .unwrap()
+            .expect("the named person should be recognised");
+        assert_eq!(hit.display_name, "Aimee");
+        assert!(hit.score >= PERSON_MATCH_THRESHOLD);
+
+        // A different person is not.
+        assert!(repo
+            .suggest_person(&face_vector(11, 0.1), "apple-vision", "1.0.0", &key, PERSON_MATCH_THRESHOLD)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn a_suggestion_is_never_treated_as_a_confirmed_naming() {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        let key = MasterKey::generate(1);
+        let repo = FaceRepo::new(&conn);
+        seed_file(&conn, "photo-1");
+        seed_file(&conn, "photo-2");
+
+        let face1 = repo
+            .insert_face("photo-1", (0., 0., 0.2, 0.2), 0.9, "apple-vision", "1.0.0",
+                         &face_vector(5, 0.1), &key)
+            .unwrap();
+        let cluster = new_uuid();
+        conn.execute(
+            "INSERT INTO face_clusters(id, status, created_at, updated_at)
+             VALUES (?1,'unnamed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            [&cluster],
+        )
+        .unwrap();
+        conn.execute("UPDATE faces SET cluster_id=?2 WHERE id=?1", params![face1, cluster])
+            .unwrap();
+        let person = repo.tag_cluster_with_name(&cluster, "Kent").unwrap();
+
+        // A later face is suggested as Kent.
+        let face2 = repo
+            .insert_face("photo-2", (0., 0., 0.2, 0.2), 0.9, "apple-vision", "1.0.0",
+                         &face_vector(5, 0.12), &key)
+            .unwrap();
+        repo.suggest_face_is_person(&face2, &person.id, 0.91).unwrap();
+
+        let people = repo.people().unwrap();
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].confirmed_faces, 1, "only the user-tagged face is confirmed");
+        assert_eq!(people[0].suggested_faces, 1, "the new face is proposed, not decided");
+
+        // And the suggested face must not itself become an exemplar — otherwise
+        // one bad match would compound across future scans.
+        let before = repo.people().unwrap()[0].confirmed_faces;
+        let _ = repo
+            .suggest_person(&face_vector(5, 0.13), "apple-vision", "1.0.0", &key, PERSON_MATCH_THRESHOLD)
+            .unwrap();
+        assert_eq!(repo.people().unwrap()[0].confirmed_faces, before);
+    }
+
+    #[test]
+    fn naming_two_clusters_the_same_name_reuses_the_person() {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        let repo = FaceRepo::new(&conn);
+        for id in ["c1", "c2"] {
+            conn.execute(
+                "INSERT INTO face_clusters(id, status, created_at, updated_at)
+                 VALUES (?1,'unnamed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                [id],
+            )
+            .unwrap();
+        }
+        let a = repo.tag_cluster_with_name("c1", "Aimee").unwrap();
+        // Different capitalisation and spacing must not create a second person.
+        let b = repo.tag_cluster_with_name("c2", "  aimee ").unwrap();
+        assert_eq!(a.id, b.id);
+        assert_eq!(repo.people().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_person_needs_an_actual_name() {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        let repo = FaceRepo::new(&conn);
+        conn.execute(
+            "INSERT INTO face_clusters(id, status, created_at, updated_at)
+             VALUES ('c1','unnamed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        assert!(repo.tag_cluster_with_name("c1", "   ").is_err());
     }
 }

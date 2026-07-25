@@ -95,6 +95,16 @@ export interface ClusterSummary {
   status: string;
   face_count: number;
   label?: string | null;
+  person_id?: string | null;
+}
+
+/// Someone you have named. Confirmed faces are what future scans match against.
+export interface NamedPerson {
+  id: string;
+  display_name: string;
+  relationship?: string | null;
+  confirmed_faces: number;
+  suggested_faces: number;
 }
 
 // Detect the Tauri runtime.
@@ -128,6 +138,12 @@ export const api = {
   prepareReview: (limit: number) => call<ClusterSummary[]>("prepare_review", { limit }),
   doctor: () => call<Record<string, string>>("doctor"),
   exportDiagnostics: () => call<string>("export_diagnostics"),
+  tagFaceCluster: (clusterId: string, name: string) =>
+    call<{ id: string; display_name: string }>("tag_face_cluster", { clusterId, name }),
+  listPeople: () => call<NamedPerson[]>("list_people"),
+  rejectFaceCluster: (clusterId: string) => call<void>("reject_face_cluster", { clusterId }),
+  renameDrive: (driveNumber: number, name: string) =>
+    call<void>("rename_drive", { driveNumber, name }),
   driveContents: (driveNumber?: number) =>
     call<DriveContents[]>("drive_contents", { driveNumber }),
   updateDriveDetails: (input: {
@@ -157,6 +173,12 @@ const mockResults: SearchResult[] = [
   { file_id: "f2", filename: "portrait.jpg", relative_path: "family/portrait.jpg", drive_number: 7, drive_name: "Holidays 2004-2011", online: false, date_label: "Likely taken between 1985 and 1989", matched: ["visual"], score: 0.82 },
   { file_id: "f3", filename: "old_scan.jpg", relative_path: "scans/old_scan.jpg", drive_number: 22, drive_name: "Scanned prints", online: false, date_label: "Scanned in 2022, original date unknown", matched: ["visual"], score: 0.66 },
 ];
+
+const mockClusters: ClusterSummary[] = [
+  { cluster_id: "c-a1b2c3", status: "unnamed", face_count: 34 },
+  { cluster_id: "c-d4e5f6", status: "unnamed", face_count: 12 },
+];
+const mockPeople: NamedPerson[] = [];
 
 function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   switch (cmd) {
@@ -234,10 +256,32 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         { name: "face_pipeline", status: "Pass", detail: "812 embeddings, dim 32, finite" },
       ] as unknown as T);
     case "prepare_review":
-      return Promise.resolve([
-        { cluster_id: "c-a1b2c3", status: "unnamed", face_count: 34 },
-        { cluster_id: "c-d4e5f6", status: "unnamed", face_count: 12 },
-      ] as unknown as T);
+      return Promise.resolve(mockClusters.filter((c) => c.status === "unnamed") as unknown as T);
+    case "tag_face_cluster": {
+      const id = String(args?.clusterId);
+      const name = String(args?.name ?? "").trim();
+      const cluster = mockClusters.find((c) => c.cluster_id === id);
+      if (cluster) cluster.status = "confirmed";
+      let person = mockPeople.find((p) => p.display_name.toLowerCase() === name.toLowerCase());
+      if (!person) {
+        person = { id: `p-${mockPeople.length + 1}`, display_name: name, confirmed_faces: 0, suggested_faces: 0 };
+        mockPeople.push(person);
+      }
+      person.confirmed_faces += cluster ? cluster.face_count : 0;
+      return Promise.resolve(person as unknown as T);
+    }
+    case "list_people":
+      return Promise.resolve(mockPeople as unknown as T);
+    case "reject_face_cluster": {
+      const c = mockClusters.find((x) => x.cluster_id === String(args?.clusterId));
+      if (c) c.status = "rejected";
+      return Promise.resolve(undefined as unknown as T);
+    }
+    case "rename_drive": {
+      const d = mockDrives.find((x) => x.drive_number === args?.driveNumber);
+      if (d) d.friendly_name = String(args?.name ?? "");
+      return Promise.resolve(undefined as unknown as T);
+    }
     case "doctor":
       return Promise.resolve({ keystore: "file-fallback-dev", archive_integrity: "ok", ai_offline: "true" } as unknown as T);
     case "update_drive_details": {

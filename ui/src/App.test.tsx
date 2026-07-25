@@ -153,6 +153,32 @@ describe("AtlasDrive UI", () => {
     });
   });
 
+  it("tags a face group with a name and remembers the person", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+    await waitFor(() => {
+      expect(screen.getAllByText(/Unnamed group/).length).toBeGreaterThan(0);
+    });
+
+    // Nothing can be confirmed until a name is typed — the app never names
+    // anyone on its own.
+    const confirm = screen.getAllByRole("button", { name: "Confirm name" })[0];
+    expect((confirm as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(screen.getAllByLabelText(/Who is this/)[0], {
+      target: { value: "Aimee" },
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Confirm name" })[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Tagged as Aimee/)).toBeDefined();
+    });
+    // The person is now known, and the app says it will suggest them next time.
+    expect(screen.getByText(/suggest Aimee when it sees a similar face/)).toBeDefined();
+    expect(screen.getByText("Aimee")).toBeDefined();
+    expect(screen.getByText(/34 confirmed/)).toBeDefined();
+  });
+
   it("shows safety checks on the settings screen", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Settings/ }));

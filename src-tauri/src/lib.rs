@@ -132,6 +132,62 @@ struct SearchResponse {
     where_to_look: String,
 }
 
+/// Tag a face group with a person's name.
+///
+/// This is the only way a name is ever attached to a face. Confirming promotes
+/// the group's faces to exemplars, so the person is recognised on later scans.
+#[tauri::command]
+fn tag_face_cluster(
+    state: State<AppState>,
+    cluster_id: String,
+    name: String,
+) -> Result<faces::Person, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive)
+        .tag_cluster_with_name(&cluster_id, &name)
+        .map_err(map_err)
+}
+
+/// Everyone the user has named, and how established each is.
+#[tauri::command]
+fn list_people(state: State<AppState>) -> Result<Vec<faces::NamedPerson>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive).people().map_err(map_err)
+}
+
+/// Mark a group as not a person at all (a false detection).
+#[tauri::command]
+fn reject_face_cluster(state: State<AppState>, cluster_id: String) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    archive
+        .execute(
+            "UPDATE face_clusters SET status='rejected', updated_at=?2 WHERE id=?1",
+            rusqlite::params![cluster_id, family_archive_core::util::now_iso8601()],
+        )
+        .map_err(map_err)?;
+    Ok(())
+}
+
+/// Rename a drive, keeping its number and everything indexed from it.
+#[tauri::command]
+fn rename_drive(
+    state: State<AppState>,
+    drive_number: i64,
+    name: String,
+) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let repo = DriveRepo::new(&archive);
+    let drive = repo
+        .get_by_number(drive_number)
+        .map_err(map_err)?
+        .ok_or_else(|| format!("Drive {drive_number} is not registered."))?;
+    repo.rename(&drive.id, &name).map_err(map_err)
+}
+
 /// What is stored on each drive — answerable with every drive unplugged.
 #[tauri::command]
 fn drive_contents(
@@ -506,7 +562,11 @@ pub fn run() {
             update_drive_details,
             set_date_override,
             clear_date_override,
-            drive_contents
+            drive_contents,
+            tag_face_cluster,
+            list_people,
+            reject_face_cluster,
+            rename_drive
         ])
         .run(tauri::generate_context!())
         .expect("error while running AtlasDrive");
