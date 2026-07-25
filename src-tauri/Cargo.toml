@@ -1,0 +1,28 @@
+[package]
+name = "family-archive-app"
+description = "Family Archive desktop application (Tauri shell)."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT"
+# This crate is intentionally NOT part of the root cargo workspace so that
+# `cargo test` on non-macOS CI does not require the system webkit2gtk / Tauri
+# toolchain. Build it on macOS with `cargo tauri build` (or `cargo build` here).
+
+[lib]
+name = "family_archive_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+family-archive-core = { path = "../crates/core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[features]
+# This feature is used to enable the Tauri custom-protocol in release builds.
+custom-protocol = ["tauri/custom-protocol"]

@@ -64,3 +64,13 @@ Thumbs.db
 .idea
 .vscode/*
 !.vscode/extensions.json
+
+# Track the source app icon (the full icon set is generated on macOS via
+# `cargo tauri icon src-tauri/icons/icon.png` and stays ignored).
+!src-tauri/icons/icon.png
+src-tauri/icons/*.icns
+src-tauri/icons/*.ico
+src-tauri/icons/32x32.png
+src-tauri/icons/128x128*.png
+src-tauri/icons/Square*.png
+src-tauri/icons/StoreLogo.png
