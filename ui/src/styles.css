@@ -96,7 +96,7 @@ button.ghost:hover:not(:disabled) { background: rgba(61, 169, 252, 0.12); }
   outline-offset: 2px;
 }
 
-input[type="text"], input[type="search"], input:not([type]) {
+input[type="text"], input[type="search"], input:not([type]), select {
   font: inherit;
   padding: 9px 12px;
   border: 1px solid var(--line);
@@ -105,6 +105,21 @@ input[type="text"], input[type="search"], input:not([type]) {
   color: var(--ink);
   width: 100%;
 }
+
+/* Selects otherwise keep the platform's own chrome and sit oddly beside the
+   themed text fields they share a form with. */
+select {
+  appearance: none;
+  padding-right: 34px;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+                    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+select:disabled { cursor: default; opacity: 0.6; }
+select option:disabled { color: var(--ink-soft); }
 
 .app { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
 
@@ -296,6 +311,18 @@ h2 {
 .coverage { margin: 6px 0 0; font-size: 0.86rem; font-weight: 600; }
 .coverage.done { color: var(--ok); }
 .coverage.working { color: var(--warn); }
+
+/* Folder suggestions offered after a drive is picked. */
+.folder-hint { margin: -4px 0 4px; }
+.folder-choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.chip {
+  background: transparent; color: var(--link);
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 4px 12px; font-size: 0.88rem;
+}
+.chip.selected { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.form label > .row-between { display: flex; gap: 8px; align-items: center; }
+.form label > .row-between input { flex: 1; }
 
 .check-list { list-style: none; margin: 0; padding: 0; }
 .check-row { display: grid; grid-template-columns: 64px 200px 1fr; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }

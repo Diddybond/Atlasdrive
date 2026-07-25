@@ -40,6 +40,7 @@ pub mod settings;
 pub mod signing;
 pub mod util;
 pub mod verifier;
+pub mod volumes;
 
 pub use config::{AppPaths, Config};
 pub use error::{Error, Result};

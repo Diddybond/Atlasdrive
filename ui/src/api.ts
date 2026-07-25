@@ -5,6 +5,13 @@
 // demonstrable and testable without the native layer. The shapes mirror the
 // serde types in family-archive-core.
 
+export interface Volume {
+  name: string;
+  path: string;
+  is_startup_disk: boolean;
+  registered_as?: number | null;
+}
+
 export interface DriveCoverage {
   drive_number: number;
   drive_name?: string | null;
@@ -287,6 +294,8 @@ export const api = {
   prepareReview: (limit: number) => call<ClusterSummary[]>("prepare_review", { limit }),
   doctor: () => call<Record<string, string>>("doctor"),
   driveCoverage: () => call<DriveCoverage[]>("drive_coverage"),
+  connectedVolumes: () => call<Volume[]>("connected_volumes"),
+  likelyPhotoFolders: (path: string) => call<string[]>("likely_photo_folders", { path }),
   estimateIndex: (path: string) => call<IndexEstimate>("estimate_index", { path }),
   similarPhotographs: (fileId: string, limit?: number) =>
     call<SearchResult[]>("similar_photographs", { fileId, limit }),
@@ -597,6 +606,19 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     }
     case "doctor":
       return Promise.resolve({ keystore: "file-fallback-dev", archive_integrity: "ok", ai_offline: "true" } as unknown as T);
+    case "connected_volumes":
+      return Promise.resolve([
+        { name: "Late 25 A", path: "/Volumes/Late 25 A", is_startup_disk: false, registered_as: 1 },
+        { name: "Late 25 B", path: "/Volumes/Late 25 B", is_startup_disk: false, registered_as: null },
+        { name: "Samsung_X5", path: "/Volumes/Samsung_X5", is_startup_disk: false, registered_as: null },
+        { name: "Macintosh HD", path: "/Volumes/Macintosh HD", is_startup_disk: true, registered_as: null },
+      ] as unknown as T);
+    case "likely_photo_folders":
+      return Promise.resolve(
+        (String(args?.path ?? "").includes("Late 25 B")
+          ? ["/Volumes/Late 25 B/Photos", "/Volumes/Late 25 B/Weddings"]
+          : []) as unknown as T,
+      );
     case "drive_coverage":
       return Promise.resolve([
         { drive_number: 7, drive_name: "Holidays 2004-2011", discovered: 15000, complete: 11000, outstanding: 4000, failed: 0, last_outcome: "cancelled", last_scan_at: "2026-07-20" },

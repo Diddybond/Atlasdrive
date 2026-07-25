@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import { api, Drive, DriveContents, DriveCoverage } from "../api";
+import { api, Drive, DriveContents, DriveCoverage, Volume } from "../api";
 
 export function DrivesScreen() {
   const [coverage, setCoverage] = useState<Record<number, DriveCoverage>>({});
+  const [volumes, setVolumes] = useState<Volume[]>([]);
+  const [folders, setFolders] = useState<string[]>([]);
   const [drives, setDrives] = useState<Drive[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [number, setNumber] = useState("");
@@ -48,8 +50,30 @@ export function DrivesScreen() {
     setEditing(null);
     await load();
   }
+  /// A drive was picked from the list: use it, and offer the folders on it
+  /// where photographs usually live.
+  async function pickVolume(chosen: string) {
+    setPath(chosen);
+    setFolders(chosen ? await api.likelyPhotoFolders(chosen) : []);
+    const v = volumes.find((x) => x.path === chosen);
+    // Pre-fill the name from the disk's own label, which is nearly always what
+    // is wanted and is otherwise typed out again by hand.
+    if (v && !name.trim()) setName(v.name);
+  }
+
+  /// For anything the list cannot offer — a folder inside a drive, a network
+  /// share, a disk image.
+  async function browse() {
+    const picked = await api.chooseFolder("Choose the folder to index");
+    if (picked) {
+      setPath(picked);
+      setFolders([]);
+    }
+  }
+
   useEffect(() => {
     void load();
+    void api.connectedVolumes().then(setVolumes);
     // Coverage is what tells you whether a drive can be unplugged, so it is
     // loaded whenever this screen is, not behind a button.
     void api.driveCoverage().then((rows) => {
@@ -107,8 +131,58 @@ export function DrivesScreen() {
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. AtlasDrive A" />
           </label>
           <label>
-            Drive location on this Mac
-            <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/Volumes/AtlasDriveA" />
+            Which drive?
+            <select
+              value={volumes.some((v) => v.path === path) ? path : ""}
+              onChange={(e) => void pickVolume(e.target.value)}
+            >
+              <option value="">Choose a connected drive…</option>
+              {volumes.map((v) => (
+                <option key={v.path} value={v.path} disabled={v.registered_as != null}>
+                  {v.registered_as != null
+                    ? `${v.name} — already Drive ${v.registered_as}`
+                    : v.is_startup_disk
+                      ? `${v.name} — this Mac's startup disk`
+                      : v.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {folders.length > 0 && (
+            <div className="folder-hint">
+              <p className="check-detail">
+                Photographs are usually in one of these. Pick one to index just that folder, or
+                leave it to index the whole drive.
+              </p>
+              <div className="folder-choices">
+                {folders.map((f) => (
+                  <button
+                    key={f}
+                    type="button"
+                    className={path === f ? "chip selected" : "chip"}
+                    onClick={() => setPath(f)}
+                  >
+                    {f.split("/").pop()}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <label>
+            Folder to index
+            <span className="row-between">
+              <input
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+                placeholder="Choose a drive above"
+                aria-label="Folder to index"
+              />
+              <button type="button" className="ghost" onClick={browse}>
+                Browse…
+              </button>
+            </span>
           </label>
           <label className="checkbox">
             <input type="checkbox" checked={writeManifest} onChange={(e) => setWriteManifest(e.target.checked)} />

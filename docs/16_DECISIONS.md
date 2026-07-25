@@ -1136,3 +1136,44 @@ so without alarm: "If it sleeps, indexing pauses and continues when you wake it
 
 Verified on a real run: `pmset -g assertions` showed `PreventDiskIdle 1` and
 `PreventUserIdleSystemSleep 1` held for the duration and released after.
+
+## D-047: A drive is picked from the ones plugged in, not typed as a path
+
+**Status:** settled.
+
+**Context.** Registering a drive required typing `/Volumes/Something` from
+memory. A typo produced an error at best; at worst it produced a *successful*
+scan of the wrong disk, catalogued under the number meant for another. The drive
+is physically connected at the moment of registering, so the app can simply
+offer it.
+
+**Decision.** The field is a list of mounted volumes. Choosing one fills the
+path and pre-fills the friendly name from the disk's own label, which is nearly
+always what was going to be typed anyway. A `Browse…` button remains for what a
+list cannot cover — a folder inside a drive, a network share, a disk image.
+
+**Three details that carry the weight:**
+
+*Already-registered volumes are shown but disabled.* Hiding them would leave
+someone hunting for a drive that is right there; showing them plainly says
+"already Drive 1" and prevents the same photographs being catalogued twice under
+two numbers.
+
+*Matching is by the last scan's root, not the volume name.* A drive renamed in
+the Finder would otherwise look new, and be registered a second time. A test
+covers renaming, and another covers a volume whose path is a prefix of
+another's, so `/Volumes/Late 25 A` never claims `/Volumes/Late 25 AB`.
+
+*The startup disk is offered, marked, and not disabled.* Refusing it would be
+wrong for anyone whose photographs genuinely live in their home folder; offering
+it unlabelled would invite indexing the whole system by accident. It is
+identified by device id rather than by being called "Macintosh HD", which is a
+default anyone can change.
+
+**Also.** After a drive is chosen, the folders on it where photographs usually
+live (`Photos`, `DCIM`, `Weddings`, `Clients`…) are offered as one-click
+choices. Scanning a whole drive works; it just spends the first hours on
+application bundles and system files.
+
+Selects now share the form's styling. They had kept the platform's own chrome
+and sat oddly beside the themed fields around them.

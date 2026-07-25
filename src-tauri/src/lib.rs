@@ -977,6 +977,27 @@ fn doctor(state: State<AppState>) -> Result<std::collections::BTreeMap<String, S
     Ok(out)
 }
 
+/// Drives plugged in right now, so one can be picked rather than typed.
+#[tauri::command]
+fn connected_volumes(
+    state: State<AppState>,
+) -> Result<Vec<family_archive_core::volumes::Volume>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    // The catalogue is only needed to say which volumes are already registered;
+    // the picker must still work before one exists.
+    let archive = open_archive(&paths).ok();
+    family_archive_core::volumes::connected(archive.as_ref()).map_err(map_err)
+}
+
+/// Folders on a volume where photographs usually live.
+#[tauri::command]
+fn likely_photo_folders(path: String) -> Vec<String> {
+    family_archive_core::volumes::likely_photo_folders(std::path::Path::new(&path))
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Coverage and estimates
 // ---------------------------------------------------------------------------
@@ -1275,6 +1296,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            connected_volumes,
+            likely_photo_folders,
             drive_coverage,
             estimate_index,
             similar_photographs,

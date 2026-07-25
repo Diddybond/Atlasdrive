@@ -616,3 +616,65 @@ describe("Knowing when a drive can be unplugged", () => {
     expect(row.textContent).toContain("73%");
   });
 });
+
+describe("Picking a drive to register", () => {
+  async function openRegister() {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    await waitFor(() => screen.getByRole("button", { name: /Register a drive/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Register a drive/ }));
+    await waitFor(() => screen.getByLabelText(/Which drive/));
+  }
+
+  it("offers the drives that are actually plugged in", async () => {
+    await openRegister();
+    const select = screen.getByLabelText(/Which drive/) as HTMLSelectElement;
+    const labels = [...select.options].map((o) => o.text);
+    expect(labels).toContain("Late 25 B");
+    expect(labels).toContain("Samsung_X5");
+  });
+
+  it("will not let you register the same disk twice", async () => {
+    await openRegister();
+    const select = screen.getByLabelText(/Which drive/) as HTMLSelectElement;
+    const taken = [...select.options].find((o) => o.text.includes("already Drive 1"));
+    expect(taken).toBeDefined();
+    expect(taken!.disabled).toBe(true);
+  });
+
+  it("marks the startup disk rather than hiding it", async () => {
+    await openRegister();
+    const select = screen.getByLabelText(/Which drive/) as HTMLSelectElement;
+    const boot = [...select.options].find((o) => o.text.includes("startup disk"));
+    // Offered, because someone's photographs may genuinely live there...
+    expect(boot).toBeDefined();
+    // ...but not selectable by accident without being told what it is.
+    expect(boot!.disabled).toBe(false);
+  });
+
+  it("fills the name from the disk and suggests where photographs live", async () => {
+    await openRegister();
+    fireEvent.change(screen.getByLabelText(/Which drive/), {
+      target: { value: "/Volumes/Late 25 B" },
+    });
+
+    await waitFor(() => {
+      expect((screen.getByLabelText(/Folder to index/) as HTMLInputElement).value).toBe(
+        "/Volumes/Late 25 B",
+      );
+    });
+    // The disk's own label is a better default than an empty box.
+    await waitFor(() => {
+      const name = screen.getByPlaceholderText("e.g. AtlasDrive A") as HTMLInputElement;
+      expect(name.value).toBe("Late 25 B");
+    });
+    // And the folders on it where photographs usually are.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Photos" })).toBeDefined();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Weddings" }));
+    expect((screen.getByLabelText(/Folder to index/) as HTMLInputElement).value).toBe(
+      "/Volumes/Late 25 B/Weddings",
+    );
+  });
+});
