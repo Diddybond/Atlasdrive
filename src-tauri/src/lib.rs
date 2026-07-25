@@ -534,11 +534,19 @@ fn rescan_drive(state: State<AppState>, drive_number: i64) -> Result<String, Str
     // scanned for the first time from the Drives screen. Before this the only
     // record of what to scan appeared *after* the first scan, so the button
     // could only refer the owner elsewhere — to a screen that knew no more.
-    let root = match scan_root.or_else(|| DriveRepo::new(&archive).registered_root(drive_number)) {
+    let root = match scan_root
+        .or_else(|| DriveRepo::new(&archive).registered_root(drive_number))
+        // Last resort for drives registered before the root was recorded: the
+        // volume itself, if it is plugged in. Telling someone to register a
+        // disk again when it is connected in front of them is a poor answer
+        // where a better one is available.
+        .or_else(|| family_archive_core::volumes::mount_point_for_drive(&archive, drive_number))
+    {
         Some(r) => r,
         None => {
             return Err(format!(
-                "AtlasDrive does not know which folder to scan for Drive {drive_number}.                  Register it again and choose the drive from the list."
+                "Connect Drive {drive_number} and try again — AtlasDrive cannot find it, \
+                 so there is nothing to scan."
             ))
         }
     };

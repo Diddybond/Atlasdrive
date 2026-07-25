@@ -1282,3 +1282,40 @@ point of the matching volume, if it is plugged in. Asking someone to register a
 disk again when it is sitting connected in front of them is a poor answer where
 a better one is available. Only when all three fail does it say so, and then it
 asks for the drive to be connected rather than naming a screen.
+
+## D-051: Verify the artefact, not the build
+
+**Status:** settled. Two silent failures in one change, both caught only by
+checking the shipped binary.
+
+**What happened.** The mounted-volume fallback of D-050 was written, tested at
+the core, described in a commit message — and never reached the running app.
+Twice.
+
+*First,* the edit was applied with a scripted string replacement whose search
+text did not match, so it changed nothing and said nothing. `cargo build`
+succeeded, `cargo test` passed, `clippy` was clean: none of them had any opinion
+about a replacement that no-op'd. The same mistake had already left a run of
+whitespace inside a user-facing message, shipped and visible on screen.
+
+*Second,* after the source was corrected, the rebuild never ran. The command was
+chained as `(… | grep -c …) && ./scripts/build-app.sh`, and `grep -c` **exits 1
+when the count is zero** — the very outcome being hoped for. The `&&` broke, the
+build was skipped, and the previous bundle was copied into `/Applications`,
+where it reported "installed" perfectly truthfully.
+
+**Decision.** Two rules, both about the same blind spot.
+
+*Use an editor that fails loudly.* A scripted find-and-replace that misses is
+indistinguishable from success. The `Edit` tool errors when its target is
+absent, which is the entire point.
+
+*Check the artefact, not the pipeline.* A green build says the code compiles,
+not that the change is in it. Where a specific string or behaviour is the
+deliverable, `strings` on the shipped binary — before and after installing —
+answers the question actually being asked. That check is what caught both
+failures here, after the tests and the linter had signed off on neither.
+
+**This is the same shape as D-049**, one level further out: a rule verified in
+the place it was written and never in the place it runs. First it was Rust
+versus TypeScript; now it is source versus binary.
