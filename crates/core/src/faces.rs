@@ -68,6 +68,37 @@ pub struct NamedPerson {
 /// from one event, where lighting and clothing are shared. See D-026.
 pub const PERSON_MATCH_THRESHOLD: f32 = 0.82;
 
+/// Longest edge of a stored face crop, in pixels.
+///
+/// Big enough to recognise someone at a glance in a gallery, small enough that
+/// thousands of them stay a sensible size on disk.
+pub const FACE_THUMBNAIL_EDGE: u32 = 200;
+
+/// One face as shown in the gallery — a picture first, a name only if known.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GalleryFace {
+    pub face_id: String,
+    pub cluster_id: Option<String>,
+    pub file_id: String,
+    pub quality: Option<f32>,
+    /// Set only once the user has named this face's group.
+    pub person_name: Option<String>,
+    pub cluster_status: Option<String>,
+    /// How many faces are grouped with this one.
+    pub group_size: i64,
+}
+
+/// A photograph containing a named person, and where to find it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonPhoto {
+    pub file_id: String,
+    pub filename: String,
+    pub relative_path: String,
+    pub drive_number: i64,
+    pub drive_name: Option<String>,
+    pub online: bool,
+}
+
 pub struct FaceRepo<'a> {
     conn: &'a Connection,
 }
@@ -107,6 +138,182 @@ impl<'a> FaceRepo<'a> {
             ],
         )?;
         Ok(face_id)
+    }
+
+    /// Store a small encrypted crop of a face, so it can be browsed later with
+    /// every drive unplugged.
+    pub fn store_thumbnail(
+        &self,
+        face_id: &str,
+        png: &[u8],
+        width: u32,
+        height: u32,
+        key: &MasterKey,
+    ) -> Result<()> {
+        let sealed = crypto::seal(key, png)?;
+        self.conn.execute(
+            "INSERT INTO face_thumbnails
+               (face_id, width, height, format, ciphertext, nonce, enc_version, key_version, created_at)
+             VALUES (?1,?2,?3,'png',?4,?5,?6,?7,?8)
+             ON CONFLICT(face_id) DO UPDATE SET
+                width=excluded.width, height=excluded.height,
+                ciphertext=excluded.ciphertext, nonce=excluded.nonce,
+                enc_version=excluded.enc_version, key_version=excluded.key_version",
+            params![
+                face_id, width, height, sealed.ciphertext, sealed.nonce,
+                sealed.enc_version, sealed.key_version, now_iso8601()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Faces that have no stored crop yet, with the file they came from.
+    ///
+    /// Needed because face crops arrived after some archives were already
+    /// indexed: their faces exist and are matchable, but there is no picture to
+    /// browse. Backfilling re-reads the originals, so the drive must be
+    /// connected — the one operation in the product that genuinely requires it.
+    pub fn faces_without_thumbnails(&self, limit: usize) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, f.file_id
+               FROM faces f
+              WHERE f.is_false_detection = 0
+                AND NOT EXISTS (SELECT 1 FROM face_thumbnails t WHERE t.face_id = f.id)
+              LIMIT ?1",
+        )?;
+        let out = stmt
+            .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(out)
+    }
+
+    /// The stored box for a face, in normalised image coordinates.
+    pub fn bbox(&self, face_id: &str) -> Result<Option<(f32, f32, f32, f32)>> {
+        let row = self.conn.query_row(
+            "SELECT bbox_x, bbox_y, bbox_w, bbox_h FROM faces WHERE id = ?1",
+            [face_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        );
+        match row {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Decrypted PNG bytes for one face, if a crop was stored.
+    pub fn thumbnail(&self, face_id: &str, key: &MasterKey) -> Result<Option<Vec<u8>>> {
+        let row = self.conn.query_row(
+            "SELECT ciphertext, nonce, enc_version, key_version
+               FROM face_thumbnails WHERE face_id = ?1",
+            [face_id],
+            |r| {
+                Ok(Sealed {
+                    ciphertext: r.get(0)?,
+                    nonce: r.get(1)?,
+                    enc_version: r.get(2)?,
+                    key_version: r.get(3)?,
+                })
+            },
+        );
+        match row {
+            Ok(sealed) => Ok(Some(crypto::open(key, &sealed)?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Faces worth showing in a gallery: best-quality first, one row per face,
+    /// with the group it belongs to and any name already attached.
+    ///
+    /// Ordering by quality matters — the clearest face of a person is the one
+    /// you can actually recognise, and it is what should represent the group.
+    pub fn gallery(&self, limit: usize) -> Result<Vec<GalleryFace>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, f.cluster_id, f.quality, f.file_id,
+                    p.display_name, c.status,
+                    (SELECT count(*) FROM faces sib WHERE sib.cluster_id = f.cluster_id)
+               FROM faces f
+               JOIN face_thumbnails ft ON ft.face_id = f.id
+               LEFT JOIN face_clusters c ON c.id = f.cluster_id
+               LEFT JOIN people p       ON p.id = c.person_id
+              WHERE f.is_false_detection = 0 AND f.is_ignored = 0
+                AND (c.status IS NULL OR c.status <> 'rejected')
+              ORDER BY f.quality DESC
+              LIMIT ?1",
+        )?;
+        let out = stmt
+            .query_map([limit as i64], |r| {
+                Ok(GalleryFace {
+                    face_id: r.get(0)?,
+                    cluster_id: r.get(1)?,
+                    quality: r.get(2)?,
+                    file_id: r.get(3)?,
+                    person_name: r.get(4)?,
+                    cluster_status: r.get(5)?,
+                    group_size: r.get::<_, Option<i64>>(6)?.unwrap_or(1),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(out)
+    }
+
+    /// Attach a face that has no group of its own to a new named person.
+    ///
+    /// Browsing the gallery means naming individual faces, not only tidy
+    /// clusters, so a face with `cluster_id = NULL` needs somewhere to go.
+    pub fn tag_face_with_name(&self, face_id: &str, display_name: &str) -> Result<Person> {
+        let existing: Option<String> = self
+            .conn
+            .query_row("SELECT cluster_id FROM faces WHERE id = ?1", [face_id], |r| r.get(0))
+            .optional()?
+            .flatten();
+        let cluster_id = match existing {
+            Some(c) => c,
+            None => {
+                let c = new_uuid();
+                self.conn.execute(
+                    "INSERT INTO face_clusters (id, status, algorithm_version, created_at, updated_at)
+                     VALUES (?1,'unnamed',?2,?3,?3)",
+                    params![c, CLUSTER_ALGO_VERSION, now_iso8601()],
+                )?;
+                self.conn.execute(
+                    "UPDATE faces SET cluster_id=?2 WHERE id=?1",
+                    params![face_id, c],
+                )?;
+                c
+            }
+        };
+        self.tag_cluster_with_name(&cluster_id, display_name)
+    }
+
+    /// Every photograph containing a named person, newest drive first.
+    pub fn photos_of_person(&self, person_id: &str) -> Result<Vec<PersonPhoto>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT fl.id, fl.filename, fl.relative_path, d.drive_number,
+                    d.friendly_name, d.status
+               FROM faces f
+               JOIN face_clusters c ON c.id = f.cluster_id
+               JOIN files fl        ON fl.id = f.file_id
+               JOIN drives d        ON d.id = fl.drive_id
+              WHERE c.person_id = ?1 AND f.is_false_detection = 0
+                AND fl.status = 'complete'
+              ORDER BY d.drive_number, fl.relative_path",
+        )?;
+        let out = stmt
+            .query_map([person_id], |r| {
+                let status: String = r.get(5)?;
+                Ok(PersonPhoto {
+                    file_id: r.get(0)?,
+                    filename: r.get(1)?,
+                    relative_path: r.get(2)?,
+                    drive_number: r.get(3)?,
+                    drive_name: r.get(4)?,
+                    online: status == "online",
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(out)
     }
 
     /// Decrypt all face embeddings for a model partition (in memory only).

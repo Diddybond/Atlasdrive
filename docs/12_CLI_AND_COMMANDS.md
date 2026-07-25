@@ -69,6 +69,30 @@ Naming a group confirms it, and those faces become the exemplars future scans
 match against. A match on a later scan is recorded as a *suggestion* for you to
 confirm — AtlasDrive never names anyone on its own.
 
+## Browsing and gathering people
+
+```bash
+atlasdrive faces backfill-thumbnails      # face pictures for an older archive
+atlasdrive faces people                   # who you have named
+atlasdrive faces gather --person <ID> --into ~/Desktop/Aimee
+```
+
+`gather` copies the originals into the folder you name, prefixed with the drive
+number so two drives holding the same filename cannot overwrite each other.
+Nothing is moved, and nothing is written to the source drive. Photographs on a
+disconnected drive are reported with the drive number to connect.
+
+## XMP sidecars for Bridge and Lightroom
+
+```bash
+atlasdrive faces sidecars --person <ID> --write-to-drive
+```
+
+Writes a `.xmp` beside each photograph carrying the people and subject keywords,
+which Bridge, Lightroom and Capture One all read. **This puts new files on the
+drive**, so `--write-to-drive` is required — it is refused without it. The
+original photograph is never opened for writing.
+
 ## Renaming a drive
 
 ```bash

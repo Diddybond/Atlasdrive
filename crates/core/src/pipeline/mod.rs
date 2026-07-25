@@ -93,6 +93,46 @@ pub struct IndexSummary {
     pub files_missing: u64,
 }
 
+/// Crop a detected face out of the decoded original and encode a small PNG.
+///
+/// Returns `None` when the crop would be too small to recognise anyone from,
+/// which is the honest outcome for a face in the far background of a crowd.
+///
+/// The margin matches the one used for the identity embedding, so the picture
+/// the user judges is the same region the matching was based on.
+fn crop_face_png(
+    rgb: &image::RgbImage,
+    face: &crate::ai::FaceDetection,
+) -> Option<(Vec<u8>, u32, u32)> {
+    const MARGIN: f32 = 0.45;
+    const MIN_EDGE: u32 = 24;
+
+    let (iw, ih) = (rgb.width() as f32, rgb.height() as f32);
+    let cx = (face.x + face.w / 2.0) * iw;
+    let cy = (face.y + face.h / 2.0) * ih;
+    let half_w = face.w * iw * (1.0 + MARGIN) / 2.0;
+    let half_h = face.h * ih * (1.0 + MARGIN) / 2.0;
+
+    let x0 = (cx - half_w).max(0.0) as u32;
+    let y0 = (cy - half_h).max(0.0) as u32;
+    let x1 = (cx + half_w).min(iw) as u32;
+    let y1 = (cy + half_h).min(ih) as u32;
+    let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if w < MIN_EDGE || h < MIN_EDGE {
+        return None;
+    }
+
+    let crop = image::imageops::crop_imm(rgb, x0, y0, w, h).to_image();
+    let (tw, th) = thumbnail::fit_within(w, h, crate::faces::FACE_THUMBNAIL_EDGE);
+    let small = image::imageops::resize(&crop, tw, th, image::imageops::FilterType::Lanczos3);
+
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgb8(small)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some((png, tw, th))
+}
+
 /// What an incremental rescan found when comparing disk against the catalogue.
 #[derive(Debug, Default)]
 struct Rescan {
@@ -789,6 +829,12 @@ impl<'a> Pipeline<'a> {
                 self.key,
             )?;
 
+            // A small crop of the face, kept locally so the gallery is browsable
+            // with every drive unplugged. Encrypted, like the embedding.
+            if let Some((png, w, h)) = crop_face_png(rgb, f) {
+                face_repo.store_thumbnail(&face_id, &png, w, h, self.key)?;
+            }
+
             // Recognise people the user has already named. This is only ever a
             // suggestion — naming stays a human decision (D-007).
             if let Some(hit) = face_repo.suggest_person(
@@ -912,6 +958,53 @@ impl<'a> Pipeline<'a> {
             halted: false,
             halt_reason: None,
         })
+    }
+
+    /// Generate the missing face crops for an already-indexed archive.
+    ///
+    /// Reads the originals, so the drive must be connected. Faces whose drive is
+    /// unplugged are skipped and counted rather than failing the run — the user
+    /// can connect the next drive and run it again.
+    pub fn backfill_face_thumbnails(&self, limit: usize) -> Result<(u64, u64)> {
+        let repo = FaceRepo::new(self.archive);
+        let pending = repo.faces_without_thumbnails(limit)?;
+        let (mut done, mut skipped) = (0u64, 0u64);
+
+        // Group by file so each original is decoded once, however many faces it
+        // holds — decoding a 9MB photograph per face would be absurd.
+        let mut by_file: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for (face_id, file_id) in pending {
+            by_file.entry(file_id).or_default().push(face_id);
+        }
+
+        for (file_id, face_ids) in by_file {
+            let Some(abs) = crate::search::resolve_original(self.archive, &file_id)? else {
+                skipped += face_ids.len() as u64;
+                continue;
+            };
+            let rgb = match decode::open_rgb(&abs, &self.paths.cache_dir().join("decode")) {
+                Ok(v) => v,
+                Err(_) => {
+                    skipped += face_ids.len() as u64;
+                    continue;
+                }
+            };
+            for face_id in face_ids {
+                let Some((x, y, w, h)) = repo.bbox(&face_id)? else {
+                    skipped += 1;
+                    continue;
+                };
+                let face = crate::ai::FaceDetection { x, y, w, h, quality: 0.0, embedding: None };
+                match crop_face_png(&rgb, &face) {
+                    Some((png, tw, th)) => {
+                        repo.store_thumbnail(&face_id, &png, tw, th, self.key)?;
+                        done += 1;
+                    }
+                    None => skipped += 1,
+                }
+            }
+        }
+        Ok((done, skipped))
     }
 
     /// Reconcile the catalogue against what the scan just found.

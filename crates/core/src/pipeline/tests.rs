@@ -801,6 +801,112 @@ fn the_catalogue_describes_a_drive_that_is_no_longer_connected() {
     assert_eq!(drive_contents(&h.archive, None).unwrap().len(), 1);
 }
 
+/// Gathering a person's photographs copies them out and leaves every original
+/// exactly as it was — the whole point of the feature being safe to use.
+#[test]
+fn copying_photographs_out_never_touches_the_originals() {
+    use crate::export;
+
+    let (h, opts) = setup(no_disk_floor());
+    pipeline(&h).run(&opts).unwrap();
+
+    let ids: Vec<String> = {
+        let mut stmt = h
+            .archive
+            .prepare("SELECT id FROM files WHERE status='complete' ORDER BY filename")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(ids.len(), 3);
+
+    // Fingerprint every original before the copy.
+    let before: Vec<_> = std::fs::read_dir(h.drive_dir.join("holiday"))
+        .unwrap()
+        .chain(std::fs::read_dir(h.drive_dir.join("family")).unwrap())
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let m = e.metadata().unwrap();
+            (e.path(), m.len(), m.modified().unwrap())
+        })
+        .collect();
+
+    let dest = h.paths.root.join("exported");
+    let summary = export::copy_photos(&h.archive, &ids, &dest).unwrap();
+    assert_eq!(summary.copied, 3);
+    assert_eq!(summary.missing, 0);
+
+    // The copies exist, prefixed with the drive number so two drives holding the
+    // same filename cannot overwrite each other.
+    let copied: Vec<String> = std::fs::read_dir(&dest)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(copied.len(), 3);
+    assert!(copied.iter().all(|n| n.starts_with("drive14_")), "got {copied:?}");
+
+    // Every original is byte-identical and untouched.
+    for (path, len, modified) in before {
+        let m = std::fs::metadata(&path).unwrap();
+        assert_eq!(m.len(), len, "{} changed size", path.display());
+        assert_eq!(m.modified().unwrap(), modified, "{} was rewritten", path.display());
+    }
+
+    // Running it again copies nothing new rather than duplicating.
+    let again = export::copy_photos(&h.archive, &ids, &dest).unwrap();
+    assert_eq!(again.copied, 0);
+    assert_eq!(again.skipped_existing, 3);
+}
+
+/// A face crop is stored for each detected face, so the gallery works with the
+/// drive unplugged.
+#[test]
+fn face_crops_are_stored_locally_and_survive_disconnection() {
+    let (h, opts) = setup(no_disk_floor());
+    // A skin-tone rectangle the heuristic detector will find.
+    let mut img = RgbImage::from_pixel(400, 300, Rgb([20, 20, 30]));
+    for y in 80..220 {
+        for x in 120..280 {
+            img.put_pixel(x, y, Rgb([205, 160, 130]));
+        }
+    }
+    std::fs::create_dir_all(h.drive_dir.join("people")).unwrap();
+    img.save(h.drive_dir.join("people/portrait.png")).unwrap();
+
+    pipeline(&h).run(&opts).unwrap();
+
+    let repo = crate::faces::FaceRepo::new(&h.archive);
+    let gallery = repo.gallery(50).unwrap();
+    assert!(!gallery.is_empty(), "a face crop should have been stored");
+
+    // Unplug the drive entirely.
+    std::fs::remove_dir_all(&h.drive_dir).unwrap();
+
+    // The crop is still readable, and is a real decodable image.
+    let png = repo
+        .thumbnail(&gallery[0].face_id, &h.key)
+        .unwrap()
+        .expect("crop is stored locally");
+    let decoded = image::load_from_memory(&png).expect("a valid PNG");
+    assert!(decoded.width() <= crate::faces::FACE_THUMBNAIL_EDGE);
+    assert!(decoded.height() <= crate::faces::FACE_THUMBNAIL_EDGE);
+
+    // And it is encrypted at rest, not sitting in the clear.
+    let raw: Vec<u8> = h
+        .archive
+        .query_row(
+            "SELECT ciphertext FROM face_thumbnails LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_ne!(raw, png, "the stored bytes must not be the plain PNG");
+    assert_ne!(&raw[..8.min(raw.len())], b"\x89PNG\r\n\x1a\n");
+}
+
 #[test]
 fn rerun_is_idempotent() {
     let (h, opts) = setup(no_disk_floor());

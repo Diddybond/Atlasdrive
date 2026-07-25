@@ -98,6 +98,42 @@ export interface ClusterSummary {
   person_id?: string | null;
 }
 
+/// One face in the gallery — a picture first, a name only if you gave it one.
+export interface GalleryFace {
+  face_id: string;
+  cluster_id?: string | null;
+  file_id: string;
+  quality?: number | null;
+  person_name?: string | null;
+  cluster_status?: string | null;
+  group_size: number;
+}
+
+export interface PersonPhoto {
+  file_id: string;
+  filename: string;
+  relative_path: string;
+  drive_number: number;
+  drive_name?: string | null;
+  online: boolean;
+}
+
+export interface ExportSummary {
+  copied: number;
+  skipped_existing: number;
+  skipped_offline: number;
+  missing: number;
+  drives_to_connect: number[];
+  destination: string;
+}
+
+export interface SidecarSummary {
+  written: number;
+  skipped_offline: number;
+  skipped_nothing_to_say: number;
+  paths: string[];
+}
+
 /// Someone you have named. Confirmed faces are what future scans match against.
 export interface NamedPerson {
   id: string;
@@ -141,6 +177,15 @@ export const api = {
   tagFaceCluster: (clusterId: string, name: string) =>
     call<{ id: string; display_name: string }>("tag_face_cluster", { clusterId, name }),
   listPeople: () => call<NamedPerson[]>("list_people"),
+  faceGallery: (limit?: number) => call<GalleryFace[]>("face_gallery", { limit }),
+  faceThumbnail: (faceId: string) => call<string | null>("face_thumbnail", { faceId }),
+  tagFace: (faceId: string, name: string) =>
+    call<{ id: string; display_name: string }>("tag_face", { faceId, name }),
+  photosOfPerson: (personId: string) => call<PersonPhoto[]>("photos_of_person", { personId }),
+  copyPersonPhotos: (personId: string, destination: string) =>
+    call<ExportSummary>("copy_person_photos", { personId, destination }),
+  writeSidecarsForPerson: (personId: string) =>
+    call<SidecarSummary>("write_sidecars_for_person", { personId }),
   rejectFaceCluster: (clusterId: string) => call<void>("reject_face_cluster", { clusterId }),
   renameDrive: (driveNumber: number, name: string) =>
     call<void>("rename_drive", { driveNumber, name }),
@@ -172,6 +217,18 @@ const mockResults: SearchResult[] = [
   { file_id: "f1", filename: "beach_1998.jpg", relative_path: "holiday/beach_1998.jpg", drive_number: 14, drive_name: "AtlasDrive A", online: true, date_label: "Taken on 12 Aug 1998", matched: ["text", "visual"], score: 0.91 },
   { file_id: "f2", filename: "portrait.jpg", relative_path: "family/portrait.jpg", drive_number: 7, drive_name: "Holidays 2004-2011", online: false, date_label: "Likely taken between 1985 and 1989", matched: ["visual"], score: 0.82 },
   { file_id: "f3", filename: "old_scan.jpg", relative_path: "scans/old_scan.jpg", drive_number: 22, drive_name: "Scanned prints", online: false, date_label: "Scanned in 2022, original date unknown", matched: ["visual"], score: 0.66 },
+];
+
+function mockFaceImage(seed: number): string {
+  const hue = (seed * 57) % 360;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" fill="hsl(${hue},45%,70%)"/><circle cx="40" cy="34" r="18" fill="hsl(${hue},40%,85%)"/></svg>`;
+  return `data:image/svg+xml;base64,${btoa(svg)}`;
+}
+
+const mockGallery: GalleryFace[] = [
+  { face_id: "fa-1", cluster_id: "c-a1b2c3", file_id: "f1", quality: 0.9, group_size: 34 },
+  { face_id: "fa-2", cluster_id: "c-d4e5f6", file_id: "f2", quality: 0.8, group_size: 12 },
+  { face_id: "fa-3", cluster_id: null, file_id: "f3", quality: 0.7, group_size: 1 },
 ];
 
 const mockClusters: ClusterSummary[] = [
@@ -270,6 +327,36 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       person.confirmed_faces += cluster ? cluster.face_count : 0;
       return Promise.resolve(person as unknown as T);
     }
+    case "face_gallery":
+      return Promise.resolve(mockGallery as unknown as T);
+    case "face_thumbnail": {
+      const idx = mockGallery.findIndex((f) => f.face_id === args?.faceId);
+      return Promise.resolve((idx >= 0 ? mockFaceImage(idx + 1) : null) as unknown as T);
+    }
+    case "tag_face": {
+      const face = mockGallery.find((f) => f.face_id === args?.faceId);
+      const name = String(args?.name ?? "").trim();
+      if (face) face.person_name = name;
+      let person = mockPeople.find((p) => p.display_name.toLowerCase() === name.toLowerCase());
+      if (!person) {
+        person = { id: `p-${mockPeople.length + 1}`, display_name: name, confirmed_faces: 0, suggested_faces: 0 };
+        mockPeople.push(person);
+      }
+      person.confirmed_faces += face ? face.group_size : 1;
+      return Promise.resolve(person as unknown as T);
+    }
+    case "photos_of_person":
+      return Promise.resolve([
+        { file_id: "f1", filename: "beach_1998.jpg", relative_path: "holiday/beach_1998.jpg", drive_number: 14, drive_name: "AtlasDrive A", online: true },
+        { file_id: "f2", filename: "portrait.jpg", relative_path: "family/portrait.jpg", drive_number: 7, drive_name: "Holidays", online: false },
+      ] as unknown as T);
+    case "copy_person_photos":
+      return Promise.resolve({
+        copied: 1, skipped_existing: 0, skipped_offline: 1, missing: 0,
+        drives_to_connect: [7], destination: String(args?.destination ?? "~/Desktop"),
+      } as unknown as T);
+    case "write_sidecars_for_person":
+      return Promise.resolve({ written: 1, skipped_offline: 1, skipped_nothing_to_say: 0, paths: [] } as unknown as T);
     case "list_people":
       return Promise.resolve(mockPeople as unknown as T);
     case "reject_face_cluster": {

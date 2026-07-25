@@ -191,6 +191,30 @@ enum FaceAction {
     },
     /// People you have named, and how many faces each has.
     People,
+    /// Generate the missing face pictures for an archive indexed before the
+    /// gallery existed. Needs the drive connected — it re-reads the originals.
+    BackfillThumbnails {
+        #[arg(long, default_value_t = 5000)]
+        limit: usize,
+    },
+    /// Copy one person's photographs into a folder. Originals are never touched.
+    Gather {
+        #[arg(long)]
+        person: String,
+        #[arg(long)]
+        into: PathBuf,
+    },
+    /// Write XMP sidecars next to a person's originals, for Bridge/Lightroom.
+    ///
+    /// This WRITES to the drive (a new .xmp beside each photograph). The
+    /// original file is never opened for writing.
+    Sidecars {
+        #[arg(long)]
+        person: String,
+        /// Required. Writing to a drive is never implicit.
+        #[arg(long)]
+        write_to_drive: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -596,6 +620,47 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
                 "AtlasDrive will suggest {} when it sees a similar face on the next scan.",
                 person.display_name
             );
+            Ok(())
+        }
+        FaceAction::BackfillThumbnails { limit } => {
+            let queue = ctx.open_queue()?;
+            let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create()?;
+            let pipeline = build_pipeline(ctx, &archive, &queue, &key);
+            let (done, skipped) = pipeline.backfill_face_thumbnails(limit)?;
+            println!("Generated {done} face picture(s); {skipped} skipped.");
+            if skipped > 0 {
+                println!("Skipped faces are on drives that are not connected, or too small to show.");
+            }
+            Ok(())
+        }
+        FaceAction::Gather { person, into } => {
+            let ids: Vec<String> = repo
+                .photos_of_person(&person)?
+                .into_iter()
+                .map(|p| p.file_id)
+                .collect();
+            let summary = family_archive_core::export::copy_photos(&archive, &ids, &into)?;
+            println!("{}", summary.summary());
+            Ok(())
+        }
+        FaceAction::Sidecars { person, write_to_drive } => {
+            if !write_to_drive {
+                return Err(Error::InvalidArgs(
+                    "writing sidecars puts new .xmp files on the drive; pass --write-to-drive to confirm"
+                        .into(),
+                ));
+            }
+            let ids: Vec<String> = repo
+                .photos_of_person(&person)?
+                .into_iter()
+                .map(|p| p.file_id)
+                .collect();
+            let summary = family_archive_core::export::write_xmp_sidecars(&archive, &ids)?;
+            println!(
+                "Wrote {} sidecar(s). {} skipped (drive not connected), {} had nothing to record.",
+                summary.written, summary.skipped_offline, summary.skipped_nothing_to_say
+            );
+            println!("Originals were not modified — each .xmp is a new file beside its photograph.");
             Ok(())
         }
         FaceAction::People => {

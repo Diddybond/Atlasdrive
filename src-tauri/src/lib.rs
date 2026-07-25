@@ -149,6 +149,118 @@ fn tag_face_cluster(
         .map_err(map_err)
 }
 
+/// Faces to browse, newest and clearest first. No names required.
+#[tauri::command]
+fn face_gallery(
+    state: State<AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<faces::GalleryFace>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive)
+        .gallery(limit.unwrap_or(200))
+        .map_err(map_err)
+}
+
+/// One face crop, as a data URL the webview can render directly.
+///
+/// The crop is decrypted here and never written to disk in the clear; the CSP
+/// permits `data:` images, so nothing needs to be served from a file path.
+#[tauri::command]
+fn face_thumbnail(state: State<AppState>, face_id: String) -> Result<Option<String>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let key = keystore::default_keystore(paths.keys_dir())
+        .get_or_create()
+        .map_err(map_err)?;
+    let png = faces::FaceRepo::new(&archive)
+        .thumbnail(&face_id, &key)
+        .map_err(map_err)?;
+    Ok(png.map(|bytes| format!("data:image/png;base64,{}", b64(&bytes))))
+}
+
+/// Minimal base64, to avoid a dependency for one call site.
+fn b64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// Name a single face from the gallery, creating its group if it has none.
+#[tauri::command]
+fn tag_face(state: State<AppState>, face_id: String, name: String) -> Result<faces::Person, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive)
+        .tag_face_with_name(&face_id, &name)
+        .map_err(map_err)
+}
+
+/// Every photograph containing a named person, and which drive holds it.
+#[tauri::command]
+fn photos_of_person(
+    state: State<AppState>,
+    person_id: String,
+) -> Result<Vec<faces::PersonPhoto>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive)
+        .photos_of_person(&person_id)
+        .map_err(map_err)
+}
+
+/// Copy a person's photographs into a folder the user chose.
+///
+/// Reads originals and writes only into `destination`. Never moves, never
+/// deletes, never writes to the source drive.
+#[tauri::command]
+fn copy_person_photos(
+    state: State<AppState>,
+    person_id: String,
+    destination: String,
+) -> Result<family_archive_core::export::ExportSummary, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let repo = faces::FaceRepo::new(&archive);
+    let ids: Vec<String> = repo
+        .photos_of_person(&person_id)
+        .map_err(map_err)?
+        .into_iter()
+        .map(|p| p.file_id)
+        .collect();
+    family_archive_core::export::copy_photos(&archive, &ids, std::path::Path::new(&destination))
+        .map_err(map_err)
+}
+
+/// Write XMP sidecars next to a person's originals, for Bridge and Lightroom.
+///
+/// **Writes to the source drive.** Never called automatically — the interface
+/// asks first, exactly as it does before writing a drive manifest.
+#[tauri::command]
+fn write_sidecars_for_person(
+    state: State<AppState>,
+    person_id: String,
+) -> Result<family_archive_core::export::SidecarSummary, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let ids: Vec<String> = faces::FaceRepo::new(&archive)
+        .photos_of_person(&person_id)
+        .map_err(map_err)?
+        .into_iter()
+        .map(|p| p.file_id)
+        .collect();
+    family_archive_core::export::write_xmp_sidecars(&archive, &ids).map_err(map_err)
+}
+
 /// Everyone the user has named, and how established each is.
 #[tauri::command]
 fn list_people(state: State<AppState>) -> Result<Vec<faces::NamedPerson>, String> {
@@ -566,7 +678,13 @@ pub fn run() {
             tag_face_cluster,
             list_people,
             reject_face_cluster,
-            rename_drive
+            rename_drive,
+            face_gallery,
+            face_thumbnail,
+            tag_face,
+            photos_of_person,
+            copy_person_photos,
+            write_sidecars_for_person
         ])
         .run(tauri::generate_context!())
         .expect("error while running AtlasDrive");

@@ -81,11 +81,39 @@ pub fn backup_before_destructive(src: &std::path::Path) -> Result<std::path::Pat
 // archive.db
 // ---------------------------------------------------------------------------
 
-const ARCHIVE_MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial_catalogue",
-    sql: ARCHIVE_V1,
-}];
+const ARCHIVE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial_catalogue",
+        sql: ARCHIVE_V1,
+    },
+    Migration {
+        version: 2,
+        name: "face_thumbnails",
+        sql: ARCHIVE_V2,
+    },
+];
+
+/// Small encrypted crops of each detected face.
+///
+/// Kept locally so the whole face gallery is browsable with every drive
+/// unplugged — the same promise the rest of the catalogue makes. They are
+/// encrypted with the master key for the same reason face embeddings are: a
+/// folder of croppped faces sitting in Application Support is more sensitive
+/// than the vectors derived from them, not less.
+const ARCHIVE_V2: &str = r#"
+CREATE TABLE face_thumbnails (
+    face_id       TEXT PRIMARY KEY REFERENCES faces(id) ON DELETE CASCADE,
+    width         INTEGER NOT NULL,
+    height        INTEGER NOT NULL,
+    format        TEXT NOT NULL,     -- 'png'
+    ciphertext    BLOB NOT NULL,
+    nonce         BLOB NOT NULL,
+    enc_version   INTEGER NOT NULL,
+    key_version   INTEGER NOT NULL,
+    created_at    TEXT NOT NULL
+);
+"#;
 
 const ARCHIVE_V1: &str = r#"
 CREATE TABLE drives (
@@ -474,23 +502,24 @@ mod tests {
 
     /// Critical gate: upgrading a populated older database preserves every row.
     ///
-    /// The shipped schema is still at version 1, so this exercises the upgrade
-    /// path itself with a representative forward migration applied to a
-    /// database that already holds catalogue data.
+    /// Exercises the upgrade path itself with a representative forward
+    /// migration applied to a database that already holds catalogue data.
+    ///
+    /// The synthetic migration is numbered above every shipped one so this test
+    /// keeps working as real migrations are added.
     #[test]
     fn upgrading_a_populated_old_database_preserves_data() {
-        const V2: &[Migration] = &[
-            Migration { version: 1, name: "initial_catalogue", sql: ARCHIVE_MIGRATIONS[0].sql },
-            Migration {
-                version: 2,
-                name: "add_drive_notes_2",
-                sql: "ALTER TABLE drives ADD COLUMN notes_2 TEXT;",
-            },
-        ];
+        const NEXT: i64 = 9001;
+        let upgrade = vec![Migration {
+            version: NEXT,
+            name: "add_drive_notes_2",
+            sql: "ALTER TABLE drives ADD COLUMN notes_2 TEXT;",
+        }];
 
-        // A database at the older version, holding real rows.
+        // A database at the current shipped version, holding real rows.
         let conn = open_in_memory(SchemaKind::Archive).unwrap();
-        assert_eq!(crate::db::schema_version(&conn).unwrap(), 1);
+        let shipped = crate::db::schema_version(&conn).unwrap();
+        assert!(shipped >= 1);
         conn.execute(
             "INSERT INTO drives(id, drive_number, friendly_name, status, first_seen_at)
              VALUES ('d-1', 14, 'AtlasDrive A', 'offline', '2026-01-01T00:00:00Z')",
@@ -498,9 +527,9 @@ mod tests {
         )
         .unwrap();
 
-        apply(&conn, V2).unwrap();
+        apply(&conn, &upgrade).unwrap();
 
-        assert_eq!(crate::db::schema_version(&conn).unwrap(), 2);
+        assert_eq!(crate::db::schema_version(&conn).unwrap(), NEXT);
         let (number, name): (i64, String) = conn
             .query_row("SELECT drive_number, friendly_name FROM drives WHERE id='d-1'", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -511,8 +540,8 @@ mod tests {
         assert!(crate::db::integrity_check(&conn).is_ok());
 
         // Re-running the same set is a no-op, not a duplicate-column error.
-        apply(&conn, V2).unwrap();
-        assert_eq!(crate::db::schema_version(&conn).unwrap(), 2);
+        apply(&conn, &upgrade).unwrap();
+        assert_eq!(crate::db::schema_version(&conn).unwrap(), NEXT);
     }
 
     /// A failing migration must roll back atomically, leaving the old version
@@ -520,9 +549,8 @@ mod tests {
     #[test]
     fn a_failing_migration_rolls_back_and_keeps_the_old_version() {
         const BAD: &[Migration] = &[
-            Migration { version: 1, name: "initial_catalogue", sql: ARCHIVE_MIGRATIONS[0].sql },
             Migration {
-                version: 2,
+                version: 9001,
                 name: "broken",
                 sql: "ALTER TABLE drives ADD COLUMN ok_column TEXT;
                       ALTER TABLE no_such_table ADD COLUMN boom TEXT;",
@@ -530,6 +558,7 @@ mod tests {
         ];
 
         let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        let shipped = crate::db::schema_version(&conn).unwrap();
         conn.execute(
             "INSERT INTO drives(id, drive_number, status, first_seen_at)
              VALUES ('d-1', 14, 'offline', '2026-01-01T00:00:00Z')",
@@ -541,7 +570,7 @@ mod tests {
         assert!(matches!(err, Error::MigrationOrCorruption(_)), "got {err:?}");
 
         // Version unchanged, data intact, and the partial column is gone.
-        assert_eq!(crate::db::schema_version(&conn).unwrap(), 1);
+        assert_eq!(crate::db::schema_version(&conn).unwrap(), shipped);
         let n: i64 = conn
             .query_row("SELECT count(*) FROM drives", [], |r| r.get(0))
             .unwrap();

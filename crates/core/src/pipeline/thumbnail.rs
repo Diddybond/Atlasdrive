@@ -97,7 +97,7 @@ pub fn verify(thumbnails_dir: &Path, info: &ThumbnailInfo) -> Result<()> {
     Ok(())
 }
 
-fn fit_within(w: u32, h: u32, max_edge: u32) -> (u32, u32) {
+pub(crate) fn fit_within(w: u32, h: u32, max_edge: u32) -> (u32, u32) {
     if w <= max_edge && h <= max_edge {
         return (w.max(1), h.max(1));
     }

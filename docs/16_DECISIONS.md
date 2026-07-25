@@ -399,6 +399,49 @@ describe a required-model-absent state. That is a model *download*, which is why
 it is a separate explicit setup action rather than the default (see
 `docs/SETUP.md`).
 
+## D-027: Browse faces as pictures; gather photographs by copy; sidecars are opt-in
+
+**Status:** Settled
+
+**Context:** The review screen listed face *groups* and asked for a name. That
+assumes you know who someone is. In practice you recognise a face long before you
+can name it, and often never can — so the interface has to lead with pictures.
+
+**Decision, in three parts:**
+
+**1. Encrypted face crops (schema v2).** A ~200px crop of each face is stored in
+`face_thumbnails`, sealed with the master key exactly as embeddings are. Kept
+locally so the gallery is browsable with every drive unplugged, and encrypted
+because a folder of croppped faces in Application Support is *more* sensitive
+than the vectors derived from them, not less. The crop uses the same 45% margin
+as the identity embedding, so the picture you judge is the region the matching
+used.
+
+Archives indexed before this exists have faces but no pictures.
+`atlasdrive faces backfill-thumbnails` re-reads the originals to fill them in —
+the one operation in the product that genuinely needs the drive connected. It
+decodes each photograph once regardless of how many faces it holds.
+
+**2. Gathering by copy.** `export::copy_photos` reads originals and writes only
+into a destination the user chose. Never moves, never deletes, never writes to a
+source drive. Copies are prefixed `drive{NN}_` because the same filename on two
+drives is routine in a working archive and silently overwriting one with the
+other would be data loss in a feature meant to be safe. Photographs on
+disconnected drives are counted and reported with the drive number to connect.
+
+**3. XMP sidecars, opt-in.** `.xmp` files carrying people as `dc:subject`
+keywords plus Vision's labels — read by Bridge, Lightroom and Capture One with no
+plugin, which is why this beats building a Bridge panel against an extension API
+that has moved three times.
+
+**This writes to the drive**, so it is explicit and refused without
+`--write-to-drive`, exactly as the drive manifest is (D-005). It creates a new
+file beside the photograph; the original is never opened for writing.
+
+**Consequences:** The archive becomes browsable by face without any naming, and
+selections leave the app in a form other software can use. The one safety line —
+originals are read-only — holds in all three paths.
+
 ## New decision template
 
 ```markdown

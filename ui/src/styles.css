@@ -294,3 +294,23 @@ h2 {
 .people-list li { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .person-name { font-family: var(--font-display); font-weight: 600; }
 .person-counts { color: var(--ink-soft); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+
+/* The face gallery. Pictures lead, names follow — you recognise a face long
+   before you can name it, and often you never can. */
+.face-grid {
+  list-style: none; margin: 16px 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 12px;
+}
+.face-cell {
+  width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); color: var(--ink);
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+}
+.face-cell:hover { border-color: var(--accent); }
+.face-cell.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.face-cell img { border-radius: 8px; object-fit: cover; display: block; }
+.face-cell-empty { font-size: 2rem; line-height: 80px; }
+.face-cell-label {
+  font-size: 0.72rem; color: var(--ink-soft); text-align: center;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}

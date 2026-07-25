@@ -1,46 +1,63 @@
 import { useEffect, useState } from "react";
-import { api, ClusterSummary, NamedPerson } from "../api";
+import { api, ExportSummary, GalleryFace, NamedPerson } from "../api";
 
+/// Browsing faces, not names.
+///
+/// The gallery leads because you often do not know who someone is — you
+/// recognise them. A name is only ever attached when you type one.
 export function ReviewScreen() {
-  const [clusters, setClusters] = useState<ClusterSummary[]>([]);
+  const [faces, setFaces] = useState<GalleryFace[]>([]);
+  const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [people, setPeople] = useState<NamedPerson[]>([]);
-  const [names, setNames] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [justTagged, setJustTagged] = useState<string | null>(null);
+  const [selected, setSelected] = useState<GalleryFace | null>(null);
+  const [name, setName] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [gathering, setGathering] = useState<NamedPerson | null>(null);
+  const [destination, setDestination] = useState("");
+  const [exported, setExported] = useState<ExportSummary | null>(null);
 
   async function load() {
-    setClusters(await api.prepareReview(20));
+    const gallery = await api.faceGallery(200);
+    setFaces(gallery);
     setPeople(await api.listPeople());
+    // Fetch crops individually so a large gallery paints as it arrives.
+    const loaded: Record<string, string> = {};
+    await Promise.all(
+      gallery.map(async (f) => {
+        const src = await api.faceThumbnail(f.face_id);
+        if (src) loaded[f.face_id] = src;
+      }),
+    );
+    setThumbs(loaded);
   }
   useEffect(() => {
     void load();
   }, []);
 
-  async function tag(cluster: ClusterSummary) {
-    const name = (names[cluster.cluster_id] ?? "").trim();
-    if (!name) return;
-    setBusy(cluster.cluster_id);
-    setError(null);
+  async function tag() {
+    if (!selected || !name.trim()) return;
+    setBusy(true);
     try {
-      const person = await api.tagFaceCluster(cluster.cluster_id, name);
-      setJustTagged(person.display_name);
-      setNames({ ...names, [cluster.cluster_id]: "" });
+      const person = await api.tagFace(selected.face_id, name.trim());
+      setStatus(
+        `Tagged as ${person.display_name}. AtlasDrive will suggest ${person.display_name} when it sees a similar face on the next scan.`,
+      );
+      setSelected(null);
+      setName("");
       await load();
-    } catch (err) {
-      setError(String(err));
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
 
-  async function reject(cluster: ClusterSummary) {
-    setBusy(cluster.cluster_id);
+  async function gather(person: NamedPerson) {
+    if (!destination.trim()) return;
+    setBusy(true);
     try {
-      await api.rejectFaceCluster(cluster.cluster_id);
-      await load();
+      setExported(await api.copyPersonPhotos(person.id, destination.trim()));
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
 
@@ -48,10 +65,83 @@ export function ReviewScreen() {
     <section aria-labelledby="review-heading">
       <h1 id="review-heading">People</h1>
       <p className="lede">
-        AtlasDrive groups faces that look alike, but never puts a name to anyone on its own. Once you
-        name someone, it will suggest them when it sees a similar face on a later scan — and still
-        ask you to confirm.
+        Every face AtlasDrive has found. You do not need to know who anyone is to browse — click a
+        face you recognise and give it a name. Nothing is ever named automatically.
       </p>
+
+      {status && (
+        <p className="search-note" role="status">
+          {status}
+        </p>
+      )}
+
+      {faces.length === 0 ? (
+        <p className="empty">
+          No faces yet. Scan a drive and any faces found will appear here.
+        </p>
+      ) : (
+        <ul className="face-grid" aria-label="Faces found">
+          {faces.map((f) => (
+            <li key={f.face_id}>
+              <button
+                className={selected?.face_id === f.face_id ? "face-cell selected" : "face-cell"}
+                onClick={() => {
+                  setSelected(f);
+                  setName(f.person_name ?? "");
+                }}
+                aria-label={
+                  f.person_name
+                    ? `${f.person_name}, ${f.group_size} photograph${f.group_size === 1 ? "" : "s"}`
+                    : `Unnamed face, ${f.group_size} photograph${f.group_size === 1 ? "" : "s"}`
+                }
+              >
+                {thumbs[f.face_id] ? (
+                  <img src={thumbs[f.face_id]} alt="" width={80} height={80} />
+                ) : (
+                  <span className="face-cell-empty" aria-hidden>
+                    🙂
+                  </span>
+                )}
+                <span className="face-cell-label">
+                  {f.person_name ?? "Who is this?"}
+                  {f.group_size > 1 && <> · {f.group_size}</>}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {selected && (
+        <div className="card">
+          <h2>Name this face</h2>
+          <label className="review-name">
+            Who is this?
+            <input
+              autoFocus
+              list="known-people"
+              placeholder="Type a name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void tag();
+              }}
+            />
+          </label>
+          <p className="drive-meta subtle">
+            Naming this confirms {selected.group_size} photograph
+            {selected.group_size === 1 ? "" : "s"} and teaches AtlasDrive to suggest them next time.
+          </p>
+          <div className="review-actions">
+            <button onClick={() => void tag()} disabled={!name.trim() || busy}>
+              {busy ? "Saving…" : "Save name"}
+            </button>
+            <button className="ghost" onClick={() => setSelected(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {people.length > 0 && (
         <div className="card">
@@ -62,78 +152,64 @@ export function ReviewScreen() {
                 <span className="person-name">{p.display_name}</span>
                 <span className="person-counts">
                   {p.confirmed_faces} confirmed
-                  {p.suggested_faces > 0 && <> · {p.suggested_faces} awaiting your confirmation</>}
+                  {p.suggested_faces > 0 && <> · {p.suggested_faces} awaiting confirmation</>}
                 </span>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setGathering(p);
+                    setExported(null);
+                  }}
+                  aria-label={`Gather ${p.display_name}'s photographs`}
+                >
+                  Gather their photographs
+                </button>
               </li>
             ))}
           </ul>
         </div>
       )}
 
-      {justTagged && (
-        <p className="search-note" role="status">
-          Tagged as {justTagged}. AtlasDrive will suggest {justTagged} when it sees a similar face on
-          the next scan.
-        </p>
-      )}
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-
-      {clusters.length === 0 ? (
-        <p className="empty">No groups are waiting for review right now.</p>
-      ) : (
-        <ul className="review-list">
-          {clusters.map((c) => (
-            <li key={c.cluster_id} className="card review-card">
-              <div className="face-tiles" aria-hidden>
-                {Array.from({ length: Math.min(4, c.face_count) }).map((_, i) => (
-                  <span key={i} className="face-tile">
-                    🙂
-                  </span>
-                ))}
-              </div>
-              <div className="review-body">
-                <p className="review-title">
-                  {c.label ? `Possible match — ${c.label}` : "Unnamed group"} · {c.face_count}{" "}
-                  photograph{c.face_count === 1 ? "" : "s"}
-                </p>
-                <label className="review-name">
-                  Who is this?
-                  <input
-                    placeholder="Type a name to confirm"
-                    list="known-people"
-                    value={names[c.cluster_id] ?? ""}
-                    onChange={(e) => setNames({ ...names, [c.cluster_id]: e.target.value })}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void tag(c);
-                    }}
-                  />
-                </label>
-                <div className="review-actions">
-                  <button
-                    onClick={() => void tag(c)}
-                    disabled={!names[c.cluster_id]?.trim() || busy === c.cluster_id}
-                  >
-                    {busy === c.cluster_id ? "Saving…" : "Confirm name"}
-                  </button>
-                  <button
-                    className="ghost"
-                    onClick={() => void reject(c)}
-                    disabled={busy === c.cluster_id}
-                  >
-                    Not a person
-                  </button>
-                </div>
-              </div>
-            </li>
-          ))}
-        </ul>
+      {gathering && (
+        <div className="card">
+          <h2>Gather {gathering.display_name}&rsquo;s photographs</h2>
+          <p className="drive-meta subtle">
+            Copies the originals into a folder you choose. Nothing is moved, and nothing is ever
+            written to the drive itself.
+          </p>
+          <label>
+            Copy into
+            <input
+              placeholder="/Users/you/Desktop/Aimee"
+              value={destination}
+              onChange={(e) => setDestination(e.target.value)}
+            />
+          </label>
+          <div className="review-actions">
+            <button onClick={() => void gather(gathering)} disabled={!destination.trim() || busy}>
+              {busy ? "Copying…" : "Copy photographs"}
+            </button>
+            <button className="ghost" onClick={() => setGathering(null)}>
+              Cancel
+            </button>
+          </div>
+          {exported && (
+            <p className="check-detail" role="status">
+              Copied {exported.copied} photograph{exported.copied === 1 ? "" : "s"} to{" "}
+              {exported.destination}.
+              {exported.skipped_offline > 0 && (
+                <>
+                  {" "}
+                  {exported.skipped_offline} more are on Drive{" "}
+                  {exported.drives_to_connect.join(", ")} — connect and run this again.
+                </>
+              )}
+            </p>
+          )}
+        </div>
       )}
 
-      {/* Typing an existing name reuses that person rather than creating a duplicate. */}
+      {/* Typing an existing name reuses that person rather than duplicating. */}
       <datalist id="known-people">
         {people.map((p) => (
           <option key={p.id} value={p.display_name} />
@@ -141,8 +217,8 @@ export function ReviewScreen() {
       </datalist>
 
       <p className="footnote">
-        Face data is encrypted on this Mac and never leaves it. A name is only ever set when you
-        confirm it.
+        Face pictures and face data are encrypted on this Mac and never leave it. A name is only ever
+        set when you type one.
       </p>
     </section>
   );

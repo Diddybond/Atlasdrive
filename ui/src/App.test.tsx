@@ -153,30 +153,59 @@ describe("AtlasDrive UI", () => {
     });
   });
 
-  it("tags a face group with a name and remembers the person", async () => {
+  it("browses faces as pictures and names one without knowing it first", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /People/ }));
+
+    // The gallery is pictures, not names — you can browse before knowing anyone.
     await waitFor(() => {
-      expect(screen.getAllByText(/Unnamed group/).length).toBeGreaterThan(0);
+      expect(screen.getAllByRole("button", { name: /Unnamed face/ }).length).toBeGreaterThan(0);
     });
 
-    // Nothing can be confirmed until a name is typed — the app never names
-    // anyone on its own.
-    const confirm = screen.getAllByRole("button", { name: "Confirm name" })[0];
-    expect((confirm as HTMLButtonElement).disabled).toBe(true);
-
-    fireEvent.change(screen.getAllByLabelText(/Who is this/)[0], {
-      target: { value: "Aimee" },
+    fireEvent.click(screen.getAllByRole("button", { name: /Unnamed face, 34 photographs/ })[0]);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Name this face" })).toBeDefined();
     });
-    fireEvent.click(screen.getAllByRole("button", { name: "Confirm name" })[0]);
+
+    // Nothing can be saved until a name is typed — nothing is named automatically.
+    expect((screen.getByRole("button", { name: "Save name" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    fireEvent.change(screen.getByLabelText(/Who is this/), { target: { value: "Aimee" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
 
     await waitFor(() => {
       expect(screen.getByText(/Tagged as Aimee/)).toBeDefined();
     });
-    // The person is now known, and the app says it will suggest them next time.
     expect(screen.getByText(/suggest Aimee when it sees a similar face/)).toBeDefined();
-    expect(screen.getByText("Aimee")).toBeDefined();
     expect(screen.getByText(/34 confirmed/)).toBeDefined();
+  });
+
+  it("gathers a named person's photographs and says which drive is missing", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /Unnamed face/ }).length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /Unnamed face/ })[0]);
+    fireEvent.change(screen.getByLabelText(/Who is this/), { target: { value: "Kent" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Gather Kent's photographs/ })).toBeDefined();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Gather Kent's photographs/ }));
+    fireEvent.change(screen.getByLabelText(/Copy into/), {
+      target: { value: "/Users/wayne/Desktop/Kent" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Copy photographs" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Copied 1 photograph to/)).toBeDefined();
+    });
+    // The photographs it could not reach are attributed to a specific drive.
+    expect(screen.getByText(/1 more are on Drive 7/)).toBeDefined();
   });
 
   it("shows safety checks on the settings screen", async () => {
