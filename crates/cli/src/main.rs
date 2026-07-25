@@ -181,7 +181,23 @@ enum FaceAction {
         limit: usize,
     },
     /// Rebuild face clusters without reopening originals.
-    Rebuild,
+    Rebuild {
+        /// Override the similarity threshold for grouping faces.
+        #[arg(long)]
+        threshold: Option<f32>,
+    },
+    /// Remove a person added by mistake. Faces are kept and return to unnamed.
+    Forget {
+        #[arg(long)]
+        person: String,
+    },
+    /// Correct a person's name. If the name already exists, the two are merged.
+    Rename {
+        #[arg(long)]
+        person: String,
+        #[arg(long)]
+        name: String,
+    },
     /// Tag a face cluster with a person's name. Recognised from then on.
     Name {
         #[arg(long)]
@@ -602,15 +618,36 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
             println!("\nReview stops here for human judgement - no names assigned automatically.");
             Ok(())
         }
-        FaceAction::Rebuild => {
+        FaceAction::Forget { person } => {
+            repo.remove_person(&person)?;
+            println!("Removed. Their faces are kept and are unnamed again.");
+            Ok(())
+        }
+        FaceAction::Rename { person, name } => {
+            let updated = repo.rename_person(&person, &name)?;
+            println!("Now called {}.", updated.display_name);
+            Ok(())
+        }
+        FaceAction::Rebuild { threshold } => {
             let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create()?;
-            let n = repo.rebuild_clusters(
-                family_archive_core::ai::local::MODEL_ID,
-                family_archive_core::ai::local::MODEL_VERSION,
-                &key,
-                faces::DEFAULT_CLUSTER_THRESHOLD,
-            )?;
-            println!("Rebuilt {n} cluster(s) without reopening originals.");
+            // Cluster the partition the faces were actually written under, and
+            // use the threshold that suits that model's embedding space.
+            let (model_id, model_version): (String, String) = archive
+                .query_row(
+                    "SELECT model_id, model_version FROM face_embeddings
+                      GROUP BY model_id, model_version ORDER BY count(*) DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or_else(|_| {
+                    (
+                        family_archive_core::ai::local::MODEL_ID.to_string(),
+                        family_archive_core::ai::local::MODEL_VERSION.to_string(),
+                    )
+                });
+            let t = threshold.unwrap_or_else(|| faces::cluster_threshold_for(&model_id));
+            let n = repo.rebuild_clusters(&model_id, &model_version, &key, t)?;
+            println!("Rebuilt {n} group(s) from {model_id} faces at threshold {t}.");
             Ok(())
         }
         FaceAction::Name { cluster, name } => {

@@ -109,6 +109,15 @@ export interface GalleryFace {
   group_size: number;
 }
 
+export interface PersonFolder {
+  drive_number: number;
+  drive_name?: string | null;
+  online: boolean;
+  relative_folder: string;
+  absolute_path?: string | null;
+  photo_count: number;
+}
+
 export interface PersonPhoto {
   file_id: string;
   filename: string;
@@ -180,8 +189,23 @@ export const api = {
   faceGallery: (limit?: number) => call<GalleryFace[]>("face_gallery", { limit }),
   faceThumbnail: (faceId: string) => call<string | null>("face_thumbnail", { faceId }),
   tagFace: (faceId: string, name: string) =>
-    call<{ id: string; display_name: string }>("tag_face", { faceId, name }),
+    call<{ person: { id: string; display_name: string }; suggested: number }>("tag_face", {
+      faceId,
+      name,
+    }),
   photosOfPerson: (personId: string) => call<PersonPhoto[]>("photos_of_person", { personId }),
+  photoThumbnail: (fileId: string, maxEdge?: number) =>
+    call<string | null>("photo_thumbnail", { fileId, maxEdge }),
+  confirmSuggestions: (personId: string) => call<number>("confirm_suggestions", { personId }),
+  rejectSuggestions: (personId: string) => call<number>("reject_suggestions", { personId }),
+  resolveSuggestion: (clusterId: string, isThem: boolean) =>
+    call<void>("resolve_suggestion", { clusterId, isThem }),
+  personFolders: (personId: string) => call<PersonFolder[]>("person_folders", { personId }),
+  openFolder: (path: string) => call<void>("open_folder", { path }),
+  forgetPerson: (personId: string) => call<void>("forget_person", { personId }),
+  renamePerson: (personId: string, name: string) =>
+    call<{ id: string; display_name: string }>("rename_person", { personId, name }),
+  rescanDrive: (driveNumber: number) => call<string>("rescan_drive", { driveNumber }),
   copyPersonPhotos: (personId: string, destination: string) =>
     call<ExportSummary>("copy_person_photos", { personId, destination }),
   writeSidecarsForPerson: (personId: string) =>
@@ -343,8 +367,37 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         mockPeople.push(person);
       }
       person.confirmed_faces += face ? face.group_size : 1;
-      return Promise.resolve(person as unknown as T);
+      return Promise.resolve({ person, suggested: 0 } as unknown as T);
     }
+    case "photo_thumbnail": {
+      const seed = String(args?.fileId ?? "").length * 47;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="90"><rect width="120" height="90" fill="hsl(${seed % 360},40%,70%)"/></svg>`;
+      return Promise.resolve(`data:image/svg+xml;base64,${btoa(svg)}` as unknown as T);
+    }
+    case "confirm_suggestions":
+    case "reject_suggestions":
+      return Promise.resolve(0 as unknown as T);
+    case "resolve_suggestion":
+      return Promise.resolve(undefined as unknown as T);
+    case "person_folders":
+      return Promise.resolve([
+        { drive_number: 14, drive_name: "AtlasDrive A", online: true, relative_folder: "Aimee and Kent/edits", absolute_path: "/Volumes/AtlasDriveA/Aimee and Kent/edits", photo_count: 34 },
+        { drive_number: 7, drive_name: "Holidays", online: false, relative_folder: "family", absolute_path: null, photo_count: 8 },
+      ] as unknown as T);
+    case "open_folder":
+      return Promise.resolve(undefined as unknown as T);
+    case "forget_person": {
+      const i = mockPeople.findIndex((p) => p.id === args?.personId);
+      if (i >= 0) mockPeople.splice(i, 1);
+      return Promise.resolve(undefined as unknown as T);
+    }
+    case "rename_person": {
+      const p = mockPeople.find((x) => x.id === args?.personId);
+      if (p) p.display_name = String(args?.name ?? "");
+      return Promise.resolve(p as unknown as T);
+    }
+    case "rescan_drive":
+      return Promise.resolve(`Looking for new photographs on Drive ${args?.driveNumber}.` as unknown as T);
     case "photos_of_person":
       return Promise.resolve([
         { file_id: "f1", filename: "beach_1998.jpg", relative_path: "holiday/beach_1998.jpg", drive_number: 14, drive_name: "AtlasDrive A", online: true },

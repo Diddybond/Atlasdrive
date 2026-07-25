@@ -11,6 +11,19 @@ export function DrivesScreen() {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [contents, setContents] = useState<Record<number, DriveContents>>({});
+  const [rescanning, setRescanning] = useState<number | null>(null);
+  const [rescanNote, setRescanNote] = useState<string | null>(null);
+
+  async function rescan(drive: Drive) {
+    setRescanning(drive.drive_number);
+    try {
+      setRescanNote(await api.rescanDrive(drive.drive_number));
+    } catch (err) {
+      setRescanNote(String(err));
+    } finally {
+      setRescanning(null);
+    }
+  }
 
   async function load() {
     setDrives(await api.listDrives());
@@ -101,6 +114,12 @@ export function DrivesScreen() {
         </form>
       )}
 
+      {rescanNote && (
+        <p className="search-note" role="status">
+          {rescanNote}
+        </p>
+      )}
+
       <ul className="drive-list">
         {drives.map((d) => (
           <li key={d.id} className="card drive-card">
@@ -167,13 +186,22 @@ export function DrivesScreen() {
                   </button>
                 </form>
               ) : (
-                <button
-                  className="ghost"
-                  onClick={() => setEditing(d.id)}
-                  aria-label={`Edit location and categories for Drive ${d.drive_number}`}
-                >
-                  Edit location &amp; categories
-                </button>
+                <>
+                  <button
+                    onClick={() => void rescan(d)}
+                    disabled={rescanning === d.drive_number}
+                    aria-label={`Check Drive ${d.drive_number} for new photographs`}
+                  >
+                    {rescanning === d.drive_number ? "Checking…" : "Check for new photographs"}
+                  </button>
+                  <button
+                    className="ghost"
+                    onClick={() => setEditing(d.id)}
+                    aria-label={`Edit location and categories for Drive ${d.drive_number}`}
+                  >
+                    Edit location &amp; categories
+                  </button>
+                </>
               )}
             </div>
           </li>

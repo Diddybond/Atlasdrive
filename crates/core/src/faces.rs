@@ -12,8 +12,44 @@ use crate::error::{Error, Result};
 use crate::util::{cosine_similarity, new_uuid, now_iso8601};
 
 pub const CLUSTER_ALGO_VERSION: &str = "greedy-cosine-0.1.0";
-/// Cosine similarity at or above which two faces join the same cluster.
+/// Cosine similarity at or above which two faces join the same cluster,
+/// for the original 32-dimension heuristic face embedding.
 pub const DEFAULT_CLUSTER_THRESHOLD: f32 = 0.92;
+
+/// Clustering threshold for Apple Vision's 768-dimension face feature prints.
+///
+/// Chosen by measurement, on 2,126 real faces from one wedding:
+///
+/// | threshold | groups | largest | faces grouped with others |
+/// |---|---|---|---|
+/// | 0.92 | 1,770 | 17 | 433 |
+/// | 0.88 | 1,395 | 42 | 889 |
+/// | 0.84 | 918 | 65 | 1,327 |
+///
+/// 0.92 — the value tuned for the heuristic engine's colour grid — barely
+/// grouped anything, leaving 83% of faces alone and every one needing to be
+/// named individually.
+///
+/// **What 0.84 does not achieve, stated plainly:** a wedding has perhaps 80
+/// people, and this still produces 918 groups, so one person is typically split
+/// across several. That is the ceiling of a general image embedding standing in
+/// for a face-recognition model — pose and lighting move the vector as much as
+/// identity does. Naming several groups with the same name attaches them all to
+/// one person, and each confirmation makes the next scan's suggestions better,
+/// so it is workable but not effortless. A real face model (D-026) is what
+/// collapses this properly.
+///
+/// The largest group at 0.84 is 65 faces, with no sign of a runaway merge, and
+/// `--threshold` lets it be tuned per archive.
+pub const VISION_CLUSTER_THRESHOLD: f32 = 0.84;
+
+/// The clustering threshold to use for a given face-embedding model.
+pub fn cluster_threshold_for(model_id: &str) -> f32 {
+    match model_id {
+        crate::ai::vision::MODEL_ID => VISION_CLUSTER_THRESHOLD,
+        _ => DEFAULT_CLUSTER_THRESHOLD,
+    }
+}
 
 /// A person record (human-confirmed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +122,19 @@ pub struct GalleryFace {
     pub cluster_status: Option<String>,
     /// How many faces are grouped with this one.
     pub group_size: i64,
+}
+
+/// A folder on disk holding some of a person's photographs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonFolder {
+    pub drive_number: i64,
+    pub drive_name: Option<String>,
+    pub online: bool,
+    /// Path within the drive, e.g. `Aimee and Kent/edits`.
+    pub relative_folder: String,
+    /// Full path, resolvable only while the drive is connected.
+    pub absolute_path: Option<String>,
+    pub photo_count: i64,
 }
 
 /// A photograph containing a named person, and where to find it.
@@ -291,6 +340,54 @@ impl<'a> FaceRepo<'a> {
             }
         };
         self.tag_cluster_with_name(&cluster_id, display_name)
+    }
+
+    /// The folders on disk holding a person's photographs.
+    ///
+    /// Grouped by folder rather than listed per file, because "where are these?"
+    /// is a question about places, not about 300 individual paths. The absolute
+    /// path is resolved only when the drive is connected; otherwise the drive
+    /// number and relative folder are still shown, which is enough to know what
+    /// to plug in and where to look.
+    pub fn folders_for_person(&self, person_id: &str) -> Result<Vec<PersonFolder>> {
+        use std::collections::BTreeMap;
+
+        let photos = self.photos_of_person(person_id)?;
+        let mut grouped: BTreeMap<(i64, String), PersonFolder> = BTreeMap::new();
+
+        for p in photos {
+            // The folder is the relative path minus the filename.
+            let folder = std::path::Path::new(&p.relative_path)
+                .parent()
+                .map(|f| f.to_string_lossy().to_string())
+                .filter(|f| !f.is_empty())
+                .unwrap_or_else(|| ".".to_string());
+
+            let entry = grouped
+                .entry((p.drive_number, folder.clone()))
+                .or_insert_with(|| PersonFolder {
+                    drive_number: p.drive_number,
+                    drive_name: p.drive_name.clone(),
+                    online: p.online,
+                    relative_folder: folder,
+                    absolute_path: None,
+                    photo_count: 0,
+                });
+            entry.photo_count += 1;
+
+            // One resolution per folder is enough to know where it is.
+            if entry.absolute_path.is_none() {
+                if let Some(abs) = crate::search::resolve_original(self.conn, &p.file_id)? {
+                    entry.absolute_path = abs
+                        .parent()
+                        .map(|d| d.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        let mut out: Vec<PersonFolder> = grouped.into_values().collect();
+        out.sort_by_key(|f| std::cmp::Reverse(f.photo_count));
+        Ok(out)
     }
 
     /// Every photograph containing a named person, newest drive first.
@@ -515,6 +612,234 @@ impl<'a> FaceRepo<'a> {
             "UPDATE faces SET cluster_id=?2 WHERE id=?1",
             params![face_id, cluster_id],
         )?;
+        Ok(())
+    }
+
+    /// Propose a just-named person across every face not yet claimed.
+    ///
+    /// Naming someone should immediately answer "who else is this?" — otherwise
+    /// the user names one group of 53 and is left to find the other twenty
+    /// groups of the same person by eye.
+    ///
+    /// Each match attaches the face's group to the person with status left at
+    /// `unnamed`: proposed, not decided. Confirming is still a human act
+    /// (D-007), and only confirmed faces are ever used as exemplars, so a wrong
+    /// proposal cannot compound.
+    ///
+    /// Returns how many faces were proposed.
+    pub fn suggest_for_person(
+        &self,
+        person_id: &str,
+        model_id: &str,
+        model_version: &str,
+        key: &MasterKey,
+        threshold: f32,
+    ) -> Result<usize> {
+        // The person's confirmed faces are the yardstick.
+        let mut exemplars: Vec<Vec<f32>> = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT fe.ciphertext, fe.nonce, fe.enc_version, fe.key_version
+                   FROM face_embeddings fe
+                   JOIN faces f         ON f.id = fe.face_id
+                   JOIN face_clusters c ON c.id = f.cluster_id
+                  WHERE c.person_id = ?1 AND c.status = 'confirmed'
+                    AND fe.model_id = ?2 AND fe.model_version = ?3
+                    AND f.is_false_detection = 0",
+            )?;
+            let rows = stmt.query_map(params![person_id, model_id, model_version], |r| {
+                Ok(Sealed {
+                    ciphertext: r.get(0)?,
+                    nonce: r.get(1)?,
+                    enc_version: r.get(2)?,
+                    key_version: r.get(3)?,
+                })
+            })?;
+            for row in rows {
+                if let Ok(v) = crypto::open_vector(key, &row?) {
+                    exemplars.push(v);
+                }
+            }
+        }
+        if exemplars.is_empty() {
+            return Ok(0);
+        }
+
+        // Candidates: faces belonging to nobody at all.
+        let mut candidates: Vec<(String, Option<String>, Vec<f32>)> = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT f.id, f.cluster_id, fe.ciphertext, fe.nonce, fe.enc_version, fe.key_version
+                   FROM faces f
+                   JOIN face_embeddings fe ON fe.face_id = f.id
+                   LEFT JOIN face_clusters c ON c.id = f.cluster_id
+                  WHERE fe.model_id = ?1 AND fe.model_version = ?2
+                    AND f.is_false_detection = 0 AND f.is_ignored = 0
+                    AND (c.person_id IS NULL)
+                    AND (c.status IS NULL OR c.status <> 'rejected')",
+            )?;
+            let rows = stmt.query_map(params![model_id, model_version], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    Sealed {
+                        ciphertext: r.get(2)?,
+                        nonce: r.get(3)?,
+                        enc_version: r.get(4)?,
+                        key_version: r.get(5)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (face_id, cluster_id, sealed) = row?;
+                if let Ok(v) = crypto::open_vector(key, &sealed) {
+                    candidates.push((face_id, cluster_id, v));
+                }
+            }
+        }
+
+        let mut proposed = 0usize;
+        let mut touched_clusters: std::collections::BTreeSet<String> = Default::default();
+        for (face_id, cluster_id, vector) in candidates {
+            // Best match against any confirmed face of this person.
+            let best = exemplars
+                .iter()
+                .map(|e| cosine_similarity(&vector, e))
+                .fold(f32::MIN, f32::max);
+            if best < threshold {
+                continue;
+            }
+            match cluster_id {
+                // Propose the whole group at once — its members are already
+                // believed to be the same person.
+                Some(c) => {
+                    if touched_clusters.insert(c.clone()) {
+                        self.conn.execute(
+                            "UPDATE face_clusters
+                                SET person_id = ?2,
+                                    label = ?3,
+                                    updated_at = ?4
+                              WHERE id = ?1 AND status <> 'confirmed'",
+                            params![
+                                c,
+                                person_id,
+                                format!("suggested ({:.0}% match)", best * 100.0),
+                                now_iso8601()
+                            ],
+                        )?;
+                    }
+                    proposed += 1;
+                }
+                None => {
+                    self.suggest_face_is_person(&face_id, person_id, best)?;
+                    proposed += 1;
+                }
+            }
+        }
+        Ok(proposed)
+    }
+
+    /// Accept every outstanding proposal for a person.
+    pub fn confirm_suggestions(&self, person_id: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE face_clusters SET status='confirmed', label=NULL, updated_at=?2
+              WHERE person_id=?1 AND status <> 'confirmed'",
+            params![person_id, now_iso8601()],
+        )?;
+        Ok(n)
+    }
+
+    /// Reject every outstanding proposal for a person, freeing those faces.
+    pub fn reject_suggestions(&self, person_id: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "UPDATE face_clusters SET person_id=NULL, label=NULL, updated_at=?2
+              WHERE person_id=?1 AND status <> 'confirmed'",
+            params![person_id, now_iso8601()],
+        )?;
+        Ok(n)
+    }
+
+    /// Reject one proposed group without touching the person's other proposals.
+    pub fn reject_cluster_suggestion(&self, cluster_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE face_clusters SET person_id=NULL, label=NULL, updated_at=?2
+              WHERE id=?1 AND status <> 'confirmed'",
+            params![cluster_id, now_iso8601()],
+        )?;
+        Ok(())
+    }
+
+    /// Confirm one proposed group.
+    pub fn confirm_cluster_suggestion(&self, cluster_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE face_clusters SET status='confirmed', label=NULL, updated_at=?2
+              WHERE id=?1",
+            params![cluster_id, now_iso8601()],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a person created by mistake.
+    ///
+    /// The faces are kept — they are still faces, just no longer claimed by
+    /// anyone — and their groups return to unnamed so they reappear for review.
+    /// Deleting a typo must never delete photographs or detections.
+    pub fn remove_person(&self, person_id: &str) -> Result<()> {
+        self.delete_person_face_data(person_id)
+    }
+
+    /// Correct a person's name, merging into an existing person if the new name
+    /// is already taken.
+    ///
+    /// Merging on collision is the behaviour that matches the mistake being
+    /// fixed: "Kent canon" and "Kent Canovan" are one person typed twice, and
+    /// renaming one to match the other should join them rather than fail.
+    pub fn rename_person(&self, person_id: &str, new_name: &str) -> Result<Person> {
+        let name = new_name.trim();
+        if name.is_empty() {
+            return Err(Error::InvalidArgs("a person needs a name".into()));
+        }
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM people WHERE display_name = ?1 COLLATE NOCASE AND id <> ?2",
+                params![name, person_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        match existing {
+            // Name already belongs to someone else: move this person's groups
+            // across and drop the duplicate record.
+            Some(target) => {
+                let tx = self.conn.unchecked_transaction()?;
+                tx.execute(
+                    "UPDATE face_clusters SET person_id=?2 WHERE person_id=?1",
+                    params![person_id, target],
+                )?;
+                tx.execute("DELETE FROM people WHERE id=?1", [person_id])?;
+                tx.commit()?;
+                self.get_person(&target)?
+                    .ok_or_else(|| Error::Other("person vanished".into()))
+            }
+            None => {
+                self.conn.execute(
+                    "UPDATE people SET display_name=?2, updated_at=?3 WHERE id=?1",
+                    params![person_id, name, now_iso8601()],
+                )?;
+                self.get_person(person_id)?
+                    .ok_or_else(|| Error::InvalidArgs(format!("no person with id {person_id}")))
+            }
+        }
+    }
+
+    /// Detach one face from whatever person it was attached to.
+    ///
+    /// For the case where a group is right about being a group but wrong about
+    /// one member.
+    pub fn untag_face(&self, face_id: &str) -> Result<()> {
+        self.conn
+            .execute("UPDATE faces SET cluster_id = NULL WHERE id = ?1", [face_id])?;
         Ok(())
     }
 

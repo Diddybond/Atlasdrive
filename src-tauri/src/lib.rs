@@ -196,13 +196,91 @@ fn b64(bytes: &[u8]) -> String {
 }
 
 /// Name a single face from the gallery, creating its group if it has none.
+#[derive(Serialize)]
+struct TagResult {
+    person: faces::Person,
+    /// Other faces now proposed as this person, awaiting confirmation.
+    suggested: usize,
+}
+
 #[tauri::command]
-fn tag_face(state: State<AppState>, face_id: String, name: String) -> Result<faces::Person, String> {
+fn tag_face(state: State<AppState>, face_id: String, name: String) -> Result<TagResult, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let repo = faces::FaceRepo::new(&archive);
+    let person = repo.tag_face_with_name(&face_id, &name).map_err(map_err)?;
+
+    // Immediately answer "who else is this?" rather than leaving the user to
+    // find the same person's other groups by eye.
+    let key = keystore::default_keystore(paths.keys_dir())
+        .get_or_create()
+        .map_err(map_err)?;
+    let (model_id, model_version) = face_model_partition(&archive);
+    let suggested = repo
+        .suggest_for_person(
+            &person.id,
+            &model_id,
+            &model_version,
+            &key,
+            faces::PERSON_MATCH_THRESHOLD,
+        )
+        .map_err(map_err)?;
+
+    Ok(TagResult { person, suggested })
+}
+
+/// The model partition most of this archive's faces were written under.
+fn face_model_partition(archive: &rusqlite::Connection) -> (String, String) {
+    archive
+        .query_row(
+            "SELECT model_id, model_version FROM face_embeddings
+              GROUP BY model_id, model_version ORDER BY count(*) DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or_else(|_| {
+            (
+                family_archive_core::ai::local::MODEL_ID.to_string(),
+                family_archive_core::ai::local::MODEL_VERSION.to_string(),
+            )
+        })
+}
+
+/// Accept every outstanding proposal for a person.
+#[tauri::command]
+fn confirm_suggestions(state: State<AppState>, person_id: String) -> Result<usize, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
     faces::FaceRepo::new(&archive)
-        .tag_face_with_name(&face_id, &name)
+        .confirm_suggestions(&person_id)
         .map_err(map_err)
+}
+
+/// Reject every outstanding proposal for a person, freeing those faces.
+#[tauri::command]
+fn reject_suggestions(state: State<AppState>, person_id: String) -> Result<usize, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive)
+        .reject_suggestions(&person_id)
+        .map_err(map_err)
+}
+
+/// Say yes or no to one proposed group.
+#[tauri::command]
+fn resolve_suggestion(
+    state: State<AppState>,
+    cluster_id: String,
+    is_them: bool,
+) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let repo = faces::FaceRepo::new(&archive);
+    if is_them {
+        repo.confirm_cluster_suggestion(&cluster_id).map_err(map_err)
+    } else {
+        repo.reject_cluster_suggestion(&cluster_id).map_err(map_err)
+    }
 }
 
 /// Every photograph containing a named person, and which drive holds it.
@@ -259,6 +337,131 @@ fn write_sidecars_for_person(
         .map(|p| p.file_id)
         .collect();
     family_archive_core::export::write_xmp_sidecars(&archive, &ids).map_err(map_err)
+}
+
+/// A small JPEG of a photograph, as a data URL for the results grid.
+///
+/// Derived on demand from the catalogue's stored thumbnail rather than served
+/// from disk: the stored thumbnails are 512px lossless PNGs (~255KB each), which
+/// is right for the catalogue's verified contract but far too heavy to put a
+/// hundred of into a grid. This re-encodes to a small JPEG per request.
+///
+/// Works with the drive disconnected — it reads the local thumbnail, never the
+/// original.
+#[tauri::command]
+fn photo_thumbnail(
+    state: State<AppState>,
+    file_id: String,
+    max_edge: Option<u32>,
+) -> Result<Option<String>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let rel: Option<String> = archive
+        .query_row(
+            "SELECT rel_path FROM thumbnails WHERE file_id = ?1",
+            [&file_id],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(rel) = rel else { return Ok(None) };
+
+    let abs = paths.thumbnails_dir().join(rel);
+    let Ok(img) = image::open(&abs) else { return Ok(None) };
+    let edge = max_edge.unwrap_or(240).clamp(64, 512);
+    let small = img.thumbnail(edge, edge);
+
+    let mut jpeg = Vec::new();
+    let mut encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut jpeg), 78);
+    encoder
+        .encode_image(&small.to_rgb8())
+        .map_err(|e| format!("could not encode thumbnail: {e}"))?;
+    Ok(Some(format!("data:image/jpeg;base64,{}", b64(&jpeg))))
+}
+
+/// Where a person's photographs live, grouped by folder.
+#[tauri::command]
+fn person_folders(
+    state: State<AppState>,
+    person_id: String,
+) -> Result<Vec<faces::PersonFolder>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive)
+        .folders_for_person(&person_id)
+        .map_err(map_err)
+}
+
+/// Open a folder in Finder. Read-only: it shows a window, nothing more.
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let dir = std::path::Path::new(&path);
+    if !dir.is_dir() {
+        return Err("That folder is not available — connect the drive and try again.".into());
+    }
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .arg(dir)
+        .spawn()
+        .map_err(|e| format!("could not open Finder: {e}"))?;
+    Ok(())
+}
+
+/// Remove a person added by mistake. Their faces are kept and become unnamed.
+#[tauri::command]
+fn forget_person(state: State<AppState>, person_id: String) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive)
+        .remove_person(&person_id)
+        .map_err(map_err)
+}
+
+/// Correct a person's name, merging into an existing person on a name clash.
+#[tauri::command]
+fn rename_person(
+    state: State<AppState>,
+    person_id: String,
+    name: String,
+) -> Result<faces::Person, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive)
+        .rename_person(&person_id, &name)
+        .map_err(map_err)
+}
+
+/// Re-scan a drive for photographs added since the last scan.
+///
+/// Uses the folder the drive was last scanned from, so the user does not have to
+/// remember or retype it. Unchanged photographs are skipped, so this is cheap.
+#[tauri::command]
+fn rescan_drive(state: State<AppState>, drive_number: i64) -> Result<String, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let scan_root: Option<String> = archive
+        .query_row(
+            "SELECT sr.scan_root FROM scan_runs sr
+               JOIN drives d ON d.id = sr.drive_id
+              WHERE d.drive_number = ?1 AND sr.mode <> 'dry-run'
+              ORDER BY sr.started_at DESC LIMIT 1",
+            [drive_number],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(root) = scan_root else {
+        return Err(format!(
+            "Drive {drive_number} has not been scanned yet — start a scan from Scan activity."
+        ));
+    };
+    if !std::path::Path::new(&root).is_dir() {
+        return Err(format!(
+            "Connect Drive {drive_number} and try again — {root} is not available."
+        ));
+    }
+    drop(archive);
+    start_index(state, drive_number, root.clone(), false, false)?;
+    Ok(format!("Looking for new photographs in {root}."))
 }
 
 /// Everyone the user has named, and how established each is.
@@ -684,7 +887,16 @@ pub fn run() {
             tag_face,
             photos_of_person,
             copy_person_photos,
-            write_sidecars_for_person
+            write_sidecars_for_person,
+            person_folders,
+            open_folder,
+            forget_person,
+            rename_person,
+            rescan_drive,
+            confirm_suggestions,
+            reject_suggestions,
+            resolve_suggestion,
+            photo_thumbnail
         ])
         .run(tauri::generate_context!())
         .expect("error while running AtlasDrive");

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, ExportSummary, GalleryFace, NamedPerson } from "../api";
+import { api, ExportSummary, GalleryFace, NamedPerson, PersonFolder } from "../api";
 
 /// Browsing faces, not names.
 ///
@@ -16,6 +16,29 @@ export function ReviewScreen() {
   const [gathering, setGathering] = useState<NamedPerson | null>(null);
   const [destination, setDestination] = useState("");
   const [exported, setExported] = useState<ExportSummary | null>(null);
+  const [folders, setFolders] = useState<Record<string, PersonFolder[]>>({});
+  const [renaming, setRenaming] = useState<NamedPerson | null>(null);
+  const [newName, setNewName] = useState("");
+
+  async function showFolders(person: NamedPerson) {
+    setFolders({ ...folders, [person.id]: await api.personFolders(person.id) });
+  }
+
+  async function forget(person: NamedPerson) {
+    await api.forgetPerson(person.id);
+    setStatus(
+      `Removed ${person.display_name}. Their faces are kept and are unnamed again.`,
+    );
+    await load();
+  }
+
+  async function rename(person: NamedPerson) {
+    if (!newName.trim()) return;
+    await api.renamePerson(person.id, newName.trim());
+    setRenaming(null);
+    setNewName("");
+    await load();
+  }
 
   async function load() {
     const gallery = await api.faceGallery(200);
@@ -39,12 +62,29 @@ export function ReviewScreen() {
     if (!selected || !name.trim()) return;
     setBusy(true);
     try {
-      const person = await api.tagFace(selected.face_id, name.trim());
+      const result = await api.tagFace(selected.face_id, name.trim());
+      const who = result.person.display_name;
       setStatus(
-        `Tagged as ${person.display_name}. AtlasDrive will suggest ${person.display_name} when it sees a similar face on the next scan.`,
+        result.suggested > 0
+          ? `Tagged as ${who}. ${result.suggested} other face${result.suggested === 1 ? "" : "s"} look like ${who} — check the ones marked "Is this ${who}?" below.`
+          : `Tagged as ${who}. AtlasDrive will suggest ${who} when it sees a similar face on a later scan.`,
       );
       setSelected(null);
       setName("");
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /// Take a wrong name off a face without deleting the face or the person.
+  async function untag() {
+    if (!selected?.cluster_id) return;
+    setBusy(true);
+    try {
+      await api.resolveSuggestion(selected.cluster_id, false);
+      setStatus("Name removed. The face is unnamed again.");
+      setSelected(null);
       await load();
     } finally {
       setBusy(false);
@@ -114,7 +154,13 @@ export function ReviewScreen() {
 
       {selected && (
         <div className="card">
-          <h2>Name this face</h2>
+          <h2>{selected.person_name ? "Change this name" : "Name this face"}</h2>
+          {selected.person_name && (
+            <p className="drive-meta subtle">
+              Currently tagged as {selected.person_name}. Typing a different name moves this group
+              to that person; the faces themselves are never lost.
+            </p>
+          )}
           <label className="review-name">
             Who is this?
             <input
@@ -136,6 +182,15 @@ export function ReviewScreen() {
             <button onClick={() => void tag()} disabled={!name.trim() || busy}>
               {busy ? "Saving…" : "Save name"}
             </button>
+            {selected.person_name && (
+              <button
+                className="ghost"
+                onClick={() => void untag()}
+                aria-label={`Remove the name from this face`}
+              >
+                Remove name
+              </button>
+            )}
             <button className="ghost" onClick={() => setSelected(null)}>
               Cancel
             </button>
@@ -164,6 +219,74 @@ export function ReviewScreen() {
                 >
                   Gather their photographs
                 </button>
+                <button
+                  className="ghost"
+                  onClick={() => void showFolders(p)}
+                  aria-label={`Show where ${p.display_name}'s photographs are`}
+                >
+                  Where are they?
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setRenaming(p);
+                    setNewName(p.display_name);
+                  }}
+                  aria-label={`Rename ${p.display_name}`}
+                >
+                  Rename
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => void forget(p)}
+                  aria-label={`Remove ${p.display_name}`}
+                >
+                  Remove
+                </button>
+
+                {renaming?.id === p.id && (
+                  <span className="rename-row">
+                    <input
+                      aria-label={`New name for ${p.display_name}`}
+                      value={newName}
+                      onChange={(e) => setNewName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void rename(p);
+                      }}
+                    />
+                    <button onClick={() => void rename(p)} disabled={!newName.trim()}>
+                      Save
+                    </button>
+                    <button className="ghost" onClick={() => setRenaming(null)}>
+                      Cancel
+                    </button>
+                  </span>
+                )}
+
+                {folders[p.id] && (
+                  <ul className="folder-list">
+                    {folders[p.id].map((f) => (
+                      <li key={`${f.drive_number}-${f.relative_folder}`}>
+                        <span className="drive-badge">Drive {f.drive_number}</span>
+                        <span className="folder-path">{f.relative_folder}</span>
+                        <span className="person-counts">{f.photo_count} photographs</span>
+                        {f.online && f.absolute_path ? (
+                          <button
+                            className="ghost"
+                            onClick={() => void api.openFolder(f.absolute_path!)}
+                            aria-label={`Open ${f.relative_folder} in Finder`}
+                          >
+                            Open folder
+                          </button>
+                        ) : (
+                          <span className="drive-hit-where">
+                            Connect Drive {f.drive_number} to open
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </li>
             ))}
           </ul>

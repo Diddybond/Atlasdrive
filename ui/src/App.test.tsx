@@ -208,6 +208,67 @@ describe("AtlasDrive UI", () => {
     expect(screen.getByText(/1 more are on Drive 7/)).toBeDefined();
   });
 
+  it("shows where a person's photographs are and offers to open the folder", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /Unnamed face/ }).length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /Unnamed face/ })[0]);
+    fireEvent.change(screen.getByLabelText(/Who is this/), { target: { value: "Margaret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Show where Margaret's/ })).toBeDefined();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Show where Margaret's/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Aimee and Kent/edits")).toBeDefined();
+    });
+    // A connected drive can be opened; a disconnected one says what to plug in.
+    expect(screen.getByRole("button", { name: /Open Aimee and Kent\/edits in Finder/ })).toBeDefined();
+    expect(screen.getByText(/Connect Drive 7 to open/)).toBeDefined();
+  });
+
+  it("removes a person added by mistake without losing the faces", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+
+    // Operate on whoever is listed first rather than a name this test created —
+    // earlier tests share the mock's state, so the gallery may be fully named.
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /^Remove / }).length).toBeGreaterThan(0);
+    });
+    const remove = screen.getAllByRole("button", { name: /^Remove / })[0];
+    const label = remove.getAttribute("aria-label") ?? "";
+    const person = label.replace(/^Remove /, "");
+    const before = screen.getAllByRole("button", { name: /^Remove / }).length;
+
+    fireEvent.click(remove);
+
+    await waitFor(() => {
+      expect(screen.getByText(/faces are kept and are unnamed again/)).toBeDefined();
+    });
+    expect(screen.getByText(new RegExp(`Removed ${person}`))).toBeDefined();
+    // One fewer person, and the faces themselves are untouched.
+    expect(screen.queryAllByRole("button", { name: /^Remove / }).length).toBe(before - 1);
+  });
+
+  it("offers to check a drive for photographs added since the last scan", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    await waitFor(() => {
+      expect(screen.getByText("AtlasDrive A")).toBeDefined();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Check Drive 14 for new photographs/ }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/Looking for new photographs on Drive 14/)).toBeDefined();
+    });
+  });
+
   it("shows safety checks on the settings screen", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Settings/ }));

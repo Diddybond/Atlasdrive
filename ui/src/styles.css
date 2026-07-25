@@ -314,3 +314,15 @@ h2 {
   font-size: 0.72rem; color: var(--ink-soft); text-align: center;
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+
+/* Where a person's photographs actually live, and the controls for fixing a
+   name typed wrong. */
+.folder-list { list-style: none; margin: 8px 0 0; padding: 0; width: 100%; display: flex; flex-direction: column; gap: 6px; }
+.folder-list li { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.folder-path { font-family: var(--font-mono); font-size: 0.82rem; }
+.rename-row { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 6px; }
+.rename-row input { max-width: 280px; }
+
+/* Result thumbnails come from the local catalogue, so they show with the drive
+   unplugged. Cover-crop keeps the grid even across mixed aspect ratios. */
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }

@@ -12,6 +12,7 @@ export function SearchScreen() {
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
   const [revealed, setRevealed] = useState<Record<string, string>>({});
+  const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [correcting, setCorrecting] = useState<string | null>(null);
   const [dateError, setDateError] = useState<string | null>(null);
 
@@ -55,6 +56,17 @@ export function SearchScreen() {
       setDrives(r.drives);
       setWhereToLook(r.where_to_look);
       setSearched(true);
+
+      // Thumbnails come from the local catalogue, so they appear whether or not
+      // the drive is connected.
+      const loaded: Record<string, string> = {};
+      await Promise.all(
+        r.results.map(async (x) => {
+          const src = await api.photoThumbnail(x.file_id, 240);
+          if (src) loaded[x.file_id] = src;
+        }),
+      );
+      setThumbs(loaded);
     } finally {
       setLoading(false);
     }
@@ -132,8 +144,14 @@ export function SearchScreen() {
       <ul className="results-grid" aria-label="Search results">
         {results.map((r) => (
           <li key={r.file_id} className="result-card">
-            <div className="thumb" aria-hidden>
-              <span className="thumb-mark">🖼</span>
+            <div className="thumb">
+              {thumbs[r.file_id] ? (
+                <img src={thumbs[r.file_id]} alt="" loading="lazy" />
+              ) : (
+                <span className="thumb-mark" aria-hidden>
+                  🖼
+                </span>
+              )}
             </div>
             <div className="result-body">
               <div className="result-top">
