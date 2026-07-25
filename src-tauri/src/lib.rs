@@ -5,7 +5,7 @@
 //! indexing is executed on a background thread so the UI stays responsive.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -24,6 +24,8 @@ use family_archive_core::{db, faces};
 /// Shared application state.
 struct AppState {
     paths: Mutex<AppPaths>,
+    /// Cancel token for the in-flight index run, if any.
+    running: Arc<Mutex<Option<CancelToken>>>,
 }
 
 fn map_err<E: std::fmt::Display>(e: E) -> String {
@@ -144,40 +146,77 @@ fn search_catalogue(
     Ok(results)
 }
 
+/// Start (or resume) an index run in the background and return immediately.
+///
+/// A long scan must never block the UI thread, so this spawns a worker and the
+/// interface polls [`get_progress`]. Only one run may be active at a time.
 #[tauri::command]
 fn start_index(
     state: State<AppState>,
     drive: i64,
     path: String,
     dry_run: bool,
-) -> Result<Progress, String> {
+    resume: bool,
+) -> Result<(), String> {
     let paths = state.paths.lock().unwrap().clone();
-    // Run on a blocking task so the webview thread is not held.
-    let handle = std::thread::spawn(move || -> Result<Progress, String> {
-        let archive = open_archive(&paths)?;
-        let queue = open_queue(&paths)?;
-        let key = keystore::default_keystore(paths.keys_dir())
-            .get_or_create()
-            .map_err(map_err)?;
-        let engines = std::sync::Arc::new(EngineRegistry::local_default());
-        let pipeline = Pipeline {
-            archive: &archive,
-            queue: &queue,
-            paths: &paths,
-            engines,
-            key: &key,
-            logger: Logger::new(paths.index_log()),
-            cancel: CancelToken::new(),
-        };
-        let mut opts = IndexOptions::new(drive, path);
-        opts.mode = if dry_run { IndexMode::DryRun } else { IndexMode::Normal };
-        opts.config = Config::default();
-        pipeline.run(&opts).map_err(map_err)?;
-        Progress::load(&paths)
-            .map_err(map_err)?
-            .ok_or_else(|| "no progress recorded".to_string())
+
+    // Refuse to start a second concurrent run.
+    {
+        let mut running = state.running.lock().unwrap();
+        if running.is_some() {
+            return Err("an index run is already in progress".into());
+        }
+        *running = Some(CancelToken::new());
+    }
+    let cancel = state.running.lock().unwrap().clone().unwrap();
+    let running_slot = state.running.clone();
+
+    std::thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            let archive = open_archive(&paths)?;
+            let queue = open_queue(&paths)?;
+            let key = keystore::default_keystore(paths.keys_dir())
+                .get_or_create()
+                .map_err(map_err)?;
+            let pipeline = Pipeline {
+                archive: &archive,
+                queue: &queue,
+                paths: &paths,
+                engines: std::sync::Arc::new(EngineRegistry::local_default()),
+                key: &key,
+                logger: Logger::new(paths.index_log()),
+                cancel,
+            };
+            let mut opts = IndexOptions::new(drive, path);
+            opts.mode = if dry_run { IndexMode::DryRun } else { IndexMode::Normal };
+            opts.resume = resume;
+            opts.config = Config::default();
+            pipeline.run(&opts).map_err(map_err)?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            // Surfaced to the UI through progress.json / index.log.
+            eprintln!("index run failed: {e}");
+        }
+        *running_slot.lock().unwrap() = None;
     });
-    handle.join().map_err(|_| "index thread panicked".to_string())?
+
+    Ok(())
+}
+
+/// Ask a running index to stop at the next safe boundary.
+#[tauri::command]
+fn cancel_index(state: State<AppState>) -> Result<(), String> {
+    if let Some(token) = state.running.lock().unwrap().as_ref() {
+        token.cancel();
+    }
+    Ok(())
+}
+
+/// True while an index run is active.
+#[tauri::command]
+fn is_indexing(state: State<AppState>) -> Result<bool, String> {
+    Ok(state.running.lock().unwrap().is_some())
 }
 
 #[tauri::command]
@@ -249,6 +288,7 @@ pub fn run() {
             let _ = db::open(&paths.queue_db(), db::SchemaKind::Queue);
             app.manage(AppState {
                 paths: Mutex::new(paths),
+                running: Arc::new(Mutex::new(None)),
             });
             Ok(())
         })
@@ -257,6 +297,8 @@ pub fn run() {
             register_drive,
             search_catalogue,
             start_index,
+            cancel_index,
+            is_indexing,
             get_progress,
             run_verifier,
             prepare_review,

@@ -73,8 +73,11 @@ export const api = {
     call<Drive>("register_drive", input),
   search: (query: string, opts: { drive?: number; includeOffline: boolean }) =>
     call<SearchResult[]>("search_catalogue", { query, ...opts }),
-  startIndex: (input: { drive: number; path: string; dryRun: boolean }) =>
-    call<Progress>("start_index", input),
+  // Starts a background run and returns immediately; poll getProgress().
+  startIndex: (input: { drive: number; path: string; dryRun: boolean; resume: boolean }) =>
+    call<void>("start_index", input),
+  cancelIndex: () => call<void>("cancel_index"),
+  isIndexing: () => call<boolean>("is_indexing"),
   getProgress: () => call<Progress | null>("get_progress"),
   runVerifier: () => call<VerifierCheck[]>("run_verifier"),
   prepareReview: (limit: number) => call<ClusterSummary[]>("prepare_review", { limit }),
@@ -113,9 +116,22 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(results as unknown as T);
     }
     case "start_index":
-      return Promise.resolve({ runId: "mock-run", driveNumber: Number(args?.drive ?? 0), filesDiscovered: 4213, filesDone: 4213, filesFailed: 2, filesQueued: 0, currentBatch: 66, status: "complete" } as unknown as T);
+      return Promise.resolve(undefined as unknown as T);
+    case "cancel_index":
+      return Promise.resolve(undefined as unknown as T);
+    case "is_indexing":
+      return Promise.resolve(false as unknown as T);
     case "get_progress":
-      return Promise.resolve(null as unknown as T);
+      return Promise.resolve({
+        runId: "mock-run",
+        driveNumber: 14,
+        filesDiscovered: 4213,
+        filesDone: 4213,
+        filesFailed: 2,
+        filesQueued: 0,
+        currentBatch: 66,
+        status: "complete",
+      } as unknown as T);
     case "run_verifier":
       return Promise.resolve([
         { name: "db_integrity", status: "Pass", detail: "integrity_check and foreign_key_check ok" },
