@@ -365,9 +365,12 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "family-archive-core",
+ "image",
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]

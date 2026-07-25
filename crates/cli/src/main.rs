@@ -1,1 +1,434 @@
-fn main() {}
+//! `family-archive` command-line interface.
+//!
+//! The GUI calls the same core services; this CLI is for development, testing
+//! and advanced recovery (see `docs/12_CLI_AND_COMMANDS.md`). Exit codes are the
+//! stable contract from `family_archive_core::error::exit`.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use clap::{Parser, Subcommand};
+
+use family_archive_core::ai::EngineRegistry;
+use family_archive_core::config::{AppPaths, Config};
+use family_archive_core::crypto::keystore;
+use family_archive_core::drive::{manifest::DriveManifest, DriveRepo, RegisterParams};
+use family_archive_core::error::{exit, Error, Result};
+use family_archive_core::logging::Logger;
+use family_archive_core::pipeline::{IndexMode, IndexOptions, Pipeline};
+use family_archive_core::search::{SearchFilters, SearchRepo};
+use family_archive_core::{db, faces, verifier};
+
+#[derive(Parser)]
+#[command(
+    name = "family-archive",
+    version,
+    about = "Private, local-first family photo catalogue across numbered drives."
+)]
+struct Cli {
+    /// Override the application-support data directory.
+    #[arg(long, global = true)]
+    home: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Drive registration and inspection.
+    Drive {
+        #[command(subcommand)]
+        action: DriveAction,
+    },
+    /// Index a drive's photographs (safe, resumable, offline).
+    Index(IndexArgs),
+    /// Search the catalogue (works with drives offline).
+    Search(SearchArgs),
+    /// Run the real verifier.
+    Verify(VerifyArgs),
+    /// Face review preparation and related tools.
+    Faces {
+        #[command(subcommand)]
+        action: FaceAction,
+    },
+    /// Environment and catalogue diagnostics.
+    Doctor,
+}
+
+#[derive(Subcommand)]
+enum DriveAction {
+    /// Register a drive and assign a physical number.
+    Register {
+        #[arg(long)]
+        number: i64,
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        write_manifest: bool,
+        #[arg(long)]
+        physical_location: Option<String>,
+        #[arg(long)]
+        category: Vec<String>,
+    },
+    /// Inspect a connected drive's identity signals (changes nothing).
+    Inspect {
+        #[arg(long)]
+        path: PathBuf,
+    },
+    /// List registered drives.
+    List,
+}
+
+#[derive(Parser)]
+struct IndexArgs {
+    #[arg(long)]
+    drive: i64,
+    #[arg(long)]
+    path: PathBuf,
+    #[arg(long)]
+    resume: bool,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    verify_only: bool,
+    #[arg(long)]
+    rebuild_faces: bool,
+    #[arg(long)]
+    batch_size: Option<usize>,
+    #[arg(long, default_value = "20GB")]
+    free_space_floor: String,
+    #[arg(long)]
+    exclude: Vec<String>,
+}
+
+#[derive(Parser)]
+struct SearchArgs {
+    query: String,
+    #[arg(long)]
+    drive: Option<i64>,
+    #[arg(long)]
+    offline_included: bool,
+    #[arg(long, default_value_t = 50)]
+    limit: usize,
+}
+
+#[derive(Parser)]
+struct VerifyArgs {
+    #[arg(long)]
+    run: Option<String>,
+    #[arg(long)]
+    drive: Option<i64>,
+    #[arg(long)]
+    full: bool,
+    /// Emit the report as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+enum FaceAction {
+    /// Prepare a bounded candidate batch for human review, then stop.
+    PrepareReview {
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Rebuild face clusters without reopening originals.
+    Rebuild,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match run(cli) {
+        Ok(()) => ExitCode::from(exit::SUCCESS as u8),
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(e.exit_code() as u8)
+        }
+    }
+}
+
+/// Shared per-invocation context.
+struct Ctx {
+    paths: AppPaths,
+    config: Config,
+}
+
+impl Ctx {
+    fn new(home: Option<PathBuf>) -> Result<Self> {
+        let paths = match home {
+            Some(h) => AppPaths::new(h),
+            None => AppPaths::discover(),
+        };
+        paths.ensure()?;
+        Ok(Self {
+            paths,
+            config: Config::default(),
+        })
+    }
+    fn open_archive(&self) -> Result<rusqlite::Connection> {
+        db::open(&self.paths.archive_db(), db::SchemaKind::Archive)
+    }
+    fn open_queue(&self) -> Result<rusqlite::Connection> {
+        db::open(&self.paths.queue_db(), db::SchemaKind::Queue)
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
+    let ctx = Ctx::new(cli.home)?;
+    match cli.command {
+        Command::Drive { action } => drive_cmd(&ctx, action),
+        Command::Index(args) => index_cmd(&ctx, args),
+        Command::Search(args) => search_cmd(&ctx, args),
+        Command::Verify(args) => verify_cmd(&ctx, args),
+        Command::Faces { action } => faces_cmd(&ctx, action),
+        Command::Doctor => doctor_cmd(&ctx),
+    }
+}
+
+fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
+    let archive = ctx.open_archive()?;
+    let repo = DriveRepo::new(&archive);
+    match action {
+        DriveAction::Register {
+            number,
+            path,
+            name,
+            write_manifest,
+            physical_location,
+            category,
+        } => {
+            let drive = repo.register(&RegisterParams {
+                drive_number: number,
+                friendly_name: name.clone(),
+                volume_name: path.file_name().map(|s| s.to_string_lossy().to_string()),
+                physical_location,
+                categories: category,
+                ..Default::default()
+            })?;
+            println!("Registered Drive {} ({})", drive.drive_number, drive.id);
+            if write_manifest {
+                let m = DriveManifest::new(&drive.id, drive.drive_number, name);
+                let written = m.write_to_volume(&path)?;
+                repo.audit(&drive.id, "manifest_written", None)?;
+                println!("Wrote identity manifest: {}", written.display());
+            }
+            Ok(())
+        }
+        DriveAction::Inspect { path } => {
+            let manifest = DriveManifest::read_from_volume(&path)?;
+            let rec = repo.recognize(manifest.as_ref(), None, None)?;
+            println!("{}", serde_json::to_string_pretty(&rec)?);
+            if let Some(m) = manifest {
+                println!("Manifest: Drive {} ({})", m.drive_number, m.drive_id);
+            } else {
+                println!("No app manifest present on this volume.");
+            }
+            Ok(())
+        }
+        DriveAction::List => {
+            for d in repo.list()? {
+                println!(
+                    "Drive {:>4}  {:<20}  {}  {}",
+                    d.drive_number,
+                    d.friendly_name.unwrap_or_default(),
+                    d.status,
+                    d.last_scan_at.unwrap_or_else(|| "never scanned".into())
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn build_pipeline<'a>(
+    ctx: &'a Ctx,
+    archive: &'a rusqlite::Connection,
+    queue: &'a rusqlite::Connection,
+    key: &'a family_archive_core::crypto::MasterKey,
+) -> Pipeline<'a> {
+    Pipeline {
+        archive,
+        queue,
+        paths: &ctx.paths,
+        engines: Arc::new(EngineRegistry::local_default()),
+        key,
+        logger: Logger::new(ctx.paths.index_log()).echo_stderr(true),
+        cancel: family_archive_core::ai::CancelToken::new(),
+    }
+}
+
+fn index_cmd(ctx: &Ctx, args: IndexArgs) -> Result<()> {
+    let archive = ctx.open_archive()?;
+    let queue = ctx.open_queue()?;
+    let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create()?;
+
+    let mut config = ctx.config.clone();
+    config.free_space_floor_bytes = Config::parse_size(&args.free_space_floor)?;
+    if let Some(bs) = args.batch_size {
+        config.batch_size = bs;
+    }
+
+    let mode = if args.dry_run {
+        IndexMode::DryRun
+    } else if args.verify_only {
+        IndexMode::VerifyOnly
+    } else if args.rebuild_faces {
+        IndexMode::RebuildFaces
+    } else {
+        IndexMode::Normal
+    };
+
+    let mut opts = IndexOptions::new(args.drive, args.path);
+    opts.mode = mode;
+    opts.resume = args.resume;
+    opts.exclusions = args.exclude;
+    opts.config = config;
+
+    let pipeline = build_pipeline(ctx, &archive, &queue, &key);
+    let summary = pipeline.run(&opts)?;
+
+    println!(
+        "\nDrive {}: discovered {}, done {}, failed {}, batches {}{}",
+        args.drive,
+        summary.files_discovered,
+        summary.files_done,
+        summary.files_failed,
+        summary.batches,
+        if summary.dry_run { " (dry-run)" } else { "" }
+    );
+    Ok(())
+}
+
+fn search_cmd(ctx: &Ctx, args: SearchArgs) -> Result<()> {
+    let archive = ctx.open_archive()?;
+    let repo = SearchRepo::new(&archive);
+    let filters = SearchFilters {
+        drive_number: args.drive,
+        online_only: !args.offline_included,
+        include_offline: args.offline_included,
+        limit: args.limit,
+        ..Default::default()
+    };
+    // Text search over the catalogue (works offline).
+    let results = repo.text_search(&args.query, &filters)?;
+    if results.is_empty() {
+        println!("No results for \"{}\".", args.query);
+        return Ok(());
+    }
+    for r in results {
+        let status = if r.online { "online" } else { "OFFLINE" };
+        let date = r
+            .date_range
+            .map(|(a, b)| if a == b { a } else { format!("{a}..{b}") })
+            .unwrap_or_else(|| "date uncertain".into());
+        println!(
+            "Drive {:>3} [{}]  {}  ({})  {}",
+            r.drive_number, status, r.filename, date, r.relative_path
+        );
+        if !r.online {
+            println!("      -> Connect Drive {} to open the original.", r.drive_number);
+        }
+    }
+    Ok(())
+}
+
+fn verify_cmd(ctx: &Ctx, args: VerifyArgs) -> Result<()> {
+    let archive = ctx.open_archive()?;
+    let queue = ctx.open_queue()?;
+    let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create().ok();
+
+    let mut config = ctx.config.clone();
+    if !args.full {
+        // A targeted verify does not fail purely on the machine's free disk.
+        config.free_space_floor_bytes = 0;
+    }
+    let _ = (args.run, args.drive); // targeted scoping reserved; full suite runs today
+
+    let vctx = verifier::VerifyContext {
+        archive: &archive,
+        queue: Some(&queue),
+        paths: &ctx.paths,
+        config: &config,
+        key: key.as_ref(),
+        face_model: (
+            family_archive_core::ai::local::MODEL_ID.to_string(),
+            family_archive_core::ai::local::MODEL_VERSION.to_string(),
+        ),
+        observed_throughput: None,
+        network_blocked_attempts: 0,
+    };
+    let report = verifier::run(&vctx)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for c in &report.checks {
+            println!("  [{:?}] {} - {}", c.status, c.name, c.detail);
+        }
+        println!("\n{}", report.summary());
+    }
+
+    if report.has_halt() || !report.ok() {
+        return Err(Error::VerifierFailure(report.summary()));
+    }
+    Ok(())
+}
+
+fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
+    let archive = ctx.open_archive()?;
+    let repo = faces::FaceRepo::new(&archive);
+    match action {
+        FaceAction::PrepareReview { limit } => {
+            let batch = repo.prepare_review(limit)?;
+            println!("Prepared {} cluster(s) for human review:", batch.len());
+            for c in &batch {
+                println!(
+                    "  cluster {}  faces={}  status={}",
+                    &c.cluster_id[..8.min(c.cluster_id.len())],
+                    c.face_count,
+                    c.status
+                );
+            }
+            println!("\nReview stops here for human judgement - no names assigned automatically.");
+            Ok(())
+        }
+        FaceAction::Rebuild => {
+            let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create()?;
+            let n = repo.rebuild_clusters(
+                family_archive_core::ai::local::MODEL_ID,
+                family_archive_core::ai::local::MODEL_VERSION,
+                &key,
+                faces::DEFAULT_CLUSTER_THRESHOLD,
+            )?;
+            println!("Rebuilt {n} cluster(s) without reopening originals.");
+            Ok(())
+        }
+    }
+}
+
+fn doctor_cmd(ctx: &Ctx) -> Result<()> {
+    println!("Family Archive doctor");
+    println!("  data root: {}", ctx.paths.root.display());
+    let ks = keystore::default_keystore(ctx.paths.keys_dir());
+    println!("  keystore:  {}", ks.backend_name());
+    match ks.get_or_create() {
+        Ok(_) => println!("  key:       available"),
+        Err(e) => println!("  key:       ERROR {e}"),
+    }
+    let archive = ctx.open_archive()?;
+    let sv = db::schema_version(&archive)?;
+    println!("  archive schema version: {sv}");
+    match db::integrity_check(&archive) {
+        Ok(()) => println!("  archive integrity: ok"),
+        Err(e) => println!("  archive integrity: FAIL {e}"),
+    }
+    let free = family_archive_core::util::available_space(&ctx.paths.root)?;
+    println!("  free space on data volume: {} MB", free / (1024 * 1024));
+    let engines = EngineRegistry::local_default();
+    println!("  AI engine offline-only: {}", engines.all_offline());
+    Ok(())
+}

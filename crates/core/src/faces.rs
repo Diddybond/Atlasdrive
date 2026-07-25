@@ -322,8 +322,10 @@ impl<'a> FaceRepo<'a> {
     /// Sanity stats for the verifier's face-pipeline checks.
     pub fn embedding_health(&self, model_id: &str, model_version: &str, key: &MasterKey) -> Result<FaceHealth> {
         let embeddings = self.load_embeddings(model_id, model_version, key)?;
-        let mut health = FaceHealth::default();
-        health.total = embeddings.len();
+        let mut health = FaceHealth {
+            total: embeddings.len(),
+            ..Default::default()
+        };
         if embeddings.is_empty() {
             return Ok(health);
         }

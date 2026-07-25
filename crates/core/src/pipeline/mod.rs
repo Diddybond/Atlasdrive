@@ -704,14 +704,11 @@ impl<'a> Pipeline<'a> {
     }
 
     fn upsert_tag(&self, tx: &Connection, name: &str, tag_type: &str) -> Result<String> {
-        if let Some(id) = tx
-            .query_row(
-                "SELECT id FROM tags WHERE name=?1 AND tag_type=?2",
-                params![name, tag_type],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()
-        {
+        if let Ok(id) = tx.query_row(
+            "SELECT id FROM tags WHERE name=?1 AND tag_type=?2",
+            params![name, tag_type],
+            |r| r.get::<_, String>(0),
+        ) {
             return Ok(id);
         }
         let id = new_uuid();
