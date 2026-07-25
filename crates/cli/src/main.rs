@@ -786,5 +786,19 @@ fn doctor_cmd(ctx: &Ctx) -> Result<()> {
     println!("  free space on data volume: {} MB", free / (1024 * 1024));
     let engines = EngineRegistry::local_with_vision();
     println!("  AI engine offline-only: {}", engines.all_offline());
+
+    // Reported for the desktop bundle rather than this CLI binary where one is
+    // present: the bundle is the thing that holds the Keychain entry, and the
+    // two can legitimately differ.
+    let signature = match family_archive_core::signing::enclosing_bundle() {
+        Some(bundle) => family_archive_core::signing::of_path(&bundle),
+        None => family_archive_core::signing::current(),
+    };
+    println!("  code signature: {}", signature.describe());
+    if !signature.identity_is_stable() {
+        println!("    an unsigned build has no tamper detection, and its identity");
+        println!("    changes on every rebuild — which is why macOS keeps asking");
+        println!("    for Keychain access. Fix with: ./scripts/sign-app.sh");
+    }
     Ok(())
 }

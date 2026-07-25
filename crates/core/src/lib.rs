@@ -31,6 +31,7 @@ pub mod progress;
 pub mod queue;
 pub mod scan;
 pub mod search;
+pub mod signing;
 pub mod util;
 pub mod verifier;
 

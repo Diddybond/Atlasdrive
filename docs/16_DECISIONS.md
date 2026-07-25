@@ -557,3 +557,47 @@ exits non-zero.
 
 **Supersedes:** None
 ```
+
+## D-031: Builds are signed, with a local certificate when Apple has issued none
+
+**Status:** settled.
+
+**Context.** The bundle was unsigned. That had two consequences which are easy
+to conflate but are not the same problem. Nothing sealed the bundle, so a
+modified Vision helper — the binary that reads every photograph in the archive —
+could not be distinguished from the built one. And because macOS derives an
+unsigned app's identity from the binary itself, that identity changed on every
+rebuild, so the Keychain access control list for the master key never matched
+twice and the user was asked to re-authorise on every build.
+
+The obvious fix, a Developer ID certificate, cannot be applied from inside the
+repository: it requires a paid Apple Developer Program membership and an Apple
+ID. Waiting for one would have left both defects in place indefinitely, and the
+second defect was a daily annoyance.
+
+**Decision.** `scripts/signing-identity.sh` resolves an identity in preference
+order: an Apple-issued `Developer ID Application` certificate if the machine has
+one, otherwise a self-signed certificate which it generates on first use and
+stores in the login keychain. `scripts/sign-app.sh` signs the bundle inside-out
+— nested Mach-O binaries first, because the outer signature seals the inner
+one's hash — and verifies with `--deep --strict`. Hardened runtime and a secure
+timestamp are applied only on the Developer ID path, where notarisation requires
+them; they buy nothing on a self-signed build and add a way for it to fail to
+launch.
+
+Measured on the real bundle: altering one byte of the Vision helper makes
+verification fail with "a sealed resource is missing or invalid"; rebuilding the
+helper changes the seal (`CDHash` 4294800b… → 1c7379fc…) while leaving the
+designated requirement byte-identical, which is the property that stops the
+repeated Keychain prompts.
+
+**Consequence.** A locally signed build is tamper-evident and stable across
+rebuilds, and `spctl --assess` still rejects it. That is correct and expected: a
+self-signed build is not notarised and will not run on anyone else's Mac. The
+codebase must not describe it as "signed" without the qualifier, which is why
+`signing::Signature::describe` never returns a bare "signed" and a test enforces
+that. When a Developer ID does appear in the keychain, the scripts pick it up
+with no change to the repository.
+
+`atlasdrive doctor` reports which of the three states the running build is in,
+so the question is answerable without trusting this document.

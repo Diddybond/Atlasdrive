@@ -55,7 +55,7 @@ someone else's Mac. See "What 100/100 does not mean" in
 
 ## Verified on macOS
 
-- `cargo tauri build` → `AtlasDrive.app` + `AtlasDrive_0.1.0_x64.dmg` (exit 0)
+- `scripts/build-app.sh` (signs the bundle) → `AtlasDrive.app` + `AtlasDrive_0.1.0_x64.dmg` (exit 0)
 - App launches, creates `~/Library/Application Support/AtlasDrive/`, migrates
   both databases, renders its window with the brand icon and palette
 - Real macOS Keychain item `com.atlasdrive.masterkey` created and re-read
@@ -72,4 +72,4 @@ someone else's Mac. See "What 100/100 does not mean" in
    blocked on the owner.
 2. Core dev anywhere: `cargo test && cargo clippy --workspace --all-targets`.
 3. UI: `cd ui && npm install && npm test && npm run build`.
-4. Desktop: `cargo tauri dev` / `cargo tauri build`.
+4. Desktop: `cargo tauri dev` / `./scripts/build-app.sh` (builds and signs).

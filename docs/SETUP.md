@@ -91,9 +91,16 @@ cargo tauri icon src-tauri/icons/icon.png
 # Dev (hot-reload UI + Rust backend)
 cargo tauri dev
 
-# Release bundle (.app + .dmg)
-cargo tauri build
+# Release bundle (.app + .dmg), signed
+./scripts/build-app.sh
 ```
+
+Use `scripts/build-app.sh` rather than a bare `cargo tauri build`. Tauri does
+not sign the nested Vision helper, so a bare build leaves a bundle that fails
+strict verification — and an unsigned bundle's identity changes on every build,
+which is what makes macOS re-ask for Keychain access each time. The script signs
+with an Apple Developer ID if this machine has one and generates a local
+certificate if not. `atlasdrive doctor` reports which. See [SIGNING.md](SIGNING.md).
 
 ## Local models and licensing
 

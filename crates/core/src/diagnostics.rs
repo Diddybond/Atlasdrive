@@ -49,6 +49,9 @@ pub struct EnvironmentInfo {
     pub ai_model_version: String,
     pub ai_all_offline: bool,
     pub keystore_backend: String,
+    /// How this build is signed. Reported because an unsigned build has no
+    /// tamper detection and a rebuild-unstable identity; see `crate::signing`.
+    pub code_signature: String,
 }
 
 /// The redacted diagnostics bundle.
@@ -108,6 +111,7 @@ pub fn collect(
         queue_schema_version: queue
             .map(|q| crate::db::schema_version(q).unwrap_or(-1))
             .unwrap_or(-1),
+        code_signature: crate::signing::current().describe(),
         ai_model_id: crate::ai::local::MODEL_ID.to_string(),
         ai_model_version: crate::ai::local::MODEL_VERSION.to_string(),
         ai_all_offline: crate::ai::EngineRegistry::local_default().all_offline(),
