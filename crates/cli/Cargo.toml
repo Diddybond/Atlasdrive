@@ -1,0 +1,24 @@
+[package]
+name = "family-archive-cli"
+description = "Command-line interface and verifier for Family Archive."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "family-archive"
+path = "src/main.rs"
+
+[[bin]]
+name = "family-archive-verify"
+path = "src/verify_main.rs"
+
+[dependencies]
+family-archive-core = { path = "../core" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true

@@ -1,0 +1,66 @@
+# Rust
+/target
+**/target
+Cargo.lock.bak
+
+# Node / frontend
+node_modules
+ui/dist
+ui/.vite
+*.tsbuildinfo
+
+# Tauri build output
+src-tauri/target
+src-tauri/gen
+
+# Generated runtime data — never commit catalogues, thumbnails, models, photos or secrets
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+progress.json
+index.log
+/appdata
+/reports/*.md
+!reports/.gitkeep
+thumbnails/
+models/*.bin
+models/*.onnx
+models/*.mlmodel
+keys/
+cache/
+
+# Photographs and media must never be committed
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.heif
+*.tif
+*.tiff
+*.webp
+*.raw
+*.cr2
+*.nef
+*.arw
+*.dng
+*.mov
+*.mp4
+# ...except synthetic fixtures explicitly generated for tests
+!crates/core/tests/fixtures/**/*.png
+!crates/core/tests/fixtures/**/*.jpg
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea
+.vscode/*
+!.vscode/extensions.json

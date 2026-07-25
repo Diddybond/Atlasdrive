@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/cli",
+]
+# src-tauri is intentionally excluded from the default workspace build so that
+# `cargo test` on non-macOS CI does not require the system webkit2gtk/Tauri
+# toolchain. It is built explicitly on macOS via its own manifest.
+exclude = ["src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT"
+authors = ["Family Archive contributors"]
+repository = "https://github.com/Diddybond/Atlasdrive"
+
+[workspace.dependencies]
+# Pinned dependency versions. Interfaces and stored-data contracts are stable;
+# see docs/16_DECISIONS.md before bumping anything that touches on-disk format.
+rusqlite = { version = "0.31.0", features = ["bundled", "backup", "functions"] }
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.117"
+uuid = { version = "1.8.0", features = ["v4", "serde"] }
+blake3 = "1.5.1"
+image = { version = "0.25.1", default-features = false, features = ["jpeg", "png", "tiff", "webp", "bmp", "gif"] }
+kamadak-exif = "0.5.5"
+aes-gcm = "0.10.3"
+rand = "0.8.5"
+thiserror = "1.0.61"
+chrono = { version = "0.4.38", features = ["serde"] }
+clap = { version = "4.5.4", features = ["derive"] }
+walkdir = "2.5.0"
+fs2 = "0.4.3"
+hex = "0.4.3"
+tempfile = "3.10.1"
+zeroize = { version = "1.7.0", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
