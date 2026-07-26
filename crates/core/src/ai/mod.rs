@@ -21,6 +21,7 @@
 //!     through long operations; the pipeline supplies queuing/resume.
 
 pub mod brands;
+pub mod names;
 pub mod local;
 pub mod text;
 #[cfg(target_os = "macos")]

@@ -94,7 +94,29 @@ struct Worker {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// Photographs this process has analysed, so it can be retired before its
+    /// memory becomes a problem for the machine.
+    served: u32,
 }
+
+/// Retire the worker after this many photographs and start a fresh one.
+///
+/// A long-lived worker is the right design — spawning a process per photograph
+/// would dominate the cost of indexing 200,000 files — but "long-lived" cannot
+/// mean "for as long as the scan lasts". Observed on the owner's Mac during a
+/// real overnight run: the worker reached 28GB resident after 77 minutes and
+/// peaked around 40GB, pushing the machine 10GB into swap. Everything slowed
+/// down, including the scan the worker existed to perform.
+///
+/// The cause was not reproducible from the files alone — feeding the thirty
+/// largest TIFFs on that drive straight to the worker plateaus under 2GB — so
+/// this does not pretend to fix a diagnosed leak. It removes the consequence:
+/// however memory is being retained, it cannot accumulate past a few hundred
+/// photographs, because the process holding it is replaced.
+///
+/// A restart costs roughly the time of one photograph, which against 400 is
+/// under a third of a percent.
+const MAX_PHOTOGRAPHS_PER_WORKER: u32 = 400;
 
 pub struct VisionEngine {
     helper: PathBuf,
@@ -187,6 +209,17 @@ impl VisionEngine {
 
     fn exchange_once(&self, abs: &Path) -> Result<WorkerAnalysis> {
         let mut guard = self.worker.lock().unwrap();
+
+        // Retire a worker that has done its shift before handing it more work.
+        if guard.as_ref().is_some_and(|w| w.served >= MAX_PHOTOGRAPHS_PER_WORKER) {
+            if let Some(mut old) = guard.take() {
+                // Closing stdin ends the worker's read loop, so it exits of its
+                // own accord rather than being killed mid-analysis.
+                drop(old.stdin);
+                let _ = old.child.wait();
+            }
+        }
+
         if guard.is_none() {
             *guard = Some(self.spawn()?);
         }
@@ -203,6 +236,8 @@ impl VisionEngine {
             .stdin
             .flush()
             .map_err(|e| Error::Other(format!("vision worker flush failed: {e}")))?;
+
+        worker.served += 1;
 
         let mut line = String::new();
         let read = worker
@@ -225,7 +260,7 @@ impl VisionEngine {
             .map_err(|e| Error::ModelMissing(format!("could not start vision worker: {e}")))?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-        Ok(Worker { child, stdin, stdout })
+        Ok(Worker { child, stdin, stdout, served: 0 })
     }
 
     fn meta(&self, confidence: f32, exec_ms: u64) -> AiMeta {
@@ -540,5 +575,68 @@ mod tests {
             0,
         );
         assert!(indoors.indoor_prob > indoors.outdoor_prob);
+    }
+}
+
+#[cfg(test)]
+mod worker_lifetime_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    /// A stand-in worker that answers the selftest and then reports its own
+    /// process id for every request, so a restart is directly observable.
+    fn stub_worker(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("atlasdrive-vision");
+        let script = r#"#!/bin/sh
+if [ "$1" = "--selftest" ]; then echo "atlasdrive-vision 1"; exit 0; fi
+while IFS= read -r _line; do
+  printf '{"ok":true,"error":null,"width":%s,"height":1,"faces":[],"labels":[],"ocr":"","print":[]}\n' "$$"
+done
+"#;
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    /// The behaviour that matters: one process serves many photographs — the
+    /// whole reason the worker is long-lived — but it is replaced before it has
+    /// served too many.
+    #[test]
+    fn the_worker_is_reused_and_then_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = VisionEngine::new(stub_worker(dir.path())).unwrap();
+        let file = dir.path().join("photo.jpg");
+        std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
+
+        // The stub reports its pid in `width`.
+        let first = engine.exchange(&file).unwrap().width;
+        for _ in 1..MAX_PHOTOGRAPHS_PER_WORKER {
+            assert_eq!(
+                engine.exchange(&file).unwrap().width,
+                first,
+                "the worker must be reused, not respawned per photograph"
+            );
+        }
+
+        // The next request crosses the limit and must land on a new process.
+        let after = engine.exchange(&file).unwrap().width;
+        assert_ne!(after, first, "the worker should have been retired by now");
+    }
+
+    /// Retiring must not lose the request that triggered it.
+    #[test]
+    fn the_photograph_that_triggers_a_restart_is_still_analysed() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = VisionEngine::new(stub_worker(dir.path())).unwrap();
+        let file = dir.path().join("photo.jpg");
+        std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
+
+        for _ in 0..MAX_PHOTOGRAPHS_PER_WORKER {
+            engine.exchange(&file).unwrap();
+        }
+        let result = engine.exchange(&file).expect("the restart must not drop the request");
+        assert!(result.ok);
     }
 }

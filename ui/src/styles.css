@@ -697,5 +697,5 @@ h2 {
 
 /* The brand explanation and its trigger sit together: the sentence is what
    makes the button's result trustworthy. */
-.brand-row { align-items: flex-start; gap: 16px; margin-top: 12px; }
-.brand-row .panel-note { margin: 0; }
+.name-row { align-items: flex-start; gap: 16px; margin-top: 12px; }
+.name-row .panel-note { margin: 0; }

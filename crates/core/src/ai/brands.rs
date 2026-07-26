@@ -197,7 +197,7 @@ fn normalise_with_case(s: &str) -> (String, Vec<bool>) {
     (squeezed, mask)
 }
 
-fn fold(ch: char) -> char {
+pub(crate) fn fold(ch: char) -> char {
     match ch {
         'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
         'à' | 'á' | 'â' | 'ä' | 'À' | 'Á' | 'Â' | 'Ä' => 'a',

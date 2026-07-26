@@ -28,8 +28,8 @@ export function SearchScreen({
   const [driveFilter, setDriveFilter] = useState<number | null>(null);
   const [pickedTags, setPickedTags] = useState<string[]>([]);
   const [allDrives, setAllDrives] = useState<Drive[]>([]);
-  const [brandNote, setBrandNote] = useState<string | null>(null);
-  const [findingBrands, setFindingBrands] = useState(false);
+  const [nameNote, setNameNote] = useState<string | null>(null);
+  const [findingNames, setFindingNames] = useState(false);
 
   useEffect(() => {
     void api.listDrives().then(setAllDrives);
@@ -277,39 +277,39 @@ export function SearchScreen({
               );
             })}
           </ul>
-          <div className="row-between brand-row">
+          <div className="row-between name-row">
             <p className="panel-note">
-              Brand names come from text AtlasDrive read in the picture — a bottle, a shop front, a
-              van — never guessed from the image.
+              Names come from text AtlasDrive read on things in the picture — a bottle, a shop
+              front, a van, a magazine. They are never guessed from the image itself.
             </p>
             <button
               className="ghost"
-              disabled={findingBrands}
+              disabled={findingNames}
               onClick={() => {
-                setFindingBrands(true);
-                setBrandNote(null);
+                setFindingNames(true);
+                setNameNote(null);
                 void api
-                  .findBrands(driveFilter ?? undefined)
+                  .findNames(driveFilter ?? undefined)
                   .then((r) => {
-                    setBrandNote(
+                    setNameNote(
                       r.tagged === 0
-                        ? `Read the text of ${r.examined.toLocaleString()} photographs and found no brand names.`
-                        : `Found brand names in ${r.tagged.toLocaleString()} of ${r.examined.toLocaleString()} photographs: ${r.brands
+                        ? `Read the text of ${r.examined.toLocaleString()} photographs and found no names.`
+                        : `Found names in ${r.tagged.toLocaleString()} of ${r.examined.toLocaleString()} photographs: ${r.names
                             .slice(0, 8)
                             .map((b) => b.tag)
-                            .join(", ")}${r.brands.length > 8 ? "…" : ""}`,
+                            .join(", ")}${r.names.length > 8 ? "…" : ""}`,
                     );
                     return api.catalogueTags(60, driveFilter ?? undefined).then(setTags);
                   })
-                  .finally(() => setFindingBrands(false));
+                  .finally(() => setFindingNames(false));
               }}
             >
-              {findingBrands ? "Reading…" : "Find brand names"}
+              {findingNames ? "Reading…" : "Find names in photographs"}
             </button>
           </div>
-          {brandNote && (
+          {nameNote && (
             <p className="search-note" role="status">
-              {brandNote}
+              {nameNote}
             </p>
           )}
 

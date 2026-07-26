@@ -279,11 +279,11 @@ enum DriveAction {
         #[arg(long)]
         code: Option<String>,
     },
-    /// Find brand names in the text already read from your photographs.
+    /// Find names printed on things in your photographs, from their text.
     ///
     /// A backfill, not a rescan: it reads the text AtlasDrive already stored,
     /// so it works with every drive unplugged and opens no originals.
-    Brands {
+    Names {
         /// Limit to one drive; omit to do the whole catalogue.
         #[arg(long)]
         number: Option<i64>,
@@ -592,7 +592,7 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
             drive_check_cmd(ctx, number, limit, skip_recent_days)
         }
         DriveAction::Failures { number, retry, code } => drive_failures_cmd(ctx, number, retry, code),
-        DriveAction::Brands { number } => drive_brands_cmd(ctx, number),
+        DriveAction::Names { number } => drive_names_cmd(ctx, number),
         DriveAction::Compare { a, b, list } => {
             let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
             let c = family_archive_core::compare::compare_drives(&archive, a, b)?;
@@ -1128,22 +1128,22 @@ fn compact_cmd(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-/// Look for brand names in text already read from the photographs.
-fn drive_brands_cmd(ctx: &Ctx, number: Option<i64>) -> Result<()> {
+/// Look for names printed on things, from text already read.
+fn drive_names_cmd(ctx: &Ctx, number: Option<i64>) -> Result<()> {
     let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
-    let report = family_archive_core::inventory::scan_for_brands(&archive, number)?;
+    let report = family_archive_core::inventory::scan_for_names(&archive, number)?;
     println!(
-        "Examined {} photograph(s) with readable text; {} carry a brand name.\n",
+        "Examined {} photograph(s) with readable text; {} carry a name.\n",
         report.examined, report.tagged
     );
-    for b in report.brands.iter().take(50) {
+    for b in report.names.iter().take(50) {
         println!("  {:>6}  {}", b.count, b.tag);
     }
-    if report.brands.is_empty() {
+    if report.names.is_empty() {
         println!("  (none found)");
     }
     println!(
-        "\nBrand tags mean the name was read in the picture, not guessed from it."
+        "\nA name tag means AtlasDrive read it on something in the picture,\nnot that it guessed it from the image."
     );
     Ok(())
 }

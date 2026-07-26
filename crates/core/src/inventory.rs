@@ -967,15 +967,15 @@ mod scan_stats_tests {
     }
 }
 
-/// Result of looking for brand names in text already read from photographs.
+/// Result of looking for names in text already read from photographs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BrandScan {
+pub struct NameScan {
     /// Photographs whose text was examined.
     pub examined: i64,
-    /// Photographs that gained at least one brand tag.
+    /// Photographs that gained at least one name tag.
     pub tagged: i64,
-    /// Brands found, most photographs first.
-    pub brands: Vec<TagCount>,
+    /// Names found, most photographs first.
+    pub names: Vec<TagCount>,
 }
 
 /// Find brand names in the OCR text already stored for each photograph.
@@ -986,9 +986,9 @@ pub struct BrandScan {
 ///
 /// Safe to run repeatedly: tags are inserted with `INSERT OR IGNORE`, so a
 /// second pass over unchanged text changes nothing.
-pub fn scan_for_brands(conn: &Connection, drive_number: Option<i64>) -> Result<BrandScan> {
+pub fn scan_for_names(conn: &Connection, drive_number: Option<i64>) -> Result<NameScan> {
     let now = crate::util::now_iso8601();
-    let mut out = BrandScan::default();
+    let mut out = NameScan::default();
 
     let sql = format!(
         "SELECT sa.file_id, sa.ocr_text
@@ -1018,7 +1018,7 @@ pub fn scan_for_brands(conn: &Connection, drive_number: Option<i64>) -> Result<B
     let tx = conn.unchecked_transaction()?;
     for (file_id, text) in rows {
         out.examined += 1;
-        let hits = crate::ai::brands::detect(&text);
+        let hits = crate::ai::names::detect(&text);
         if hits.is_empty() {
             continue;
         }
@@ -1028,27 +1028,27 @@ pub fn scan_for_brands(conn: &Connection, drive_number: Option<i64>) -> Result<B
             tx.execute(
                 "INSERT OR IGNORE INTO tags (id, name, tag_type, created_at)
                  VALUES (?1, ?2, 'automatic', ?3)",
-                rusqlite::params![tag_id, hit.name, now],
+                rusqlite::params![tag_id, hit.tag, now],
             )?;
             let real_id: String =
-                tx.query_row("SELECT id FROM tags WHERE name = ?1", [&hit.name], |r| r.get(0))?;
+                tx.query_row("SELECT id FROM tags WHERE name = ?1", [&hit.tag], |r| r.get(0))?;
             tx.execute(
                 "INSERT OR IGNORE INTO file_tags (file_id, tag_id, confidence, source, created_at)
-                 VALUES (?1, ?2, 0.9, 'brand', ?3)",
+                 VALUES (?1, ?2, 0.9, 'name', ?3)",
                 rusqlite::params![file_id, real_id, now],
             )?;
-            *counts.entry(hit.name).or_default() += 1;
+            *counts.entry(hit.tag).or_default() += 1;
         }
     }
     tx.commit()?;
 
-    out.brands = counts.into_iter().map(|(tag, count)| TagCount { tag, count }).collect();
-    out.brands.sort_by(|a, b| b.count.cmp(&a.count).then(a.tag.cmp(&b.tag)));
+    out.names = counts.into_iter().map(|(tag, count)| TagCount { tag, count }).collect();
+    out.names.sort_by(|a, b| b.count.cmp(&a.count).then(a.tag.cmp(&b.tag)));
     Ok(out)
 }
 
 #[cfg(test)]
-mod brand_scan_tests {
+mod name_scan_tests {
     use super::*;
     use crate::db::{self, SchemaKind};
 
@@ -1091,10 +1091,10 @@ mod brand_scan_tests {
             ("f2", "Welcome to TESCO Extra"),
             ("f3", "nothing recognisable here at all"),
         ]);
-        let report = scan_for_brands(&conn, None).unwrap();
+        let report = scan_for_names(&conn, None).unwrap();
         assert_eq!(report.examined, 3);
         assert_eq!(report.tagged, 2, "f3 has no brand in it");
-        let names: Vec<_> = report.brands.iter().map(|b| b.tag.as_str()).collect();
+        let names: Vec<_> = report.names.iter().map(|b| b.tag.as_str()).collect();
         assert!(names.contains(&"coca-cola"));
         assert!(names.contains(&"peroni"));
         assert!(names.contains(&"tesco"));
@@ -1106,7 +1106,7 @@ mod brand_scan_tests {
     #[test]
     fn the_brands_land_in_the_catalogue_as_tags() {
         let conn = catalogue_with_text(&[("f1", "Guinness on tap")]);
-        scan_for_brands(&conn, None).unwrap();
+        scan_for_names(&conn, None).unwrap();
         let tags = all_tags(&conn, 60).unwrap();
         assert!(tags.iter().any(|t| t.tag == "guinness" && t.count == 1), "{tags:?}");
 
@@ -1118,7 +1118,7 @@ mod brand_scan_tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(source, "brand", "provenance must say where the tag came from");
+        assert_eq!(source, "name", "provenance must say where the tag came from");
     }
 
     /// Running it twice must not double-count or duplicate tags: the owner
@@ -1126,8 +1126,8 @@ mod brand_scan_tests {
     #[test]
     fn running_it_again_changes_nothing() {
         let conn = catalogue_with_text(&[("f1", "ASDA car park")]);
-        let first = scan_for_brands(&conn, None).unwrap();
-        let second = scan_for_brands(&conn, None).unwrap();
+        let first = scan_for_names(&conn, None).unwrap();
+        let second = scan_for_names(&conn, None).unwrap();
         assert_eq!(first.tagged, second.tagged);
 
         let rows: i64 = conn
@@ -1141,8 +1141,8 @@ mod brand_scan_tests {
     #[test]
     fn a_drive_can_be_done_on_its_own() {
         let conn = catalogue_with_text(&[("f1", "PEPSI MAX")]);
-        assert_eq!(scan_for_brands(&conn, Some(2)).unwrap().examined, 1);
+        assert_eq!(scan_for_names(&conn, Some(2)).unwrap().examined, 1);
         // A drive that holds nothing is not an error.
-        assert_eq!(scan_for_brands(&conn, Some(99)).unwrap().examined, 0);
+        assert_eq!(scan_for_names(&conn, Some(99)).unwrap().examined, 0);
     }
 }

@@ -1640,3 +1640,91 @@ the owner does not know. Picking by count and showing by name gives both.
 **Why changing drive clears the subjects.** They were picked from a list scoped
 to the previous drive. Carrying them across would search the new drive for
 something it may not contain and return nothing, with no visible cause.
+
+## D-063 — Any name read on any item becomes its own tag (supersedes the closed list in D-061)
+
+**Decision.** The owner asked for every name AtlasDrive can read on anything in
+a photograph to become a tag, not only names on a curated list. `ai::names`
+does that. The curated brand lexicon survives underneath it, matched first, so
+known brands keep a canonical spelling and short vowel-less ones (NHS, DHL,
+M&S) still work.
+
+The provenance rule from D-061 is unchanged and is the whole basis of the
+feature: a name tag means **AtlasDrive read this on something in the picture**.
+Nothing is inferred from image content.
+
+**How a name is told from a phrase.** A candidate is a run of up to four
+capitalised words. It becomes a tag when at least one of those words is not an
+English word. That single rule does most of the work: it keeps TANQUERAY,
+RIBCAGED and ASTAXANTHIN, and refuses "WEDDING POST BOX" and "OPEN 24 HOURS".
+
+**Why the dictionary is committed to the repository.** The first version used a
+few hundred hand-written common words and, asked to tag every name it could
+read, tagged 643 of 741 photographs — offering "real", "peace", "squirt" and
+"laugh" as names, all of them words printed in capitals on packaging that the
+short list happened not to contain. A hand-written list is only ever as good as
+the words someone remembered. `english_words.txt` is the system dictionary
+filtered to plain ASCII, committed so a build on any machine yields the same
+tags rather than depending on the host.
+
+**Inflected and British forms.** The dictionary holds "award" but not
+"awarded", and it is American, so "moisturise" is absent. Without stemming those
+came back as names. Stemming is deliberately conservative — stripping "es" as a
+unit turned "Bedes" (St Bede's) into "bed", so only "s" is stripped.
+
+**Refusing text Vision misread.** OCR reading a picture as letters produced
+"vbebimrtodady", "pecwdegdeaxl", "snidhrlouzxby". These are rejected by how rare
+their letter pairs are in English, measured from the same dictionary rather than
+guessed: the garble scored 0–6 occurrences per million, while every real name
+scored 39 or more (Atlas Copco 39, handcrafted 50, Ribcaged 106, Slingsby 133).
+The threshold sits at 20. Unrecognised words shorter than four letters are also
+refused, because "cin", "daf" and "ome" are OCR clipping a longer word far more
+often than they are a name; known short brands come through the lexicon instead.
+
+**What this costs.** First names on place cards do not become tags, because the
+dictionary contains given names. That is the right outcome here: who is in a
+photograph is what the People screen and face recognition are for, and a card
+reading "Aimee & Kent" would otherwise tag every table shot at that wedding.
+
+**Measured on the real catalogue.** 376 of 760 photographs with readable text
+carry a name, led by Bedes, Ribcaged, Astaxanthin, London Dry Gin, Darwen Lancs,
+Slingsby, Whitley Neill, Atlas Copco, Chambord, Kelloggs and Asda. Before the
+dictionary and noise rules the same catalogue produced 643, most of them words.
+
+## D-064 — The Vision worker is retired after 400 photographs
+
+**Decision.** `VisionEngine` counts the photographs each worker process has
+analysed and replaces it after 400, closing stdin so the worker exits on its own
+rather than being killed mid-analysis. Each request also runs inside its own
+`autoreleasepool` in the Swift worker.
+
+**Why.** Observed on the owner's Mac during a real overnight scan: the worker
+process reached **28GB resident after 77 minutes** and peaked near **40GB**,
+pushing the machine 10GB into swap. Everything slowed down, including the scan
+the worker existed to perform — cargo builds that normally take 30 seconds were
+timing out at ten minutes.
+
+**What this is not.** It is not a fix for a diagnosed leak, and it should not be
+described as one. The obvious hypothesis was the missing autorelease pool, and
+that was tested rather than assumed: feeding the thirty largest TIFFs on that
+drive — 460 to 554MB each, the biggest files in the catalogue — straight to the
+worker plateaus under 2GB and stays there, with and without the pool. Thirty
+images is not five hundred, and the live worker saw a wider mix, so the
+measurement rules out a simple per-image leak on large TIFFs and nothing more.
+
+Retiring the worker removes the *consequence* without needing the cause. However
+memory is being retained, it cannot accumulate past a few hundred photographs,
+because the process holding it no longer exists. The autorelease pool stays
+because it is correct practice for a loop that never returns to a runloop,
+not because it was shown to help.
+
+**Why 400 and not a memory threshold.** Reading a process's own resident size
+portably is awkward and the number is unreliable under memory pressure — the
+live worker read 40GB at one moment and 28GB at another while doing the same
+work. A count is exact, observable, and testable. A restart costs about the time
+of one photograph, so against 400 it is under a third of a percent.
+
+**Evidence.** Two tests: one drives 400 requests through a stub worker that
+reports its own process id and asserts the id is stable throughout and different
+afterwards — proving reuse *and* retirement — and one asserts the photograph
+that triggers the restart is still analysed rather than dropped.

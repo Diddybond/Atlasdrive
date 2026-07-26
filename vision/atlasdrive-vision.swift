@@ -215,22 +215,37 @@ setbuf(stdout, nil)
 
 struct Request: Decodable { let path: String }
 
+// Every request is handled inside its own autorelease pool.
+//
+// This is not a tidiness measure. CGImage, VNImageRequestHandler and the
+// observation objects Vision returns are all Objective-C objects, and they go
+// into the outermost autorelease pool. A worker that loops forever never
+// returns to a runloop, so that pool is never drained and every image analysed
+// stays resident for the life of the process.
+//
+// Measured on the owner's own machine, mid-scan: this worker had reached 40GB
+// resident and pushed the Mac into 10GB of swap, which slowed the scan it was
+// meant to be performing and everything else running alongside it. The files
+// that make it obvious are the large 16-bit TIFFs — roughly 200MB each once
+// decoded — so a few hundred photographs is all it takes.
 while let line = readLine(strippingNewline: true) {
-    let trimmed = line.trimmingCharacters(in: .whitespaces)
-    if trimmed.isEmpty { continue }
+    autoreleasepool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return }
 
-    // One reply per request line, always — even for a malformed request, or the
-    // caller's accounting breaks.
-    guard let data = trimmed.data(using: .utf8),
-          let request = try? JSONDecoder().decode(Request.self, from: data) else {
-        print("{\"ok\":false,\"error\":\"malformed request\",\"faces\":[],\"height\":0,\"labels\":[],\"ocr\":\"\",\"print\":[],\"width\":0}")
-        continue
-    }
-    let result = analyse(path: request.path)
-    if let data = try? encoder.encode(result), let json = String(data: data, encoding: .utf8) {
-        print(json)
-    } else {
-        // Must still emit a line, or the caller's ordering breaks.
-        print("{\"ok\":false,\"error\":\"could not encode result\",\"faces\":[],\"height\":0,\"labels\":[],\"ocr\":\"\",\"print\":[],\"width\":0}")
+        // One reply per request line, always — even for a malformed request, or
+        // the caller's accounting breaks.
+        guard let data = trimmed.data(using: .utf8),
+              let request = try? JSONDecoder().decode(Request.self, from: data) else {
+            print("{\"ok\":false,\"error\":\"malformed request\",\"faces\":[],\"height\":0,\"labels\":[],\"ocr\":\"\",\"print\":[],\"width\":0}")
+            return
+        }
+        let result = analyse(path: request.path)
+        if let data = try? encoder.encode(result), let json = String(data: data, encoding: .utf8) {
+            print(json)
+        } else {
+            // Must still emit a line, or the caller's ordering breaks.
+            print("{\"ok\":false,\"error\":\"could not encode result\",\"faces\":[],\"height\":0,\"labels\":[],\"ocr\":\"\",\"print\":[],\"width\":0}")
+        }
     }
 }

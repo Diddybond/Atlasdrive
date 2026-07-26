@@ -290,10 +290,10 @@ export interface SidecarSummary {
 }
 
 /// Someone you have named. Confirmed faces are what future scans match against.
-export interface BrandScan {
+export interface NameScan {
   examined: number;
   tagged: number;
-  brands: TagCount[];
+  names: TagCount[];
 }
 
 export interface FailureReason {
@@ -398,7 +398,7 @@ export const api = {
       name,
     }),
   photosOfPerson: (personId: string) => call<PersonPhoto[]>("photos_of_person", { personId }),
-  findBrands: (driveNumber?: number) => call<BrandScan>("find_brands", { driveNumber }),
+  findNames: (driveNumber?: number) => call<NameScan>("find_names", { driveNumber }),
   catalogueTags: (limit?: number, driveNumber?: number) =>
     call<TagCount[]>("catalogue_tags", { limit, driveNumber }),
   photoThumbnail: (fileId: string, maxEdge?: number) =>
@@ -729,11 +729,11 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       for (const p of mockPeople) if (p.relationship) counts.set(p.relationship, (counts.get(p.relationship) ?? 0) + 1);
       return Promise.resolve([...counts.entries()] as unknown as T);
     }
-    case "find_brands":
+    case "find_names":
       return Promise.resolve({
         examined: 695,
         tagged: 11,
-        brands: [{ tag: "asda", count: 2 }],
+        names: [{ tag: "asda", count: 2 }],
       } as unknown as T);
     case "scan_failures":
       return Promise.resolve([

@@ -1118,18 +1118,18 @@ fn scan_stats(
         .map_err(map_err)
 }
 
-/// Look for brand names in the text already read from the photographs.
+/// Look for names printed on things in the photographs, from their text.
 ///
 /// A backfill rather than a rescan: no original is opened, so it works with
 /// every drive unplugged.
 #[tauri::command]
-fn find_brands(
+fn find_names(
     state: State<AppState>,
     drive_number: Option<i64>,
-) -> Result<family_archive_core::inventory::BrandScan, String> {
+) -> Result<family_archive_core::inventory::NameScan, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
-    family_archive_core::inventory::scan_for_brands(&archive, drive_number).map_err(map_err)
+    family_archive_core::inventory::scan_for_names(&archive, drive_number).map_err(map_err)
 }
 
 /// Why files on this drive were given up on, most common reason first.
@@ -1470,7 +1470,7 @@ pub fn run() {
             drive_coverage,
             scan_stats,
             scan_failures,
-            find_brands,
+            find_names,
             retry_failed_files,
             estimate_index,
             similar_photographs,

@@ -879,16 +879,17 @@ impl<'a> Pipeline<'a> {
                 params![file_id, tag_id, concept.confidence, now],
             )?;
         }
-        // Brand names AtlasDrive actually read in the picture.
+        // Names AtlasDrive actually read on things in the picture — a bottle,
+        // a van, a shop front, a magazine.
         //
         // Sourced from OCR text, never from image features: the tag means "this
         // name appears in the photograph", which is a checkable claim. Guessing
         // a logo from pixels would not be. See D-061.
-        for hit in crate::ai::brands::detect(ocr_text.unwrap_or("")) {
-            let tag_id = self.upsert_tag(tx, &hit.name, "automatic")?;
+        for hit in crate::ai::names::detect(ocr_text.unwrap_or("")) {
+            let tag_id = self.upsert_tag(tx, &hit.tag, "automatic")?;
             tx.execute(
                 "INSERT OR IGNORE INTO file_tags (file_id, tag_id, confidence, source, created_at)
-                 VALUES (?1,?2,?3,'brand',?4)",
+                 VALUES (?1,?2,?3,'name',?4)",
                 params![file_id, tag_id, 0.9, now],
             )?;
         }
