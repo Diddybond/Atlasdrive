@@ -1464,3 +1464,37 @@ the count go *backwards* — something real progress never does. It correctly ma
 the rate refuse to quote a figure, which looked like a bug in the dashboard and
 was a bug in the fixture. The variation now applies to the speed and is
 integrated over elapsed time, so the total only ever increases.
+
+## D-056: The app is dark, and the console is part of it
+
+**Status:** settled.
+
+**Context.** The scan console was dark; the rest of the app was light and turned
+dark only when macOS did. The owner asked for one treatment throughout.
+
+**Decision.** AtlasDrive is dark in both system settings, not "dark when macOS
+is". It sits beside Bridge and Photoshop, and it is watched while a drive
+indexes overnight — both are dark-room work, and a screen that flips to white
+because the system clock passed sunrise is the wrong behaviour for it. The
+`prefers-color-scheme` override is gone; its values became the defaults.
+
+The console no longer keeps its own palette. Its `--c-*` variables point at the
+shared role tokens, so the two surfaces cannot drift apart — two copies of one
+palette is precisely how they would.
+
+**Three faults the real scan exposed**, none of which the mock could have:
+
+*The console's contents overflowed it.* A bare `1fr` grid column is
+`minmax(auto, 1fr)`, and `auto` will not shrink below its contents' intrinsic
+width — so a 90-character filename in the live feed pushed the whole grid past
+the panel containing it. Every column is now `minmax(0, …)`.
+
+*Sub-megabyte files read as "0 MB".* This archive holds 333MB flattened scans
+and small web exports side by side; rounding to whole megabytes made the small
+ones look like failures. Below a megabyte it reports kilobytes.
+
+*The gauge printed its reading under the needle.* The pivot sat at the centre of
+the box, which is exactly where the number goes, so the hub and the lower half
+of the needle crossed the digits. The pivot moved up and the box grew taller,
+leaving the dial face below it clear — where a real instrument prints its
+reading.

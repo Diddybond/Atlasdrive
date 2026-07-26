@@ -281,7 +281,11 @@ function Tile({
 
 function mb(bytes: number): string {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-  return `${Math.round(bytes / 1024 ** 2)} MB`;
+  // Below a megabyte, rounding to whole megabytes prints "0 MB" — which reads
+  // as a failure rather than as a small file. This archive holds 333MB scans
+  // and sub-megabyte web exports side by side.
+  if (bytes >= 1024 ** 2) return `${Math.round(bytes / 1024 ** 2)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
 }
 
 function gb(bytes: number): string {

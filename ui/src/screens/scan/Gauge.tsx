@@ -11,12 +11,18 @@ export function Gauge({ value, peak }: { value: number | null; peak: number }) {
   const fraction = Math.max(0, Math.min(1, shown / max));
 
   // A 240° sweep starting at 150°, leaving the gap at the bottom.
+  //
+  // The pivot sits high in the box on purpose. Centred, the hub and the lower
+  // half of the needle land exactly where the reading is printed and cross
+  // through the digits. Raising the centre and lengthening the box leaves the
+  // dial face below the pivot clear for the number, which is where a real
+  // instrument puts it.
   const start = 150;
   const sweep = 240;
   const angle = start + fraction * sweep;
   const cx = 120;
-  const cy = 116;
-  const r = 86;
+  const cy = 100;
+  const r = 84;
 
   const polar = (deg: number, radius: number): [number, number] => {
     const rad = (deg * Math.PI) / 180;
@@ -28,14 +34,17 @@ export function Gauge({ value, peak }: { value: number | null; peak: number }) {
     return `M ${x1} ${y1} A ${radius} ${radius} 0 ${to - from > 180 ? 1 : 0} 1 ${x2} ${y2}`;
   };
 
-  const [nx, ny] = polar(angle, r - 18);
+  // The needle stops short of the rim and starts away from the hub, so it reads
+  // as a pointer rather than a spoke laid across the face.
+  const [nx, ny] = polar(angle, r - 16);
+  const [tailX, tailY] = polar(angle + 180, 12);
   const [minX, minY] = polar(start, r + 16);
   const [maxX, maxY] = polar(start + sweep, r + 16);
 
   return (
     <div className="gauge">
       <svg
-        viewBox="0 0 240 180"
+        viewBox="0 0 240 210"
         role="img"
         aria-label={`Read speed ${value === null ? "not yet measured" : `${shown.toFixed(1)} megabytes per second`}`}
       >
@@ -67,8 +76,8 @@ export function Gauge({ value, peak }: { value: number | null; peak: number }) {
           );
         })}
 
-        <line className="gauge-needle" x1={cx} y1={cy} x2={nx} y2={ny} />
-        <circle className="gauge-hub" cx={cx} cy={cy} r={7} />
+        <line className="gauge-needle" x1={tailX} y1={tailY} x2={nx} y2={ny} />
+        <circle className="gauge-hub" cx={cx} cy={cy} r={6} />
 
         <text className="gauge-bound" x={minX} y={minY}>
           0

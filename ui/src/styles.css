@@ -14,21 +14,28 @@
   --atlas-blue-deep: #0a63a8;
   --atlas-amber-deep: #8a5a00;
 
-  /* Role tokens — light mode. */
-  --bg: var(--atlas-map-white);
-  --panel: var(--atlas-clear-white);
-  --ink: var(--atlas-graphite);
-  --ink-soft: #55606b;
-  --line: #dbe1e8;
+  /* Role tokens.
+     
+     AtlasDrive is dark, not "dark when macOS is". It is used beside Bridge and
+     Photoshop, and while a drive indexes overnight — both are dark-room work,
+     and a screen that flips to white because the system clock passed sunrise is
+     the wrong behaviour for it. The palette below is the same one the scan
+     console uses, so the two can never drift apart. */
+  --bg: #0d1117;
+  --panel: #161d27;
+  --panel-sunken: #10161e;
+  --ink: #e8eef6;
+  --ink-soft: #8b9bb0;
+  --line: #232d3a;
   --accent: var(--atlas-blue);
   /* Graphite on Navigation Blue is 8.2:1; white would be 2.4:1. */
   --accent-ink: var(--atlas-graphite);
-  --link: var(--atlas-blue-deep);
-  --focus: var(--atlas-blue-deep);
-  --ok: #1f7a4d;
-  --warn: var(--atlas-amber-deep);
-  --fail: #a3282b;
-  --offline: var(--atlas-amber-deep);
+  --link: var(--atlas-blue);
+  --focus: var(--atlas-blue);
+  --ok: #39c07a;
+  --warn: var(--atlas-amber);
+  --fail: #ff6b6b;
+  --offline: var(--atlas-amber);
   /* Typography — see docs/BRAND.md.
      All faces ship with macOS, so nothing is fetched at runtime: the webview's
      CSP has no font-src and the product makes no network calls. */
@@ -42,23 +49,8 @@
   font-size: 16px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: var(--atlas-graphite);
-    --panel: var(--atlas-slate);
-    --ink: var(--atlas-clear-white);
-    --ink-soft: var(--atlas-steel);
-    --line: #333c47;
-    --accent: var(--atlas-blue);
-    --accent-ink: var(--atlas-graphite);
-    --link: var(--atlas-blue);
-    --focus: var(--atlas-blue);
-    --ok: #4cc38a;
-    --warn: var(--atlas-amber);
-    --fail: #ff6b6b;
-    --offline: var(--atlas-amber);
-  }
-}
+/* No prefers-color-scheme override: the app is dark in both settings, on
+   purpose. See the role tokens above. */
 
 * { box-sizing: border-box; }
 
@@ -516,16 +508,19 @@ h2 {
    --------------------------------------------------------------------------- */
 
 .console {
-  --c-bg: #0d1117;
-  --c-panel: #141b24;
-  --c-panel-2: #18202b;
-  --c-line: #232d3a;
-  --c-ink: #e8eef6;
-  --c-soft: #8b9bb0;
-  --c-blue: #3da9fc;
+  /* Pointed at the shared tokens rather than repeating hex codes: the console
+     and the rest of the app are the same surface now, and two copies of one
+     palette is how they would slowly stop matching. */
+  --c-bg: var(--panel-sunken);
+  --c-panel: var(--panel);
+  --c-panel-2: var(--panel-sunken);
+  --c-line: var(--line);
+  --c-ink: var(--ink);
+  --c-soft: var(--ink-soft);
+  --c-blue: var(--accent);
   --c-violet: #8b7bf7;
-  --c-green: #39c07a;
-  --c-amber: #f0b23c;
+  --c-green: var(--ok);
+  --c-amber: var(--warn);
 
   background: var(--c-bg);
   color: var(--c-ink);
@@ -548,6 +543,7 @@ h2 {
 .pill-idle { background: rgba(139, 155, 176, 0.14); color: var(--c-soft); }
 
 .panel {
+  min-width: 0;
   background: var(--c-panel);
   border: 1px solid var(--c-line);
   border-radius: 14px;
@@ -555,10 +551,14 @@ h2 {
 }
 .panel-note { color: var(--c-soft); font-size: 0.82rem; margin: 8px 0 0; }
 
-.console-top { display: grid; grid-template-columns: minmax(260px, 1fr) 2fr; gap: 16px; }
+/* minmax(0, …) on every column. A bare `1fr` is `minmax(auto, 1fr)`, and `auto`
+   will not shrink below the intrinsic width of its contents — so a long
+   filename in the feed or a wide tile pushes the whole grid past the panel it
+   sits in, which is exactly what happened here. */
+.console-top { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr); gap: 16px; }
 /* align-items: start, or a short panel stretches to match a tall neighbour and
-   ends in a field of empty dark. */
-.console-bottom { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: start; }
+   ends in a field of empty dark. minmax(0, …) as above. */
+.console-bottom { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
 @media (max-width: 1100px) {
   .console-top, .console-bottom { grid-template-columns: 1fr; }
 }
@@ -573,10 +573,10 @@ h2 {
 .gauge-needle { stroke: var(--c-ink); stroke-width: 3; opacity: 0.9; stroke-linecap: round; transition: all 0.6s cubic-bezier(0.22, 1, 0.36, 1); }
 .gauge-hub { fill: var(--c-ink); }
 .gauge-bound { fill: var(--c-soft); font-size: 12px; text-anchor: middle; }
-/* Inside the arc, below the hub — where a dial prints its reading. Anchored
-   from the top rather than the bottom so it does not drift when the panel
-   height changes. */
-.gauge-readout { position: absolute; left: 0; right: 0; top: 62%; text-align: center; pointer-events: none; }
+/* Below the pivot, on the clear part of the dial face. Anchored from the top
+   so it does not drift when the panel height changes, and set clear of the hub
+   so the needle never crosses the digits. */
+.gauge-readout { position: absolute; left: 0; right: 0; top: 55%; text-align: center; pointer-events: none; }
 .gauge-readout strong {
   display: block; font-family: var(--font-display); font-size: 2.2rem; line-height: 1;
   font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
@@ -584,7 +584,7 @@ h2 {
 .gauge-readout span { color: var(--c-blue); font-size: 0.9rem; font-weight: 600; }
 
 /* Stat tiles --------------------------------------------------------------- */
-.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-content: start; }
+.tiles { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-content: start; }
 @media (max-width: 720px) { .tiles { grid-template-columns: 1fr; } }
 .tile {
   display: flex; gap: 14px; align-items: center;
