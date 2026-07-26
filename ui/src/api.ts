@@ -290,6 +290,19 @@ export interface SidecarSummary {
 }
 
 /// Someone you have named. Confirmed faces are what future scans match against.
+export interface BrandScan {
+  examined: number;
+  tagged: number;
+  brands: TagCount[];
+}
+
+export interface FailureReason {
+  code: string;
+  message: string;
+  files: number;
+  example: string | null;
+}
+
 export interface NamedPerson {
   id: string;
   display_name: string;
@@ -319,7 +332,13 @@ export const api = {
     call<Drive>("register_drive", input),
   search: (
     query: string,
-    opts: { drive?: number; includeOffline: boolean; eventId?: string; client?: string },
+    opts: {
+      drive?: number;
+      includeOffline: boolean;
+      eventId?: string;
+      client?: string;
+      tags?: string[];
+    },
   ) => call<SearchResponse>("search_catalogue", { query, ...opts }),
   // Starts a background run and returns immediately; poll getProgress().
   startIndex: (input: { drive: number; path: string; dryRun: boolean; resume: boolean }) =>
@@ -327,6 +346,10 @@ export const api = {
   cancelIndex: () => call<void>("cancel_index"),
   isIndexing: () => call<boolean>("is_indexing"),
   getProgress: () => call<Progress | null>("get_progress"),
+  scanFailures: (driveNumber: number) =>
+    call<FailureReason[]>("scan_failures", { driveNumber }),
+  retryFailedFiles: (driveNumber: number, code?: string) =>
+    call<number>("retry_failed_files", { driveNumber, code }),
   scanStats: (driveNumber: number, recent?: number) =>
     call<ScanStats>("scan_stats", { driveNumber, recent }),
   runVerifier: () => call<VerifierCheck[]>("run_verifier"),
@@ -363,6 +386,9 @@ export const api = {
   tagFaceCluster: (clusterId: string, name: string) =>
     call<{ id: string; display_name: string }>("tag_face_cluster", { clusterId, name }),
   listPeople: () => call<NamedPerson[]>("list_people"),
+  setPersonRelationship: (personId: string, relationship?: string) =>
+    call<void>("set_person_relationship", { personId, relationship }),
+  personRelationships: () => call<[string, number][]>("person_relationships"),
   faceGallery: (limit?: number, driveNumber?: number) =>
     call<GalleryFace[]>("face_gallery", { limit, driveNumber }),
   faceThumbnail: (faceId: string) => call<string | null>("face_thumbnail", { faceId }),
@@ -372,7 +398,9 @@ export const api = {
       name,
     }),
   photosOfPerson: (personId: string) => call<PersonPhoto[]>("photos_of_person", { personId }),
-  catalogueTags: (limit?: number) => call<TagCount[]>("catalogue_tags", { limit }),
+  findBrands: (driveNumber?: number) => call<BrandScan>("find_brands", { driveNumber }),
+  catalogueTags: (limit?: number, driveNumber?: number) =>
+    call<TagCount[]>("catalogue_tags", { limit, driveNumber }),
   photoThumbnail: (fileId: string, maxEdge?: number) =>
     call<string | null>("photo_thumbnail", { fileId, maxEdge }),
   pendingSuggestions: (personId: string, limit?: number) =>
@@ -691,6 +719,33 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       } as unknown as T);
     case "write_sidecars_for_person":
       return Promise.resolve({ written: 1, skipped_offline: 1, skipped_nothing_to_say: 0, paths: [] } as unknown as T);
+    case "set_person_relationship": {
+      const p = mockPeople.find((x) => x.id === args?.personId);
+      if (p) p.relationship = (args?.relationship as string) || null;
+      return Promise.resolve(undefined as unknown as T);
+    }
+    case "person_relationships": {
+      const counts = new Map<string, number>();
+      for (const p of mockPeople) if (p.relationship) counts.set(p.relationship, (counts.get(p.relationship) ?? 0) + 1);
+      return Promise.resolve([...counts.entries()] as unknown as T);
+    }
+    case "find_brands":
+      return Promise.resolve({
+        examined: 695,
+        tagged: 11,
+        brands: [{ tag: "asda", count: 2 }],
+      } as unknown as T);
+    case "scan_failures":
+      return Promise.resolve([
+        {
+          code: "PROCESS",
+          message: "decode failed: Memory limit exceeded",
+          files: 232,
+          example: "2011/Wedding/_MG_4471.tif",
+        },
+      ] as unknown as T);
+    case "retry_failed_files":
+      return Promise.resolve(232 as unknown as T);
     case "list_people":
       return Promise.resolve(mockPeople as unknown as T);
     case "reject_face_cluster": {

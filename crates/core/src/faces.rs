@@ -857,6 +857,44 @@ impl<'a> FaceRepo<'a> {
         self.delete_person_face_data(person_id)
     }
 
+    /// How a person relates to the owner: family, or anything else they type.
+    ///
+    /// `people.relationship` has existed since the first schema and has never
+    /// been settable. It earns its place now because a wedding photographer's
+    /// archive is mostly clients and guests, and the handful of people who are
+    /// *family* are the ones searched for again in ten years' time. Being able
+    /// to say "just my family" is the difference between a working archive and
+    /// a very large folder.
+    ///
+    /// Free text rather than an enum: "family" is what is asked for today, and
+    /// somebody will reasonably want "wedding party" or "staff" tomorrow.
+    /// Stored lower-cased so "Family" and "family" are one group. `None` clears.
+    pub fn set_relationship(&self, person_id: &str, relationship: Option<&str>) -> Result<()> {
+        let cleaned = relationship
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(|r| r.to_lowercase());
+        let affected = self.conn.execute(
+            "UPDATE people SET relationship = ?2, updated_at = ?3 WHERE id = ?1",
+            rusqlite::params![person_id, cleaned, crate::util::now_iso8601()],
+        )?;
+        if affected == 0 {
+            return Err(Error::InvalidArgs(format!("no person {person_id}")));
+        }
+        Ok(())
+    }
+
+    /// Every relationship in use, with how many people carry it.
+    pub fn relationships(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT relationship, count(*) FROM people
+              WHERE relationship IS NOT NULL AND trim(relationship) <> ''
+              GROUP BY relationship ORDER BY count(*) DESC, relationship",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Correct a person's name, merging into an existing person if the new name
     /// is already taken.
     ///
@@ -1153,6 +1191,76 @@ pub struct FaceHealth {
     pub dim_mismatches: usize,
     pub non_finite: usize,
     pub max_identical: usize,
+}
+
+#[cfg(test)]
+mod relationship_tests {
+    use super::*;
+    use crate::db::{self, SchemaKind};
+
+    fn person(conn: &rusqlite::Connection, id: &str, name: &str) {
+        conn.execute(
+            "INSERT INTO people (id, display_name, created_at, updated_at)
+             VALUES (?1, ?2, 'now', 'now')",
+            rusqlite::params![id, name],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn marks_people_as_family_and_counts_them() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        person(&conn, "p1", "Millie Myers");
+        person(&conn, "p2", "Tyler Myers");
+        person(&conn, "p3", "Aimee Kanovan");
+        let repo = FaceRepo::new(&conn);
+
+        repo.set_relationship("p1", Some("family")).unwrap();
+        repo.set_relationship("p2", Some("Family")).unwrap();
+        repo.set_relationship("p3", Some("client")).unwrap();
+
+        // Lower-cased on the way in, so "Family" and "family" are one group
+        // rather than two — nobody types a label the same way twice.
+        let groups = repo.relationships().unwrap();
+        assert_eq!(groups, vec![("family".to_string(), 2), ("client".to_string(), 1)]);
+    }
+
+    #[test]
+    fn a_relationship_can_be_cleared() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        person(&conn, "p1", "Someone");
+        let repo = FaceRepo::new(&conn);
+
+        repo.set_relationship("p1", Some("family")).unwrap();
+        assert_eq!(repo.relationships().unwrap().len(), 1);
+
+        repo.set_relationship("p1", None).unwrap();
+        assert!(repo.relationships().unwrap().is_empty());
+        // Blank input clears rather than storing an empty label.
+        repo.set_relationship("p1", Some("family")).unwrap();
+        repo.set_relationship("p1", Some("   ")).unwrap();
+        assert!(repo.relationships().unwrap().is_empty());
+    }
+
+    #[test]
+    fn setting_a_relationship_on_nobody_is_an_error() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        assert!(FaceRepo::new(&conn).set_relationship("nope", Some("family")).is_err());
+    }
+
+    /// The relationship must come back on the person, or the interface cannot
+    /// show who is family without a second query.
+    #[test]
+    fn the_relationship_is_carried_on_the_person() {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        person(&conn, "p1", "Millie Myers");
+        let repo = FaceRepo::new(&conn);
+        repo.set_relationship("p1", Some("family")).unwrap();
+
+        let people = repo.people().unwrap();
+        let millie = people.iter().find(|p| p.id == "p1").unwrap();
+        assert_eq!(millie.relationship.as_deref(), Some("family"));
+    }
 }
 
 #[cfg(test)]

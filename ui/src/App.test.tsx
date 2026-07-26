@@ -50,20 +50,65 @@ describe("AtlasDrive UI", () => {
     expect(screen.getAllByText(/1 photograph$/).length).toBeGreaterThan(0);
   });
 
-  it("lists what is in the photographs and searches when a subject is clicked", async () => {
+  it("lists what is in the photographs and narrows when a subject is picked", async () => {
     render(<App />);
     // The archive is browsable without having to guess a search term.
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
     });
     // Counts are shown, so you know whether a subject is worth clicking.
-    const chip = screen.getByRole("button", { name: /Find 131 photographs of wedding/ });
+    const chip = screen.getByRole("button", { name: /Narrow to the 131 photographs showing wedding/ });
     expect(chip).toBeDefined();
+    expect(chip.getAttribute("aria-pressed")).toBe("false");
 
     fireEvent.click(chip);
-    // Clicking is the same operation as typing it, so the box reflects it.
+    // Picking is the same operation as typing it, so the box reflects it, and
+    // the chip now reads as a filter that is on.
     await waitFor(() => {
       expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("wedding");
+    });
+    expect(
+      screen.getByRole("button", { name: /Stop narrowing to wedding/ }).getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
+  /// Two subjects must mean "both", not "either" — the whole point of picking
+  /// a second one is to see fewer photographs, not more.
+  it("says plainly that picking two subjects requires both", async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /showing wedding/ }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Stop narrowing to wedding/ })).toBeDefined();
+    });
+    const second = screen.getAllByRole("button", { name: /Narrow to the/ })[0];
+    fireEvent.click(second);
+    await waitFor(() => {
+      // The sentence is split by its own emphasis, so match the lead-in.
+      expect(screen.getByText(/Showing only photographs that contain/i)).toBeDefined();
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/^all$/)).toBeDefined();
+    });
+  });
+
+  /// Choosing a drive must not carry subjects across to it: the new drive may
+  /// not have them, and an empty result with no visible cause reads as a bug.
+  it("clears picked subjects when the drive changes", async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /showing wedding/ }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Stop narrowing to wedding/ })).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Drive 2/ }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /Stop narrowing to/ })).toBeNull();
     });
   });
 

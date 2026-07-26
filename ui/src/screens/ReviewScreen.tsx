@@ -15,8 +15,18 @@ export function ReviewScreen() {
   // not reviewable; "who is this?" is a far easier question when you know the
   // photograph came off the 2019 weddings drive.
   const [driveFilter, setDriveFilter] = useState<number | null>(null);
+  // Which drive the faces on screen actually came from. Distinct from
+  // `driveFilter`, which changes the instant the chip is clicked: reading the
+  // heading off the chip meant "12 faces on Drive 2" was printed above Drive
+  // 1's faces for as long as the fetch took.
+  const [shownDrive, setShownDrive] = useState<number | null>(null);
+  const [loadingFaces, setLoadingFaces] = useState(false);
   const [drives, setDrives] = useState<{ number: number; name: string; faces: number }[]>([]);
   const [revealNote, setRevealNote] = useState<string | null>(null);
+  // Which relationship the named list is showing. Most of a wedding
+  // photographer's archive is clients and guests; family is the handful still
+  // being searched for in ten years' time.
+  const [peopleFilter, setPeopleFilter] = useState<string | null>(null);
 
   const [faces, setFaces] = useState<GalleryFace[]>([]);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
@@ -65,6 +75,7 @@ export function ReviewScreen() {
   async function load(drive?: number) {
     const gallery = await api.faceGallery(200, drive);
     setFaces(gallery);
+    setShownDrive(drive ?? null);
     setPeople(await api.listPeople());
     setThumbs(await loadThumbs(gallery.map((f) => f.face_id), {}));
   }
@@ -83,7 +94,27 @@ export function ReviewScreen() {
   }, []);
 
   useEffect(() => {
-    void load(driveFilter ?? undefined);
+    // Clicking through drives faster than they load must not leave an earlier
+    // drive's faces on screen because its reply arrived last.
+    let current = true;
+    setLoadingFaces(true);
+    void (async () => {
+      const drive = driveFilter ?? undefined;
+      const gallery = await api.faceGallery(200, drive);
+      if (!current) return;
+      setFaces(gallery);
+      setShownDrive(drive ?? null);
+      const named = await api.listPeople();
+      if (!current) return;
+      setPeople(named);
+      const loaded = await loadThumbs(gallery.map((f) => f.face_id), {});
+      if (!current) return;
+      setThumbs(loaded);
+      setLoadingFaces(false);
+    })();
+    return () => {
+      current = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [driveFilter]);
 
@@ -141,6 +172,16 @@ export function ReviewScreen() {
   }
 
   const unnamed = faces.filter((f) => !f.person_name);
+  const familyCount = people.filter((p) => p.relationship === "family").length;
+  const shownPeople = peopleFilter
+    ? people.filter((p) => p.relationship === peopleFilter)
+    : people;
+
+  /// Mark someone as family, or take the mark away.
+  async function setFamily(p: NamedPerson, isFamily: boolean) {
+    await api.setPersonRelationship(p.id, isFamily ? "family" : undefined);
+    setPeople(await api.listPeople());
+  }
 
   return (
     <section aria-labelledby="review-heading">
@@ -159,11 +200,36 @@ export function ReviewScreen() {
       {/* 1. Facts. */}
       {people.length > 0 && (
         <div className="card">
-          <h2>People you have named</h2>
+          <div className="row-between">
+            <h2>People you have named</h2>
+            {familyCount > 0 && (
+              <span className="people-filter">
+                <button
+                  className={peopleFilter === null ? "chip selected" : "chip"}
+                  onClick={() => setPeopleFilter(null)}
+                >
+                  Everyone <span className="chip-count">{people.length}</span>
+                </button>
+                <button
+                  className={peopleFilter === "family" ? "chip selected" : "chip"}
+                  onClick={() => setPeopleFilter("family")}
+                >
+                  Family <span className="chip-count">{familyCount}</span>
+                </button>
+              </span>
+            )}
+          </div>
           <ul className="people-list">
-            {people.map((p) => (
+            {shownPeople.map((p) => (
               <li key={p.id} className="person-row">
-                <span className="person-name">{p.display_name}</span>
+                <span className="person-name">
+                  {p.display_name}
+                  {p.relationship === "family" && (
+                    <span className="family-badge" title="Family">
+                      family
+                    </span>
+                  )}
+                </span>
                 <span className="person-counts">
                   {p.confirmed_faces} photograph{p.confirmed_faces === 1 ? "" : "s"}
                 </span>
@@ -191,6 +257,19 @@ export function ReviewScreen() {
 
                 {managing === p.id && (
                   <div className="person-manage">
+                    <label className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={p.relationship === "family"}
+                        onChange={(e) => void setFamily(p, e.target.checked)}
+                      />
+                      {p.display_name} is family
+                    </label>
+                    <p className="check-detail">
+                      Family are the people you will still be looking for in ten years. Marking
+                      them lets you see just them, without wading through clients and guests.
+                    </p>
+
                     <label>
                       Name
                       <input
@@ -389,8 +468,14 @@ export function ReviewScreen() {
       )}
 
       <h2>
-        {unnamed.length} face{unnamed.length === 1 ? "" : "s"} nobody has named
-        {driveFilter !== null && ` on Drive ${driveFilter}`}
+        {loadingFaces && shownDrive !== driveFilter ? (
+          <>Loading faces{driveFilter !== null && ` from Drive ${driveFilter}`}…</>
+        ) : (
+          <>
+            {unnamed.length} face{unnamed.length === 1 ? "" : "s"} nobody has named
+            {shownDrive !== null && ` on Drive ${shownDrive}`}
+          </>
+        )}
       </h2>
       {unnamed.length === 0 ? (
         <p className="empty">No faces yet. Scan a drive and any faces found will appear here.</p>

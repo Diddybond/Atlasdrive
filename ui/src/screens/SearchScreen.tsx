@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useEffect } from "react";
-import { api, DriveMatch, SearchResult, TagCount } from "../api";
+import { api, Drive, DriveMatch, SearchResult, TagCount } from "../api";
 import type { SearchContext } from "../App";
 
 export function SearchScreen({
@@ -22,10 +22,24 @@ export function SearchScreen({
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [tags, setTags] = useState<TagCount[]>([]);
+  // Which drive is being browsed, and which subjects have been picked. Both
+  // narrow the search rather than replacing the typed query, so they can be
+  // combined: "children, at weddings, on Drive 2".
+  const [driveFilter, setDriveFilter] = useState<number | null>(null);
+  const [pickedTags, setPickedTags] = useState<string[]>([]);
+  const [allDrives, setAllDrives] = useState<Drive[]>([]);
+  const [brandNote, setBrandNote] = useState<string | null>(null);
+  const [findingBrands, setFindingBrands] = useState(false);
 
   useEffect(() => {
-    void api.catalogueTags(60).then(setTags);
+    void api.listDrives().then(setAllDrives);
   }, []);
+
+  // The subject list follows the selected drive, so every chip on screen leads
+  // to photographs on the disk being browsed rather than to an empty result.
+  useEffect(() => {
+    void api.catalogueTags(60, driveFilter ?? undefined).then(setTags);
+  }, [driveFilter]);
 
   // Arriving from Events with a filter should show that shoot immediately —
   // landing on an empty search box having just asked to see something would be
@@ -93,13 +107,15 @@ export function SearchScreen({
 
   /// Shared by the form and the tag chips, so clicking a subject is exactly the
   /// same operation as typing it.
-  async function search(term: string) {
+  async function search(term: string, picked?: string[]) {
     setQuery(term);
     setSimilarTo(null);
     setLoading(true);
     try {
       const r = await api.search(term, {
         includeOffline,
+        drive: driveFilter ?? undefined,
+        tags: picked ?? pickedTags,
         eventId: context?.eventId,
         client: context?.client,
       });
@@ -179,27 +195,130 @@ export function SearchScreen({
         Include photographs on disconnected drives
       </label>
 
+      {allDrives.length > 0 && (
+        <div className="drive-filter">
+          <span className="filter-label">Look on</span>
+          <button
+            className={driveFilter === null ? "chip selected" : "chip"}
+            onClick={() => {
+              setDriveFilter(null);
+              setPickedTags([]);
+            }}
+          >
+            Every drive
+          </button>
+          {allDrives.map((d) => (
+            <button
+              key={d.id}
+              className={driveFilter === d.drive_number ? "chip selected" : "chip"}
+              onClick={() => {
+                setDriveFilter(d.drive_number);
+                // Subjects belong to the drive they were picked from; keeping
+                // them would silently search for something the new drive may
+                // not have and return nothing for no visible reason.
+                setPickedTags([]);
+              }}
+              title={d.friendly_name ?? undefined}
+            >
+              Drive {d.drive_number}
+              <span className="chip-count">{(d.image_count ?? 0).toLocaleString()}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
       {tags.length > 0 && (
         <div className="card">
-          <h2>What is in your photographs</h2>
+          <div className="row-between">
+            <h2>What is in your photographs</h2>
+            {pickedTags.length > 0 && (
+              <button
+                className="ghost"
+                onClick={() => {
+                  setPickedTags([]);
+                  void search(query, []);
+                }}
+              >
+                Clear {pickedTags.length} selected
+              </button>
+            )}
+          </div>
           <p className="drive-meta subtle">
-            Everything AtlasDrive recognised across your drives. Click one to see those
-            photographs.
+            {driveFilter === null
+              ? "Everything AtlasDrive recognised across your drives."
+              : `Everything AtlasDrive recognised on Drive ${driveFilter}.`}{" "}
+            Click to add a subject — each one you add narrows the search further.
           </p>
           <ul className="tag-cloud">
-            {tags.map((t) => (
-              <li key={t.tag}>
-                <button
-                  className="tag-chip"
-                  onClick={() => void search(t.tag)}
-                  aria-label={`Find ${t.count} photographs of ${t.tag}`}
-                >
-                  {t.tag}
-                  <span className="tag-count">{t.count.toLocaleString()}</span>
-                </button>
-              </li>
-            ))}
+            {tags.map((t) => {
+              const on = pickedTags.includes(t.tag);
+              return (
+                <li key={t.tag}>
+                  <button
+                    className={on ? "tag-chip selected" : "tag-chip"}
+                    aria-pressed={on}
+                    onClick={() => {
+                      const next = on
+                        ? pickedTags.filter((x) => x !== t.tag)
+                        : [...pickedTags, t.tag];
+                      setPickedTags(next);
+                      void search(query || next[0] || t.tag, next);
+                    }}
+                    aria-label={
+                      on
+                        ? `Stop narrowing to ${t.tag}`
+                        : `Narrow to the ${t.count} photographs showing ${t.tag}`
+                    }
+                  >
+                    {t.tag}
+                    <span className="tag-count">{t.count.toLocaleString()}</span>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
+          <div className="row-between brand-row">
+            <p className="panel-note">
+              Brand names come from text AtlasDrive read in the picture — a bottle, a shop front, a
+              van — never guessed from the image.
+            </p>
+            <button
+              className="ghost"
+              disabled={findingBrands}
+              onClick={() => {
+                setFindingBrands(true);
+                setBrandNote(null);
+                void api
+                  .findBrands(driveFilter ?? undefined)
+                  .then((r) => {
+                    setBrandNote(
+                      r.tagged === 0
+                        ? `Read the text of ${r.examined.toLocaleString()} photographs and found no brand names.`
+                        : `Found brand names in ${r.tagged.toLocaleString()} of ${r.examined.toLocaleString()} photographs: ${r.brands
+                            .slice(0, 8)
+                            .map((b) => b.tag)
+                            .join(", ")}${r.brands.length > 8 ? "…" : ""}`,
+                    );
+                    return api.catalogueTags(60, driveFilter ?? undefined).then(setTags);
+                  })
+                  .finally(() => setFindingBrands(false));
+              }}
+            >
+              {findingBrands ? "Reading…" : "Find brand names"}
+            </button>
+          </div>
+          {brandNote && (
+            <p className="search-note" role="status">
+              {brandNote}
+            </p>
+          )}
+
+          {pickedTags.length > 1 && (
+            <p className="panel-note">
+              Showing only photographs that contain <strong>all</strong> of these:{" "}
+              {pickedTags.join(", ")}.
+            </p>
+          )}
         </div>
       )}
 

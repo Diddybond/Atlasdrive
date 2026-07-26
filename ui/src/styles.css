@@ -392,6 +392,21 @@ h2 {
 .drive-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 20px 0 4px; }
 .filter-label { color: var(--ink-soft); font-size: 0.86rem; margin-right: 2px; }
 .chip-count { opacity: 0.7; font-size: 0.78rem; margin-left: 2px; }
+
+/* The family filter sits beside the heading rather than above the list: it is
+   a narrowing of what is already shown, not a separate mode. */
+.people-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.family-badge {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: var(--accent-soft, rgba(109, 140, 255, 0.18));
+  color: var(--accent);
+  vertical-align: middle;
+}
 /* Which drive a face lives on, and the way to open it there. Deliberately a
    separate control from naming: opening Finder and answering "who is this?"
    are different intentions and must not share one click target. */
@@ -655,3 +670,32 @@ h2 {
   color: var(--c-soft); font-size: 0.8rem;
 }
 .console-foot .warn { color: var(--c-amber); }
+
+/* Failures are explained in plain language, grouped by reason: 232 identical
+   decode errors are one problem, not 232. */
+.failure-list { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 10px; }
+.failure-list li { display: flex; gap: 12px; align-items: baseline; }
+.failure-count {
+  min-width: 3.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--danger, #ff6b6b);
+}
+.failure-body { display: grid; gap: 2px; }
+.failure-body strong { font-weight: 500; }
+.failure-example { font-size: 0.82rem; opacity: 0.65; word-break: break-all; }
+
+/* A picked subject is a filter that is currently on, so it reads the same as a
+   selected drive chip rather than as a different kind of control. */
+.tag-chip.selected {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+}
+.tag-chip.selected .tag-count { opacity: 0.85; }
+
+/* The brand explanation and its trigger sit together: the sentence is what
+   makes the button's result trustworthy. */
+.brand-row { align-items: flex-start; gap: 16px; margin-top: 12px; }
+.brand-row .panel-note { margin: 0; }

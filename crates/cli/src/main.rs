@@ -264,6 +264,30 @@ enum DriveAction {
         #[arg(long)]
         list: bool,
     },
+    /// Why files on a drive were given up on, and optionally retry them.
+    ///
+    /// A file that fails three times is never leased again. That is right when
+    /// the file is unreadable and wrong when AtlasDrive has since learned to
+    /// read it, so `--retry` puts them back in the queue.
+    Failures {
+        #[arg(long)]
+        number: i64,
+        /// Put the failed files back in the queue for the next scan.
+        #[arg(long)]
+        retry: bool,
+        /// Retry only failures with this code, e.g. PROCESS.
+        #[arg(long)]
+        code: Option<String>,
+    },
+    /// Find brand names in the text already read from your photographs.
+    ///
+    /// A backfill, not a rescan: it reads the text AtlasDrive already stored,
+    /// so it works with every drive unplugged and opens no originals.
+    Brands {
+        /// Limit to one drive; omit to do the whole catalogue.
+        #[arg(long)]
+        number: Option<i64>,
+    },
     /// Find every pair of drives that look like clones of one another.
     Clones,
     /// List registered drives.
@@ -567,6 +591,8 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
         DriveAction::Check { number, limit, skip_recent_days } => {
             drive_check_cmd(ctx, number, limit, skip_recent_days)
         }
+        DriveAction::Failures { number, retry, code } => drive_failures_cmd(ctx, number, retry, code),
+        DriveAction::Brands { number } => drive_brands_cmd(ctx, number),
         DriveAction::Compare { a, b, list } => {
             let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
             let c = family_archive_core::compare::compare_drives(&archive, a, b)?;
@@ -1099,6 +1125,64 @@ fn compact_cmd(ctx: &Ctx) -> Result<()> {
     let after = std::fs::metadata(ctx.paths.archive_db()).map(|m| m.len()).unwrap_or(0);
     println!("  {} -> {}", human_bytes(before), human_bytes(after));
 
+    Ok(())
+}
+
+/// Look for brand names in text already read from the photographs.
+fn drive_brands_cmd(ctx: &Ctx, number: Option<i64>) -> Result<()> {
+    let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
+    let report = family_archive_core::inventory::scan_for_brands(&archive, number)?;
+    println!(
+        "Examined {} photograph(s) with readable text; {} carry a brand name.\n",
+        report.examined, report.tagged
+    );
+    for b in report.brands.iter().take(50) {
+        println!("  {:>6}  {}", b.count, b.tag);
+    }
+    if report.brands.is_empty() {
+        println!("  (none found)");
+    }
+    println!(
+        "\nBrand tags mean the name was read in the picture, not guessed from it."
+    );
+    Ok(())
+}
+
+/// Explain, and optionally undo, the files a drive gave up on.
+fn drive_failures_cmd(ctx: &Ctx, number: i64, retry: bool, code: Option<String>) -> Result<()> {
+    use family_archive_core::queue::Queue;
+
+    let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
+    let drive_id: String = archive
+        .query_row("SELECT id FROM drives WHERE drive_number=?1", [number], |r| r.get(0))
+        .map_err(|_| {
+            family_archive_core::error::Error::InvalidArgs(format!("no drive numbered {number}"))
+        })?;
+
+    let queue_conn = db::open(&ctx.paths.queue_db(), db::SchemaKind::Queue)?;
+    let q = Queue::new(&queue_conn);
+
+    let reasons = q.failure_reasons(&drive_id)?;
+    if reasons.is_empty() {
+        println!("Drive {number}: nothing was given up on.");
+        return Ok(());
+    }
+
+    let total: i64 = reasons.iter().map(|r| r.files).sum();
+    println!("Drive {number}: {total} file(s) given up on\n");
+    for r in &reasons {
+        println!("  {:>6}  [{}] {}", r.files, r.code, r.message);
+        if let Some(ex) = &r.example {
+            println!("          e.g. {ex}");
+        }
+    }
+
+    if retry {
+        let revived = q.retry_failed(&drive_id, code.as_deref())?;
+        println!("\n{revived} file(s) put back in the queue. Run `index` again to retry them.");
+    } else {
+        println!("\nRe-run with --retry to put these back in the queue.");
+    }
     Ok(())
 }
 

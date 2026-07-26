@@ -261,6 +261,86 @@ impl<'a> Queue<'a> {
         Ok(())
     }
 
+    /// Return permanently failed items to the queue, with their attempt count
+    /// reset, and report how many were revived.
+    ///
+    /// An item that fails three times is marked `failed` and never leased
+    /// again. That is right when the file is genuinely unreadable, and wrong
+    /// when the reason it failed has since been fixed in AtlasDrive itself.
+    ///
+    /// This is not hypothetical. A real archive scan marked 232 photographs
+    /// failed with "Memory limit exceeded" — every one a large 16-bit TIFF the
+    /// decoder now reads without complaint. Without this call those
+    /// photographs would stay absent from the catalogue forever, and nothing
+    /// on screen would ever suggest they were missing.
+    ///
+    /// `only_code` limits the revival to one failure code, so a fix for one
+    /// class of problem does not also retry files that failed for unrelated
+    /// reasons.
+    pub fn retry_failed(&self, drive_id: &str, only_code: Option<&str>) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        // Leases are dropped alongside the state change so a revived item
+        // cannot be claimed twice.
+        let revived = match only_code {
+            Some(code) => {
+                tx.execute(
+                    "DELETE FROM queue_leases WHERE item_id IN (
+                       SELECT i.id FROM queue_items i
+                        WHERE i.drive_id = ?1 AND i.state = 'failed'
+                          AND EXISTS (SELECT 1 FROM queue_failures f
+                                       WHERE f.item_id = i.id AND f.code = ?2))",
+                    params![drive_id, code],
+                )?;
+                tx.execute(
+                    "UPDATE queue_items SET state = 'queued', attempts = 0, enqueued_at = ?3
+                      WHERE drive_id = ?1 AND state = 'failed'
+                        AND EXISTS (SELECT 1 FROM queue_failures f
+                                     WHERE f.item_id = queue_items.id AND f.code = ?2)",
+                    params![drive_id, code, now_iso8601()],
+                )?
+            }
+            None => {
+                tx.execute(
+                    "DELETE FROM queue_leases WHERE item_id IN
+                       (SELECT id FROM queue_items WHERE drive_id = ?1 AND state = 'failed')",
+                    params![drive_id],
+                )?;
+                tx.execute(
+                    "UPDATE queue_items SET state = 'queued', attempts = 0, enqueued_at = ?2
+                      WHERE drive_id = ?1 AND state = 'failed'",
+                    params![drive_id, now_iso8601()],
+                )?
+            }
+        };
+        tx.commit()?;
+        Ok(revived)
+    }
+
+    /// Why items failed on this drive, most common reason first.
+    ///
+    /// Answers "what does 232 failed actually mean" without making the owner
+    /// read a log file.
+    pub fn failure_reasons(&self, drive_id: &str) -> Result<Vec<FailureReason>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.code, f.message, count(*), max(f.relative_path)
+               FROM queue_failures f
+               JOIN queue_items i ON i.id = f.item_id
+              WHERE i.drive_id = ?1 AND i.state = 'failed'
+              GROUP BY f.code, f.message
+              ORDER BY count(*) DESC
+              LIMIT 20",
+        )?;
+        let rows = stmt.query_map([drive_id], |r| {
+            Ok(FailureReason {
+                code: r.get(0)?,
+                message: r.get(1)?,
+                files: r.get(2)?,
+                example: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Counts of items by state for a drive.
     pub fn stats(&self, drive_id: &str) -> Result<QueueStats> {
         let mut s = QueueStats::default();
@@ -284,6 +364,16 @@ impl<'a> Queue<'a> {
     }
 }
 
+/// One reason files failed, and how many share it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FailureReason {
+    pub code: String,
+    pub message: String,
+    pub files: i64,
+    /// One file that hit this, so the owner can go and look at it.
+    pub example: Option<String>,
+}
+
 /// Snapshot of queue counts.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueueStats {
@@ -303,12 +393,11 @@ impl QueueStats {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_support {
     use super::*;
-    use crate::db::{open_in_memory, SchemaKind};
     use std::path::PathBuf;
 
-    fn df(rel: &str) -> DiscoveredFile {
+    pub fn df(rel: &str) -> DiscoveredFile {
         DiscoveredFile {
             abs_path: PathBuf::from(format!("/root/{rel}")),
             relative_path: rel.to_string(),
@@ -316,6 +405,13 @@ mod tests {
             size_bytes: 10,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::*;
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
 
     #[test]
     fn enqueue_is_idempotent() {
@@ -375,5 +471,124 @@ mod tests {
         let st = q.stats("drv").unwrap();
         assert_eq!(st.failed, 1);
         assert!(st.is_drained());
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::tests_support::*;
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
+
+    /// The case this exists for: AtlasDrive learns to read a file it previously
+    /// could not, and the photographs it already gave up on must come back.
+    #[test]
+    fn reviving_failed_items_puts_them_back_in_the_queue() {
+        let conn = open_in_memory(SchemaKind::Queue).unwrap();
+        let q = Queue::new(&conn);
+        let files = vec![(df("a.tif"), 1), (df("b.tif"), 2), (df("c.jpg"), 3)];
+        q.enqueue("run1", "drv", 2, "root", &files).unwrap();
+
+        // Exhaust one file's attempts the way the pipeline does.
+        for _ in 0..3 {
+            let batch = q.claim_batch("drv", 1, 300, "w1").unwrap();
+            let retryable = batch[0].attempts < 3;
+            q.fail(&batch[0].id, "PROCESS", "decode failed: Memory limit exceeded", retryable)
+                .unwrap();
+        }
+        assert_eq!(q.stats("drv").unwrap().failed, 1, "should be given up on");
+
+        let revived = q.retry_failed("drv", None).unwrap();
+        assert_eq!(revived, 1);
+        let st = q.stats("drv").unwrap();
+        assert_eq!(st.failed, 0);
+        assert_eq!(st.queued, 3);
+
+        // And it is genuinely leasable again, with a fresh attempt count —
+        // otherwise it would fail straight back out on the next batch.
+        let batch = q.claim_batch("drv", 3, 300, "w1").unwrap();
+        assert_eq!(batch.len(), 3);
+        assert!(batch.iter().all(|i| i.attempts == 1), "attempts must have been reset");
+    }
+
+    /// A fix for one problem must not drag unrelated failures back in.
+    #[test]
+    fn only_the_named_failure_code_is_revived() {
+        let conn = open_in_memory(SchemaKind::Queue).unwrap();
+        let q = Queue::new(&conn);
+        q.enqueue("run1", "drv", 2, "root", &[(df("a.tif"), 1), (df("b.jpg"), 2)])
+            .unwrap();
+
+        let batch = q.claim_batch("drv", 2, 300, "w1").unwrap();
+        let (tif, jpg) = if batch[0].relative_path == "a.tif" {
+            (&batch[0], &batch[1])
+        } else {
+            (&batch[1], &batch[0])
+        };
+        q.fail(&tif.id, "DECODE", "Memory limit exceeded", false).unwrap();
+        q.fail(&jpg.id, "MISSING", "file has gone", false).unwrap();
+        assert_eq!(q.stats("drv").unwrap().failed, 2);
+
+        assert_eq!(q.retry_failed("drv", Some("DECODE")).unwrap(), 1);
+        let st = q.stats("drv").unwrap();
+        assert_eq!(st.queued, 1, "only the decode failure comes back");
+        assert_eq!(st.failed, 1, "the missing file stays failed");
+    }
+
+    /// Reviving nothing is not an error, and does not disturb finished work.
+    #[test]
+    fn a_drive_with_no_failures_is_left_alone() {
+        let conn = open_in_memory(SchemaKind::Queue).unwrap();
+        let q = Queue::new(&conn);
+        q.enqueue("run1", "drv", 2, "root", &[(df("a.jpg"), 1)]).unwrap();
+        let batch = q.claim_batch("drv", 1, 300, "w1").unwrap();
+        q.complete(&batch[0].id).unwrap();
+
+        assert_eq!(q.retry_failed("drv", None).unwrap(), 0);
+        let st = q.stats("drv").unwrap();
+        assert_eq!(st.complete, 1, "completed work must not be reopened");
+        assert_eq!(st.queued, 0);
+    }
+
+    /// The owner asked "what do the failed mean". This is the answer, grouped
+    /// so 232 identical decode failures read as one problem, not 232.
+    #[test]
+    fn failure_reasons_group_and_count() {
+        let conn = open_in_memory(SchemaKind::Queue).unwrap();
+        let q = Queue::new(&conn);
+        let files: Vec<_> = (0..4).map(|i| (df(&format!("{i}.tif")), i as i64)).collect();
+        q.enqueue("run1", "drv", 2, "root", &files).unwrap();
+        let batch = q.claim_batch("drv", 4, 300, "w1").unwrap();
+        for item in batch.iter().take(3) {
+            q.fail(&item.id, "PROCESS", "decode failed: Memory limit exceeded", false).unwrap();
+        }
+        q.fail(&batch[3].id, "PROCESS", "file has gone", false).unwrap();
+
+        let reasons = q.failure_reasons("drv").unwrap();
+        assert_eq!(reasons.len(), 2);
+        assert_eq!(reasons[0].files, 3, "most common reason first");
+        assert!(reasons[0].message.contains("Memory limit"));
+        assert!(reasons[0].example.is_some(), "must name a file to go and look at");
+        assert_eq!(reasons[1].files, 1);
+    }
+
+    /// A file that failed and was then revived and completed must not still be
+    /// listed as a reason it is failing.
+    #[test]
+    fn reasons_only_cover_files_that_are_still_failed() {
+        let conn = open_in_memory(SchemaKind::Queue).unwrap();
+        let q = Queue::new(&conn);
+        q.enqueue("run1", "drv", 2, "root", &[(df("a.tif"), 1)]).unwrap();
+        let batch = q.claim_batch("drv", 1, 300, "w1").unwrap();
+        q.fail(&batch[0].id, "PROCESS", "Memory limit exceeded", false).unwrap();
+        assert_eq!(q.failure_reasons("drv").unwrap().len(), 1);
+
+        q.retry_failed("drv", None).unwrap();
+        let batch = q.claim_batch("drv", 1, 300, "w1").unwrap();
+        q.complete(&batch[0].id).unwrap();
+        assert!(
+            q.failure_reasons("drv").unwrap().is_empty(),
+            "a file that now reads is not a failure"
+        );
     }
 }

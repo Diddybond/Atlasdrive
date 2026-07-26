@@ -201,21 +201,51 @@ pub fn drive_contents(conn: &Connection, drive_number: Option<i64>) -> Result<Ve
 /// Person tags are excluded — people belong on the People screen, where naming
 /// them is a deliberate act (D-007), not mixed into a subject list.
 pub fn all_tags(conn: &Connection, limit: usize) -> Result<Vec<TagCount>> {
-    let mut stmt = conn.prepare(
-        "SELECT t.name, count(*) AS n
-           FROM file_tags ft
-           JOIN tags t  ON t.id = ft.tag_id
-           JOIN files f ON f.id = ft.file_id
-          WHERE f.status = 'complete' AND t.tag_type <> 'person'
-          GROUP BY t.name
-          ORDER BY n DESC, t.name ASC
-          LIMIT ?1",
-    )?;
-    let out = stmt
-        .query_map([limit as i64], |r| {
-            Ok(TagCount { tag: r.get(0)?, count: r.get(1)? })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    tags_on_drive(conn, limit, None)
+}
+
+/// The same, narrowed to one drive.
+///
+/// A tag cloud built from every drive is the wrong tool once a drive is
+/// unplugged: it offers subjects the connected disk cannot show. Scoping the
+/// cloud to the selected drive means every chip on screen leads somewhere.
+pub fn tags_on_drive(
+    conn: &Connection,
+    limit: usize,
+    drive_number: Option<i64>,
+) -> Result<Vec<TagCount>> {
+    // The most photographed subjects are chosen first, then shown in
+    // alphabetical order. Selecting alphabetically would cut the list off at
+    // the letter D; ordering the *display* by count makes a specific subject
+    // impossible to find, because its position depends on a number the owner
+    // does not know. Picking by count and showing by name gives both.
+    let sql = format!(
+        "SELECT name, n FROM (
+           SELECT t.name AS name, count(*) AS n
+             FROM file_tags ft
+             JOIN tags t  ON t.id = ft.tag_id
+             JOIN files f ON f.id = ft.file_id
+             JOIN drives d ON d.id = f.drive_id
+            WHERE f.status = 'complete' AND t.tag_type <> 'person'{}
+            GROUP BY t.name
+            ORDER BY n DESC, t.name ASC
+            LIMIT ?1
+         ) ORDER BY name COLLATE NOCASE ASC",
+        match drive_number {
+            Some(_) => " AND d.drive_number = ?2",
+            None => "",
+        }
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let row = |r: &rusqlite::Row| Ok(TagCount { tag: r.get(0)?, count: r.get(1)? });
+    let out = match drive_number {
+        Some(dn) => stmt
+            .query_map(rusqlite::params![limit as i64, dn], row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        None => stmt
+            .query_map(rusqlite::params![limit as i64], row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+    };
     Ok(out)
 }
 
@@ -934,5 +964,185 @@ mod scan_stats_tests {
         assert_eq!(stats.files, 0);
         assert!(stats.by_extension.is_empty());
         assert!(stats.recent.is_empty());
+    }
+}
+
+/// Result of looking for brand names in text already read from photographs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BrandScan {
+    /// Photographs whose text was examined.
+    pub examined: i64,
+    /// Photographs that gained at least one brand tag.
+    pub tagged: i64,
+    /// Brands found, most photographs first.
+    pub brands: Vec<TagCount>,
+}
+
+/// Find brand names in the OCR text already stored for each photograph.
+///
+/// This is a backfill, not a rescan. Every photograph AtlasDrive has indexed
+/// already has its text stored, so brands can be recognised on a drive that is
+/// sitting in a drawer — no original is opened and nothing is re-read.
+///
+/// Safe to run repeatedly: tags are inserted with `INSERT OR IGNORE`, so a
+/// second pass over unchanged text changes nothing.
+pub fn scan_for_brands(conn: &Connection, drive_number: Option<i64>) -> Result<BrandScan> {
+    let now = crate::util::now_iso8601();
+    let mut out = BrandScan::default();
+
+    let sql = format!(
+        "SELECT sa.file_id, sa.ocr_text
+           FROM scene_analysis sa
+           JOIN files f  ON f.id = sa.file_id
+           JOIN drives d ON d.id = f.drive_id
+          WHERE sa.ocr_text IS NOT NULL AND sa.ocr_text <> ''
+            AND f.status = 'complete'{}",
+        match drive_number {
+            Some(_) => " AND d.drive_number = ?1",
+            None => "",
+        }
+    );
+
+    let rows: Vec<(String, String)> = {
+        let mut stmt = conn.prepare(&sql)?;
+        let map = |r: &rusqlite::Row| Ok((r.get(0)?, r.get(1)?));
+        match drive_number {
+            Some(dn) => stmt
+                .query_map([dn], map)?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            None => stmt.query_map([], map)?.collect::<std::result::Result<Vec<_>, _>>()?,
+        }
+    };
+
+    let mut counts: std::collections::BTreeMap<String, i64> = Default::default();
+    let tx = conn.unchecked_transaction()?;
+    for (file_id, text) in rows {
+        out.examined += 1;
+        let hits = crate::ai::brands::detect(&text);
+        if hits.is_empty() {
+            continue;
+        }
+        out.tagged += 1;
+        for hit in hits {
+            let tag_id = crate::util::new_uuid();
+            tx.execute(
+                "INSERT OR IGNORE INTO tags (id, name, tag_type, created_at)
+                 VALUES (?1, ?2, 'automatic', ?3)",
+                rusqlite::params![tag_id, hit.name, now],
+            )?;
+            let real_id: String =
+                tx.query_row("SELECT id FROM tags WHERE name = ?1", [&hit.name], |r| r.get(0))?;
+            tx.execute(
+                "INSERT OR IGNORE INTO file_tags (file_id, tag_id, confidence, source, created_at)
+                 VALUES (?1, ?2, 0.9, 'brand', ?3)",
+                rusqlite::params![file_id, real_id, now],
+            )?;
+            *counts.entry(hit.name).or_default() += 1;
+        }
+    }
+    tx.commit()?;
+
+    out.brands = counts.into_iter().map(|(tag, count)| TagCount { tag, count }).collect();
+    out.brands.sort_by(|a, b| b.count.cmp(&a.count).then(a.tag.cmp(&b.tag)));
+    Ok(out)
+}
+
+#[cfg(test)]
+mod brand_scan_tests {
+    use super::*;
+    use crate::db::{self, SchemaKind};
+
+    fn catalogue_with_text(texts: &[(&str, &str)]) -> Connection {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute(
+            "INSERT INTO drives(id, drive_number, volume_name, status, first_seen_at)
+             VALUES ('d1', 2, 'Vol', 'online', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO roots(id, drive_id, relative_root, created_at)
+             VALUES ('r1','d1','','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        for (fid, text) in texts {
+            conn.execute(
+                "INSERT INTO files(id, drive_id, root_id, relative_path, filename, size_bytes,
+                                   source_mtime_ns, status, created_at, updated_at)
+                 VALUES (?1,'d1','r1',?2,?2,1,1,'complete','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                rusqlite::params![fid, format!("{fid}.jpg")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO scene_analysis(file_id, ocr_text, created_at)
+                 VALUES (?1, ?2, '2026-01-01T00:00:00Z')",
+                rusqlite::params![fid, text],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn finds_brands_in_text_already_read_from_the_photographs() {
+        let conn = catalogue_with_text(&[
+            ("f1", "COCA-COLA and a bottle of PERONI"),
+            ("f2", "Welcome to TESCO Extra"),
+            ("f3", "nothing recognisable here at all"),
+        ]);
+        let report = scan_for_brands(&conn, None).unwrap();
+        assert_eq!(report.examined, 3);
+        assert_eq!(report.tagged, 2, "f3 has no brand in it");
+        let names: Vec<_> = report.brands.iter().map(|b| b.tag.as_str()).collect();
+        assert!(names.contains(&"coca-cola"));
+        assert!(names.contains(&"peroni"));
+        assert!(names.contains(&"tesco"));
+    }
+
+    /// The tags must actually be searchable afterwards, not merely counted in
+    /// a report — the report is the thing most likely to be right while the
+    /// catalogue stays empty.
+    #[test]
+    fn the_brands_land_in_the_catalogue_as_tags() {
+        let conn = catalogue_with_text(&[("f1", "Guinness on tap")]);
+        scan_for_brands(&conn, None).unwrap();
+        let tags = all_tags(&conn, 60).unwrap();
+        assert!(tags.iter().any(|t| t.tag == "guinness" && t.count == 1), "{tags:?}");
+
+        let source: String = conn
+            .query_row(
+                "SELECT ft.source FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+                  WHERE t.name = 'guinness'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "brand", "provenance must say where the tag came from");
+    }
+
+    /// Running it twice must not double-count or duplicate tags: the owner
+    /// will run this after every drive.
+    #[test]
+    fn running_it_again_changes_nothing() {
+        let conn = catalogue_with_text(&[("f1", "ASDA car park")]);
+        let first = scan_for_brands(&conn, None).unwrap();
+        let second = scan_for_brands(&conn, None).unwrap();
+        assert_eq!(first.tagged, second.tagged);
+
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM file_tags", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "a second pass must not add a duplicate row");
+        let tags: i64 = conn.query_row("SELECT count(*) FROM tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(tags, 1, "a second pass must not add a duplicate tag");
+    }
+
+    #[test]
+    fn a_drive_can_be_done_on_its_own() {
+        let conn = catalogue_with_text(&[("f1", "PEPSI MAX")]);
+        assert_eq!(scan_for_brands(&conn, Some(2)).unwrap().examined, 1);
+        // A drive that holds nothing is not an error.
+        assert_eq!(scan_for_brands(&conn, Some(99)).unwrap().examined, 0);
     }
 }

@@ -49,6 +49,12 @@ pub struct SearchFilters {
     /// Restrict to one event, or to every event shot for one client.
     pub event_id: Option<String>,
     pub client: Option<String>,
+    /// Subjects every result must carry, not merely one of.
+    ///
+    /// Picking "wedding" and "child" should mean children at weddings, not
+    /// every wedding plus every child. Each tag narrows; typing the words into
+    /// the query box would have widened.
+    pub tags: Vec<String>,
     pub scanned_only: bool,
     pub limit: usize,
 }
@@ -187,6 +193,15 @@ impl<'a> SearchRepo<'a> {
             }
             if let Some(mut res) = self.load_result(&file_id)? {
                 if !passes_filters(&res, filters) {
+                    continue;
+                }
+                // The visual path comes from the vector index, not from SQL, so
+                // the tag conditions have to be applied to each candidate here
+                // too — otherwise selecting a subject would silently stop
+                // narrowing as soon as a query had visual meaning.
+                if !filters.tags.is_empty()
+                    && !file_has_all_tags(self.conn, &file_id, &filters.tags)?
+                {
                     continue;
                 }
                 res.matched.push("visual".into());
@@ -412,6 +427,18 @@ pub fn resolve_original(conn: &Connection, file_id: &str) -> Result<Option<std::
     Ok(candidates.into_iter().flatten().find(|p| p.exists()))
 }
 
+/// True when the file carries every one of `tags`.
+fn file_has_all_tags(conn: &Connection, file_id: &str, tags: &[String]) -> Result<bool> {
+    let held: i64 = conn.query_row(
+        "SELECT count(DISTINCT t.name) FROM file_tags ft
+           JOIN tags t ON t.id = ft.tag_id
+          WHERE ft.file_id = ?1 AND t.name IN (SELECT value FROM json_each(?2))",
+        rusqlite::params![file_id, serde_json::to_string(tags).unwrap_or_default()],
+        |r| r.get(0),
+    )?;
+    Ok(held as usize == tags.len())
+}
+
 fn passes_filters(res: &SearchResult, filters: &SearchFilters) -> bool {
     if let Some(dn) = filters.drive_number {
         if res.drive_number != dn {
@@ -427,6 +454,14 @@ fn passes_filters(res: &SearchResult, filters: &SearchFilters) -> bool {
 fn push_filter_sql(sql: &mut String, filters: &SearchFilters) {
     if let Some(dn) = filters.drive_number {
         sql.push_str(&format!(" AND d.drive_number = {dn}"));
+    }
+    // One EXISTS per tag, so the conditions intersect rather than union.
+    for tag in &filters.tags {
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+                           WHERE ft.file_id = f.id AND t.name = '{}')",
+            escape_sql(tag)
+        ));
     }
     if filters.online_only {
         sql.push_str(" AND d.status = 'online'");
@@ -553,5 +588,156 @@ mod tests {
         assert_eq!(sanitize_fts("bike images"), "\"bike\" OR \"images\"");
         // Injection characters are stripped; only alphanumerics survive per term.
         assert_eq!(sanitize_fts("a\" OR 1=1 --"), "\"a\" OR \"OR\" OR \"11\"");
+    }
+}
+
+#[cfg(test)]
+mod tag_filter_tests {
+    use super::*;
+    use crate::db::{self, SchemaKind};
+
+    /// Two drives, four photographs, overlapping subjects.
+    fn catalogue() -> rusqlite::Connection {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        for (id, n, vol) in [("d1", 1i64, "Late25A"), ("d2", 2, "NewVolume")] {
+            conn.execute(
+                "INSERT INTO drives(id, drive_number, volume_name, status, first_seen_at)
+                 VALUES (?1,?2,?3,'online','2026-01-01T00:00:00Z')",
+                rusqlite::params![id, n, vol],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO roots(id, drive_id, relative_root, created_at)
+                 VALUES (?1,?2,'','2026-01-01T00:00:00Z')",
+                rusqlite::params![format!("r{id}"), id],
+            )
+            .unwrap();
+        }
+        for (fid, drive) in
+            [("f1", "d1"), ("f2", "d1"), ("f3", "d2"), ("f4", "d2")]
+        {
+            conn.execute(
+                "INSERT INTO files(id, drive_id, root_id, relative_path, filename, size_bytes,
+                                   source_mtime_ns, status, created_at, updated_at)
+                 VALUES (?1,?2,?3,?4,?4,1,1,'complete','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                rusqlite::params![fid, drive, format!("r{drive}"), format!("{fid}.jpg")],
+            )
+            .unwrap();
+        }
+        for (tid, name) in [("t1", "wedding"), ("t2", "child"), ("t3", "landscape")] {
+            conn.execute(
+                "INSERT INTO tags(id, name, tag_type, created_at)
+                 VALUES (?1,?2,'automatic','2026-01-01T00:00:00Z')",
+                rusqlite::params![tid, name],
+            )
+            .unwrap();
+        }
+        // f1: wedding + child   f2: wedding   f3: wedding + child   f4: landscape
+        for (f, t) in [("f1", "t1"), ("f1", "t2"), ("f2", "t1"), ("f3", "t1"), ("f3", "t2"), ("f4", "t3")] {
+            conn.execute(
+                "INSERT INTO file_tags(file_id, tag_id, confidence, source, created_at)
+                 VALUES (?1,?2,0.9,'vision','2026-01-01T00:00:00Z')",
+                rusqlite::params![f, t],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn selecting_two_subjects_narrows_rather_than_widens() {
+        let conn = catalogue();
+        assert!(file_has_all_tags(&conn, "f1", &["wedding".into(), "child".into()]).unwrap());
+        // f2 is a wedding but has no child in it: picking both must exclude it.
+        assert!(!file_has_all_tags(&conn, "f2", &["wedding".into(), "child".into()]).unwrap());
+        assert!(!file_has_all_tags(&conn, "f4", &["wedding".into()]).unwrap());
+    }
+
+    #[test]
+    fn an_empty_selection_excludes_nothing() {
+        let conn = catalogue();
+        for f in ["f1", "f2", "f3", "f4"] {
+            assert!(file_has_all_tags(&conn, f, &[]).unwrap(), "{f} should pass");
+        }
+    }
+
+    /// A subject that does not exist must match nothing, not everything —
+    /// the failure mode where a filter quietly stops filtering.
+    #[test]
+    fn an_unknown_subject_matches_nothing() {
+        let conn = catalogue();
+        for f in ["f1", "f2", "f3", "f4"] {
+            assert!(!file_has_all_tags(&conn, f, &["unicorn".into()]).unwrap());
+        }
+    }
+
+    /// Tags are scoped to the drive being browsed, so every chip on screen
+    /// leads to photographs on the disk that is actually connected.
+    /// The list is chosen by how many photographs each subject has, but shown
+    /// in alphabetical order — a subject you are looking for has to be findable
+    /// without knowing its rank.
+    #[test]
+    fn subjects_are_listed_alphabetically() {
+        let conn = catalogue();
+        let tags = crate::inventory::tags_on_drive(&conn, 60, None).unwrap();
+        let names: Vec<_> = tags.iter().map(|t| t.tag.clone()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "subjects must read alphabetically");
+        // Counts are still real, so a chip still says whether it is worth a click.
+        assert_eq!(tags.iter().find(|t| t.tag == "wedding").unwrap().count, 3);
+    }
+
+    /// The limit must still take the *biggest* subjects, not the first ones in
+    /// the alphabet — otherwise a busy catalogue would only ever offer A to D.
+    #[test]
+    fn the_limit_keeps_the_largest_subjects_not_the_earliest_letters() {
+        let conn = catalogue();
+        let two = crate::inventory::tags_on_drive(&conn, 2, None).unwrap();
+        let names: Vec<_> = two.iter().map(|t| t.tag.as_str()).collect();
+        // wedding (3) and child (2) are the two largest; landscape (1) is not,
+        // despite sorting before "wedding".
+        assert!(names.contains(&"wedding"), "got {names:?}");
+        assert!(names.contains(&"child"), "got {names:?}");
+        assert!(!names.contains(&"landscape"), "got {names:?}");
+        // And what survives is still shown alphabetically.
+        assert_eq!(names, vec!["child", "wedding"]);
+    }
+
+    #[test]
+    fn the_subject_list_follows_the_selected_drive() {
+        let conn = catalogue();
+        let everywhere = crate::inventory::tags_on_drive(&conn, 60, None).unwrap();
+        let names: Vec<_> = everywhere.iter().map(|t| t.tag.as_str()).collect();
+        assert!(names.contains(&"wedding") && names.contains(&"landscape"));
+
+        let drive1 = crate::inventory::tags_on_drive(&conn, 60, Some(1)).unwrap();
+        let d1: Vec<_> = drive1.iter().map(|t| t.tag.as_str()).collect();
+        assert!(d1.contains(&"wedding"));
+        assert!(!d1.contains(&"landscape"), "landscape is only on Drive 2");
+
+        // And the counts are the drive's, not the catalogue's.
+        let wedding = drive1.iter().find(|t| t.tag == "wedding").unwrap();
+        assert_eq!(wedding.count, 2, "f1 and f2, not f3 on the other drive");
+    }
+
+    /// A quoted name must not be able to change the meaning of the query.
+    #[test]
+    fn a_subject_containing_a_quote_is_escaped() {
+        let mut sql = String::new();
+        let filters = SearchFilters {
+            tags: vec!["o'brien' OR 1=1 --".into()],
+            ..Default::default()
+        };
+        push_filter_sql(&mut sql, &filters);
+        assert!(sql.contains("o''brien"), "quote must be doubled: {sql}");
+
+        // And it is still valid SQL that matches nothing.
+        let conn = catalogue();
+        let q = format!(
+            "SELECT count(*) FROM files f JOIN drives d ON d.id=f.drive_id WHERE 1=1{sql}"
+        );
+        let n: i64 = conn.query_row(&q, [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
     }
 }

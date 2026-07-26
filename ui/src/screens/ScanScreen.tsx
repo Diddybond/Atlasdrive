@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { api, Progress, ScanStats } from "../api";
+import { api, FailureReason, Progress, ScanStats } from "../api";
 import { Gauge } from "./scan/Gauge";
 import { Donut } from "./scan/Donut";
 import { AreaChart } from "./scan/AreaChart";
 import { record, ratePerSecond, secondsRemaining, type Sample } from "./scan/rate";
+import { plainReason } from "./scan/reasons";
 
 // The scan screen only ever *observes*. Indexing is started deliberately from
 // the Drives screen or the CLI — visiting this tab must never begin a scan.
@@ -27,6 +28,8 @@ export function ScanScreen() {
   // speeding up.
   const [peakMb, setPeakMb] = useState(0);
   const [mbHistory, setMbHistory] = useState<number[]>([]);
+  const [failures, setFailures] = useState<FailureReason[] | null>(null);
+  const [retryNote, setRetryNote] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,22 +46,27 @@ export function ScanScreen() {
         setRate(ratePerSecond(samples.current, now));
       }
 
-      if (live && live.status === "running") {
+      // The catalogue counts are read whether or not a run is in flight: they
+      // are what the progress bar is measured against, so a finished or paused
+      // scan must still show where the drive stands.
+      if (live) {
         const s = await api.scanStats(live.driveNumber, 12);
         if (cancelled) return;
         setStats(s);
 
-        // Read throughput in megabytes, from bytes of original actually
-        // catalogued. Photographs vary from 2MB to 80MB, so a count per minute
-        // says little about how hard the drive is working.
-        const now = Date.now();
-        byteSamples.current = record(byteSamples.current, now, s.bytes);
-        const bytesPerSec = ratePerSecond(byteSamples.current, now);
-        const mbps = bytesPerSec === null ? null : bytesPerSec / 1_048_576;
-        setMbPerSec(mbps);
-        if (mbps !== null) {
-          setPeakMb((p) => Math.max(p, mbps));
-          setMbHistory((h) => [...h, mbps].slice(-140));
+        if (live.status === "running") {
+          // Read throughput in megabytes, from bytes of original actually
+          // catalogued. Photographs vary from 2MB to 80MB, so a count per
+          // minute says little about how hard the drive is working.
+          const now = Date.now();
+          byteSamples.current = record(byteSamples.current, now, s.bytes);
+          const bytesPerSec = ratePerSecond(byteSamples.current, now);
+          const mbps = bytesPerSec === null ? null : bytesPerSec / 1_048_576;
+          setMbPerSec(mbps);
+          if (mbps !== null) {
+            setPeakMb((p) => Math.max(p, mbps));
+            setMbHistory((h) => [...h, mbps].slice(-140));
+          }
         }
       }
       // Keep polling only while a run is actually in flight.
@@ -91,10 +99,21 @@ export function ScanScreen() {
     );
   }
 
-  const total = progress.filesDiscovered || 1;
-  const pct = Math.min(100, Math.round((progress.filesDone / total) * 100));
+  // Progress is reported for the *drive*, not for this session's run.
+  //
+  // These were mixed before: the bar counted only what this run had done while
+  // the panels below counted the whole catalogue, so a scan resumed after a
+  // restart read "4 / 8,333" above "19.6 GB read" and 432 faces. The owner
+  // leaves a drive running for two days across several sessions; the question
+  // being asked is "is this drive finished", not "how has this process done".
   const running = progress.status === "running";
-  const remaining = Math.max(0, progress.filesDiscovered - progress.filesDone);
+  const catalogued = stats ? stats.files : progress.filesDone;
+  // Still queued is the durable truth about what is left: a resumed run
+  // re-walks files it has already catalogued, so discovered minus done counts
+  // finished work as outstanding.
+  const driveTotal = Math.max(progress.filesDiscovered, catalogued + progress.filesQueued, 1);
+  const pct = Math.min(100, Math.round((catalogued / driveTotal) * 100));
+  const remaining = progress.filesQueued || Math.max(0, driveTotal - catalogued);
   const secondsLeft = secondsRemaining(remaining, rate);
 
   return (
@@ -133,7 +152,7 @@ export function ScanScreen() {
               tone="blue"
               icon="▦"
               label="Photographs found"
-              value={progress.filesDiscovered.toLocaleString()}
+              value={driveTotal.toLocaleString()}
               sub="On this drive"
             />
             <Tile
@@ -193,10 +212,15 @@ export function ScanScreen() {
             </div>
             <div className="bar-legend">
               <span>
-                <strong>{progress.filesDone.toLocaleString()}</strong> / {progress.filesDiscovered.toLocaleString()} photographs
+                <strong>{catalogued.toLocaleString()}</strong> / {driveTotal.toLocaleString()} photographs
+                catalogued
               </span>
               {stats && <span>{gb(stats.bytes)} read</span>}
             </div>
+            <p className="panel-note">
+              {progress.filesDone.toLocaleString()} of those were read in this session, which began{" "}
+              {elapsed(progress.startedAt)} ago.
+            </p>
           </section>
 
           {stats && stats.by_extension.length > 0 && (
@@ -215,7 +239,12 @@ export function ScanScreen() {
                 <div><dt>Faces</dt><dd>{stats.faces.toLocaleString()}</dd></div>
                 <div><dt>Tags applied</dt><dd>{stats.tags.toLocaleString()}</dd></div>
                 <div><dt>People known</dt><dd>{stats.people_recognised.toLocaleString()}</dd></div>
-                <div><dt>Failed</dt><dd className={progress.filesFailed > 0 ? "bad" : undefined}>{progress.filesFailed.toLocaleString()}</dd></div>
+                <div>
+                  <dt>Given up on</dt>
+                  <dd className={progress.filesFailed > 0 ? "bad" : undefined}>
+                    {progress.filesFailed.toLocaleString()}
+                  </dd>
+                </div>
               </dl>
             </section>
 
@@ -238,6 +267,67 @@ export function ScanScreen() {
               </ul>
             </section>
           </div>
+        )}
+
+        {progress.filesFailed > 0 && (
+          <section className="panel">
+            <div className="row-between">
+              <h3>{progress.filesFailed.toLocaleString()} photographs were given up on</h3>
+              <button
+                className="ghost"
+                onClick={() =>
+                  void (failures === null
+                    ? api.scanFailures(progress.driveNumber).then(setFailures)
+                    : setFailures(null))
+                }
+              >
+                {failures === null ? "Show why" : "Hide"}
+              </button>
+            </div>
+            <p className="panel-note">
+              AtlasDrive tried each of these three times and could not read them. They are not in
+              the catalogue. The originals were not touched or changed.
+            </p>
+            {failures !== null && (
+              <>
+                <ul className="failure-list">
+                  {failures.map((f) => (
+                    <li key={f.code + f.message}>
+                      <span className="failure-count">{f.files.toLocaleString()}</span>
+                      <span className="failure-body">
+                        <strong>{plainReason(f.message)}</strong>
+                        {f.example && <span className="failure-example">for example {f.example}</span>}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  className="secondary"
+                  onClick={() =>
+                    void api.retryFailedFiles(progress.driveNumber).then((n) => {
+                      setRetryNote(
+                        n === 0
+                          ? "Nothing to retry."
+                          : `${n.toLocaleString()} put back in the queue. Start the scan again and AtlasDrive will have another go at them.`,
+                      );
+                      setFailures(null);
+                    })
+                  }
+                >
+                  Try these again
+                </button>
+                <p className="panel-note">
+                  Worth doing after AtlasDrive has been updated: a file it could not read before may
+                  read perfectly now. Nothing already catalogued is redone.
+                </p>
+              </>
+            )}
+            {retryNote && (
+              <p className="search-note" role="status">
+                {retryNote}
+              </p>
+            )}
+          </section>
         )}
 
         <footer className="console-foot">

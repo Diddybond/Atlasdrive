@@ -1498,3 +1498,145 @@ the box, which is exactly where the number goes, so the hub and the lower half
 of the needle crossed the digits. The pivot moved up and the box grew taller,
 leaving the dial face below it clear — where a real instrument prints its
 reading.
+
+## D-057 — Relationships are a person property, and "family" is the only one that earns a filter
+
+**Decision.** `people.relationship` — present in the schema since v1 but never
+settable — is now written through `FaceRepo::set_relationship`, lower-cased and
+trimmed, with blank clearing it. The interface exposes exactly one value,
+`family`, as a checkbox in a person's Manage panel and a filter chip beside the
+named-people heading.
+
+**Why.** The archive is a working photographer's back catalogue: the great
+majority of named people are clients and their guests. Family are the handful
+still being searched for in ten years, and they are currently buried in the
+same alphabetical list as everyone photographed at a wedding in 2014. The
+column already existed, so this is wiring rather than new structure.
+
+**Why one label and not a free-text field.** A free-text relationship invites
+"Family", "family", "immediate family" and "Mum's side" to become four
+different filters that each match a quarter of the people they should. Storing
+lower-case and offering a single checkbox keeps the filter honest.
+`relationships()` returns whatever labels are in use with their counts, so a
+second value can be added later without a migration.
+
+## D-058 — Scan progress is reported for the drive, not for the running process
+
+**Decision.** The progress bar, the percentage, "Photographs found", "Left to
+read" and the finish estimate are all computed drive-wide: catalogued files come
+from `scan_stats`, and what remains comes from the durable queue depth
+(`files_queued`). The current run's contribution is stated separately, as a
+sentence, under the bar.
+
+**Why.** These were mixed. The bar counted only the files this process had
+handled while the panels below it counted the whole catalogue, so a scan resumed
+after a restart displayed "4 / 8,333" directly above "19.6 GB read" and 432
+faces found. Both numbers were correct and together they were nonsense.
+
+The owner leaves a single drive indexing for up to two days across several
+sessions and unplugs it when it is finished. The question the screen has to
+answer is "is this drive done", not "how has this process done since it
+started". Discovered-minus-done was also the wrong measure of what is left: a
+resumed run re-walks files it has already catalogued, so it counted finished
+work as outstanding and put the finish time hours out.
+
+## D-059 — The face heading follows the faces, not the filter chip
+
+**Decision.** `ReviewScreen` tracks `shownDrive` — the drive the faces on screen
+actually came from — separately from `driveFilter`, the chip that was clicked,
+and reports "Loading…" until they agree. Each load is guarded by a token so a
+slower earlier reply cannot overwrite a newer one.
+
+**Why.** The chip changes state synchronously; the faces arrive over a round
+trip. Reading the heading off the chip printed "12 faces on Drive 2" above
+Drive 1's faces for as long as the fetch took, which reads as the wrong faces
+rather than as a pending update. Clicking through drives quickly could also
+leave an earlier drive's faces on screen because its reply landed last.
+
+## D-060 — Files given up on can be put back in the queue, and explain themselves
+
+**Decision.** `Queue::retry_failed(drive_id, only_code)` returns permanently
+failed items to `queued` with their attempt count reset;
+`Queue::failure_reasons(drive_id)` groups the reasons with counts and a named
+example. Both are exposed in the interface (a panel under the scan console) and
+on the command line (`atlasdrive drive failures --number N [--retry]`).
+
+**Why.** An item that fails three times is marked `failed` and never leased
+again. That is correct when the file is genuinely unreadable and wrong when the
+reason it failed has since been fixed in AtlasDrive itself — and there was no
+way back. Drive 2 had **509 photographs** in exactly that state, every one a
+large 16-bit TIFF failing with "Memory limit exceeded", which D-055's decode fix
+now reads without complaint. Without this they would have stayed out of the
+catalogue permanently, and nothing on screen would ever have suggested they were
+missing. A catalogue with a silent hole in it is worse than one that says it is
+incomplete.
+
+`only_code` exists so a fix for one class of problem does not also revive files
+that failed for unrelated reasons — a file that has genuinely gone from the
+drive should stay failed.
+
+**Why the reasons are rewritten in plain language.** The owner asked, of a
+number on screen, "what do the failed mean". "decode failed: Memory limit
+exceeded" is true and useless. `plainReason` maps each known error to what it
+means for the photographs and what to do about it, and passes anything
+unrecognised through untouched — a confident wrong explanation is worse than a
+technical one. It is a pure function with its own tests, because the recurring
+defect in this project has been logic that lives only inside a component and is
+never asserted against.
+
+## D-061 — Brand tags come from text AtlasDrive read, never from pixels
+
+**Decision.** Brands are recognised by matching a fixed lexicon against the OCR
+text Vision already extracts, and tagged with `source = 'brand'`. There is no
+logo classifier. The interface states the provenance plainly: "Brand names come
+from text AtlasDrive read in the picture — a bottle, a shop front, a van —
+never guessed from the image."
+
+**Why not visual logo recognition.** Apple Vision has no logo classifier, and
+inferring one from image features would produce confident nonsense — a red
+circle becoming Coca-Cola. A brand tag would then be a guess dressed as a fact,
+and the owner would have no way to tell which was which. Text is the opposite:
+if AtlasDrive says a photograph contains "Guinness", the word is in the picture
+and can be checked.
+
+**Why a closed lexicon and not "any capitalised word".** OCR of a wedding is
+full of proper nouns — place cards, street signs, hymn titles, the couple's
+names. Tagging all of them as brands would bury the real ones. A fixed list is
+smaller than the truth, but every entry in it is right.
+
+**The capitalisation rule.** Names that are also ordinary English words are
+accepted only when the photograph shows them in capitals, which is how signage
+and labels write them and is not how prose does. This is not theoretical: the
+first run over the real catalogue tagged "Next Collection Time" on a wedding
+post box as the retailer Next, and "THE THREE FISHES" — a pub — as the mobile
+network Three. Names whose everyday meaning swamps the brand entirely (next,
+three, seat, gap, mini, bolt, corona, iceland, vans, beats) are not in the
+lexicon at all, because no capitalisation rule can rescue them. After the fix
+the same catalogue produced 11 tagged photographs, all bar bottles and signage.
+
+**Why a backfill and not a rescan.** Every indexed photograph already has its
+text stored, so brands can be found on drives sitting in a drawer. Nothing is
+re-read and no original is opened. The pass is idempotent, so it is safe to run
+after every drive.
+
+## D-062 — Subjects and drives narrow a search; subjects are listed alphabetically
+
+**Decision.** The search screen carries a drive selector and a multi-select
+subject list. Selected subjects intersect (`AND`, one `EXISTS` per tag), applied
+in SQL and again on the vector path so a visually-meaningful query does not
+silently stop narrowing. The subject list is scoped to the selected drive, and
+changing drive clears the selection.
+
+**Why intersect rather than union.** Picking a second subject is a request to
+see fewer photographs. Typing "wedding child" into the box widens; clicking two
+chips must narrow, or the control is doing the opposite of what it looks like.
+
+**Why the list is alphabetical but chosen by count.** The most photographed
+subjects are selected first, then displayed by name. Selecting alphabetically
+would cut the list off around the letter D; ordering the display by count makes
+a specific subject impossible to find, because its position depends on a number
+the owner does not know. Picking by count and showing by name gives both.
+
+**Why changing drive clears the subjects.** They were picked from a list scoped
+to the previous drive. Carrying them across would search the new drive for
+something it may not contain and return nothing, with no visible cause.

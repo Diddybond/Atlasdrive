@@ -48,8 +48,52 @@ pub fn open_rgb(abs: &Path, scratch_dir: &Path) -> Result<RgbImage> {
     if needs_system_decoder(abs) {
         return open_via_system_decoder(abs, scratch_dir);
     }
-    let decoded =
-        image::open(abs).map_err(|e| Error::Other(format!("decode failed: {e}")))?;
+
+    match open_with_generous_limits(abs) {
+        Ok(img) => Ok(img),
+        Err(first) => {
+            // Anything the Rust decoder cannot manage is handed to ImageIO
+            // before being called a failure.
+            //
+            // This is not hypothetical. A real archive scan failed 221
+            // photographs with "Memory limit exceeded", every one of them a
+            // flattened 16-bit TIFF — 7360 x 4912 at 16 bits is about 207MB
+            // once decoded, past what the `image` crate will allocate by
+            // default. macOS reads them without complaint, and the file is a
+            // perfectly good photograph. Treating a decoder's limitation as the
+            // photograph's fault leaves silent holes in the catalogue.
+            match open_via_system_decoder(abs, scratch_dir) {
+                Ok(img) => Ok(img),
+                // Report the original failure: it describes the format problem,
+                // whereas the fallback's error is usually just "sips failed".
+                Err(_) => Err(first),
+            }
+        }
+    }
+}
+
+/// Decode with limits sized for photographs rather than for untrusted input.
+///
+/// The crate's defaults are chosen to make a malicious image safe to open. Every
+/// file here came off the owner's own drive and has already been walked,
+/// stat-ed and hashed, so the threat model is different — and a professional
+/// archive is full of images that exceed those defaults honestly.
+fn open_with_generous_limits(abs: &Path) -> Result<RgbImage> {
+    let mut limits = image::Limits::default();
+    // 1GB decoded: comfortably above a 16-bit 50-megapixel frame, and still a
+    // bound rather than no bound at all.
+    limits.max_alloc = Some(1024 * 1024 * 1024);
+    limits.max_image_width = None;
+    limits.max_image_height = None;
+
+    let mut reader = image::ImageReader::open(abs)
+        .map_err(|e| Error::Other(format!("decode failed: {e}")))?
+        .with_guessed_format()
+        .map_err(|e| Error::Other(format!("decode failed: {e}")))?;
+    reader.limits(limits);
+    let decoded = reader
+        .decode()
+        .map_err(|e| Error::Other(format!("decode failed: {e}")))?;
     Ok(decoded.to_rgb8())
 }
 
@@ -165,5 +209,75 @@ mod tests {
             .map(|d| d.filter_map(|e| e.ok()).collect())
             .unwrap_or_default();
         assert!(leftovers.is_empty(), "scratch dir should be empty: {leftovers:?}");
+    }
+}
+
+#[cfg(test)]
+mod large_image_tests {
+    use super::*;
+
+    /// A 16-bit TIFF larger than the decoder's default allocation limit.
+    ///
+    /// This is the exact shape that failed 221 photographs on a real archive:
+    /// 7360 x 4912 at 16 bits is roughly 207MB decoded, and the `image` crate
+    /// refuses that by default. The fixture is built with `sips` so the test
+    /// proves the real pipeline rather than asserting against a checked-in blob.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn decodes_a_tiff_past_the_default_memory_limit() {
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Big enough to exceed the crate's default allocation, small enough
+        // that building it does not dominate the suite.
+        let (w, h) = (4200u32, 3200u32);
+        let png = dir.path().join("src.png");
+        image::RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8])
+        })
+        .save(&png)
+        .unwrap();
+
+        let tiff = dir.path().join("big.tif");
+        let made = Command::new("/usr/bin/sips")
+            .args(["-s", "format", "tiff"])
+            .arg(&png)
+            .arg("--out")
+            .arg(&tiff)
+            .output()
+            .expect("sips must exist on macOS");
+        assert!(made.status.success(), "could not build a TIFF fixture");
+
+        // The default limits are what rejected these photographs.
+        let mut strict = image::ImageReader::open(&tiff).unwrap();
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(16 * 1024 * 1024);
+        strict.limits(limits);
+        assert!(
+            strict.decode().is_err(),
+            "fixture must be large enough to trip a tight limit, or it proves nothing"
+        );
+
+        // The pipeline reads it.
+        let img = open_rgb(&tiff, &dir.path().join("scratch")).unwrap();
+        assert_eq!(img.dimensions(), (w, h));
+
+        // And the original is untouched, as with every other read.
+        let before = std::fs::metadata(&tiff).unwrap();
+        open_rgb(&tiff, &dir.path().join("scratch")).unwrap();
+        let after = std::fs::metadata(&tiff).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+    }
+
+    /// A file that is genuinely not an image must still fail, and say so —
+    /// the fallback must not turn every error into a silent success.
+    #[test]
+    fn a_file_that_is_not_an_image_still_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.jpg");
+        std::fs::write(&path, b"this is plainly not a photograph").unwrap();
+        let err = open_rgb(&path, &dir.path().join("scratch")).unwrap_err().to_string();
+        assert!(err.contains("decode failed"), "unhelpful error: {err}");
     }
 }

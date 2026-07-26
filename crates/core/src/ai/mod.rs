@@ -20,6 +20,7 @@
 //!   * **Cancellation & background friendliness.** A [`CancelToken`] threads
 //!     through long operations; the pipeline supplies queuing/resume.
 
+pub mod brands;
 pub mod local;
 pub mod text;
 #[cfg(target_os = "macos")]

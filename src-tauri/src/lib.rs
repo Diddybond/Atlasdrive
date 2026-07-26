@@ -564,6 +564,28 @@ fn rescan_drive(state: State<AppState>, drive_number: i64) -> Result<String, Str
     Ok(format!("Looking for new photographs in {root}."))
 }
 
+/// Mark how a person relates to the owner — "family" being the one that matters.
+#[tauri::command]
+fn set_person_relationship(
+    state: State<AppState>,
+    person_id: String,
+    relationship: Option<String>,
+) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive)
+        .set_relationship(&person_id, relationship.as_deref())
+        .map_err(map_err)
+}
+
+/// Every relationship in use, with how many people carry it.
+#[tauri::command]
+fn person_relationships(state: State<AppState>) -> Result<Vec<(String, i64)>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    faces::FaceRepo::new(&archive).relationships().map_err(map_err)
+}
+
 /// Everyone the user has named, and how established each is.
 #[tauri::command]
 fn list_people(state: State<AppState>) -> Result<Vec<faces::NamedPerson>, String> {
@@ -608,10 +630,12 @@ fn rename_drive(
 fn catalogue_tags(
     state: State<AppState>,
     limit: Option<usize>,
+    drive_number: Option<i64>,
 ) -> Result<Vec<family_archive_core::inventory::TagCount>, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
-    family_archive_core::inventory::all_tags(&archive, limit.unwrap_or(60)).map_err(map_err)
+    family_archive_core::inventory::tags_on_drive(&archive, limit.unwrap_or(60), drive_number)
+        .map_err(map_err)
 }
 
 /// What is stored on each drive — answerable with every drive unplugged.
@@ -662,6 +686,8 @@ fn search_catalogue(
     // Restrict to one event, or to every shoot for one client.
     event_id: Option<String>,
     client: Option<String>,
+    // Subjects every result must carry. Each one narrows the search.
+    tags: Option<Vec<String>>,
 ) -> Result<SearchResponse, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
@@ -677,6 +703,7 @@ fn search_catalogue(
         include_offline,
         event_id,
         client,
+        tags: tags.unwrap_or_default(),
         limit: 100,
         ..Default::default()
     };
@@ -830,7 +857,21 @@ fn is_indexing(state: State<AppState>) -> Result<bool, String> {
 #[tauri::command]
 fn get_progress(state: State<AppState>) -> Result<Option<Progress>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    Progress::load(&paths).map_err(map_err)
+    let mut progress = Progress::load(&paths).map_err(map_err)?;
+
+    // A run that was killed rather than cancelled leaves "running" on disk,
+    // because nothing got the chance to write anything else. Reconciling it
+    // against whether a run is actually in flight is the difference between a
+    // dashboard that reports the world and one that reports a stale file: the
+    // owner would otherwise open the app to a live pulse, a read speed and
+    // "Reading photographs from this drive" with nothing running at all.
+    if let Some(p) = progress.as_mut() {
+        let in_flight = state.running.lock().unwrap().is_some();
+        if p.status == "running" && !in_flight {
+            p.status = "interrupted".to_string();
+        }
+    }
+    Ok(progress)
 }
 
 #[tauri::command]
@@ -1074,6 +1115,59 @@ fn scan_stats(
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
     family_archive_core::inventory::scan_stats(&archive, drive_number, recent.unwrap_or(12))
+        .map_err(map_err)
+}
+
+/// Look for brand names in the text already read from the photographs.
+///
+/// A backfill rather than a rescan: no original is opened, so it works with
+/// every drive unplugged.
+#[tauri::command]
+fn find_brands(
+    state: State<AppState>,
+    drive_number: Option<i64>,
+) -> Result<family_archive_core::inventory::BrandScan, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::inventory::scan_for_brands(&archive, drive_number).map_err(map_err)
+}
+
+/// Why files on this drive were given up on, most common reason first.
+#[tauri::command]
+fn scan_failures(
+    state: State<AppState>,
+    drive_number: i64,
+) -> Result<Vec<family_archive_core::queue::FailureReason>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let drive_id: String = archive
+        .query_row("SELECT id FROM drives WHERE drive_number=?1", [drive_number], |r| r.get(0))
+        .map_err(|_| format!("no drive numbered {drive_number}"))?;
+    let queue = open_queue(&paths)?;
+    family_archive_core::queue::Queue::new(&queue)
+        .failure_reasons(&drive_id)
+        .map_err(map_err)
+}
+
+/// Put files that were given up on back in the queue.
+///
+/// Needed whenever AtlasDrive learns to read something it previously could
+/// not: without it those photographs stay out of the catalogue permanently,
+/// because an item that failed three times is never leased again.
+#[tauri::command]
+fn retry_failed_files(
+    state: State<AppState>,
+    drive_number: i64,
+    code: Option<String>,
+) -> Result<usize, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    let drive_id: String = archive
+        .query_row("SELECT id FROM drives WHERE drive_number=?1", [drive_number], |r| r.get(0))
+        .map_err(|_| format!("no drive numbered {drive_number}"))?;
+    let queue = open_queue(&paths)?;
+    family_archive_core::queue::Queue::new(&queue)
+        .retry_failed(&drive_id, code.as_deref())
         .map_err(map_err)
 }
 
@@ -1375,6 +1469,9 @@ pub fn run() {
             likely_photo_folders,
             drive_coverage,
             scan_stats,
+            scan_failures,
+            find_brands,
+            retry_failed_files,
             estimate_index,
             similar_photographs,
             propose_events,
@@ -1413,6 +1510,8 @@ pub fn run() {
             drive_contents,
             tag_face_cluster,
             list_people,
+            set_person_relationship,
+            person_relationships,
             reject_face_cluster,
             rename_drive,
             face_gallery,
