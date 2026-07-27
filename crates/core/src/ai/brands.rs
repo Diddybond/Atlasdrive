@@ -122,7 +122,7 @@ pub fn detect(text: &str) -> Vec<BrandHit> {
     }
 
     // Longest first, so a phrase claims its words before its parts can.
-    let mut lexicon: Vec<&str> = BRAND_LEXICON.iter().copied().collect();
+    let mut lexicon: Vec<&str> = BRAND_LEXICON.to_vec();
     lexicon.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     let mut found: BTreeSet<String> = BTreeSet::new();
@@ -247,8 +247,7 @@ fn whole_word_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
 fn canonical(brand: &str) -> String {
     let cleaned = brand
         .replace('&', "and")
-        .replace('\u{2019}', "")
-        .replace('\'', "")
+        .replace(['\u{2019}', '\''], "")
         .to_lowercase();
     cleaned.split_whitespace().collect::<Vec<_>>().join("-")
 }

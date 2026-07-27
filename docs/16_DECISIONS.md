@@ -1892,3 +1892,39 @@ nothing. The interface says so rather than leaving the owner to wonder.
 work on. It now names the drive being read, offers Stop against that drive, and
 tells the other drives which one is holding things up instead of presenting a
 button that would fail.
+
+## D-073 — A file that moved is the same photograph
+
+**Decision.** Before decoding, the pipeline computes the content hash and looks
+for a `missing` row on the same drive with the same hash. Finding one, it
+adopts the row — new path, status back to `complete` — and skips analysis
+entirely. Everything keyed by file id (faces, confirmed names, tags,
+embeddings, thumbnails, user-corrected dates) simply remains true.
+
+**Why.** Re-scanning a drive from a different root records every path afresh.
+Drive 1 was first scanned from one wedding folder and then from the drive root,
+so 758 photographs reappeared under longer paths while their old rows went
+missing. Without adoption the same pictures would be decoded and analysed
+again, their faces would exist twice — once on rows Reveal-in-Finder can never
+resolve — and names the owner had confirmed would stay attached to the ghosts
+rather than the photographs. Content hash is already identity for bit-rot
+detection and drive comparison; this uses it for the third thing identity is
+for. A test proves a user-confirmed date survives the move and that a merely
+similar new file is not mistaken for a moved one.
+
+## Final audit (2026-07-27)
+
+Requested as "one final, thorough audit". Findings, all fixed and tested:
+
+1. **Phantom photograph on idle drives** — the divide-by-zero floor in the scan
+   console leaked into the display, so an unscanned drive reported
+   "Photographs found: 1, 0 / 1 catalogued". The floor now lives only in the
+   divisor, and an idle drive no longer claims to be "Estimating" a finish.
+2. **Relocated files re-analysed as strangers** — D-073 above.
+3. **Stale guidance** — "start a scan from Scan activity" predated the scan
+   button on the drive card; it now names the button that exists.
+4. **Clippy** — two style warnings, fixed; none were defects.
+
+Verified clean at audit end: 307 Rust tests, 70 UI tests, typecheck; Drive 3
+scanning live through the app (0 failures); catalogue 213MB and growing at
+~43KB per photograph; backups 0.5GB on the Myers Creative Drive.

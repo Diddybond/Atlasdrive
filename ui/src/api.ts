@@ -812,7 +812,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve([
         { drive_number: 7, drive_name: "Holidays 2004-2011", discovered: 15000, complete: 11000, outstanding: 4000, failed: 0, last_outcome: "cancelled", last_scan_at: "2026-07-20", can_unplug: false, summary: "11,000 of 15,000 indexed (73%). 4,000 still to do — leave this drive connected." },
         { drive_number: 14, drive_name: "AtlasDrive A", discovered: 4213, complete: 4213, outstanding: 0, failed: 0, last_outcome: "ok", last_scan_at: "2026-07-24", can_unplug: true, summary: "Finished — all 4,213 photographs indexed. Safe to unplug." },
-        { drive_number: 22, drive_name: "Scanned prints", discovered: 0, complete: 0, outstanding: 0, failed: 0, last_outcome: null, last_scan_at: null, can_unplug: false, summary: "Never indexed — start a scan from Scan activity." },
+        { drive_number: 22, drive_name: "Scanned prints", discovered: 0, complete: 0, outstanding: 0, failed: 0, last_outcome: null, last_scan_at: null, can_unplug: false, summary: "Never indexed — press Scan this drive to start." },
       ] as unknown as T);
     case "estimate_index": {
       const files = 14320;

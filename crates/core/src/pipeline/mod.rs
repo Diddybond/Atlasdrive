@@ -19,7 +19,7 @@ pub mod thumbnail;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::ai::{Capability, CancelToken, EngineRegistry};
 use crate::config::{AppPaths, Config};
@@ -525,6 +525,53 @@ impl<'a> Pipeline<'a> {
         Ok(summary)
     }
 
+    /// Re-point a `missing` catalogue row at a file that has reappeared
+    /// elsewhere on the same drive. Returns the new relative path when a row
+    /// was adopted, `None` when this really is a new photograph.
+    fn adopt_relocated_file(
+        &self,
+        drive: &crate::drive::Drive,
+        item: &QueueItem,
+        snap: &SourceSnapshot,
+        content_hash: &str,
+    ) -> Result<Option<String>> {
+        let prior: Option<String> = self
+            .archive
+            .query_row(
+                "SELECT id FROM files
+                  WHERE drive_id = ?1 AND content_hash = ?2 AND status = 'missing'
+                  LIMIT 1",
+                params![drive.id, content_hash],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(file_id) = prior else { return Ok(None) };
+
+        let now = now_iso8601();
+        self.archive.execute(
+            "UPDATE files
+                SET relative_path = ?2, filename = ?3, status = 'complete',
+                    size_bytes = ?4, source_mtime_ns = ?5, updated_at = ?6
+              WHERE id = ?1",
+            params![
+                file_id,
+                item.relative_path,
+                std::path::Path::new(&item.relative_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| item.relative_path.clone()),
+                snap.size_bytes as i64,
+                snap.mtime_ns,
+                now,
+            ],
+        )?;
+        self.logger
+            .info("file_relocated")
+            .field("path", item.relative_path.clone())
+            .emit_best_effort();
+        Ok(Some(item.relative_path.clone()))
+    }
+
     /// Process one file: full read-only analysis and atomic commit.
     /// Returns the relative path on success.
     fn process_file(
@@ -543,14 +590,40 @@ impl<'a> Pipeline<'a> {
         // 1. Pre-processing integrity snapshot.
         let snap = SourceSnapshot::capture(&abs)?;
 
-        // 2. Decode read-only. Unsupported/broken decode is a recoverable error.
+        // 2. Content hash — before decoding, because it can settle whether this
+        //    file needs analysing at all.
+        let content_hash = integrity::content_hash(&abs)?;
+
+        // A file that moved is the same photograph.
+        //
+        // Re-scanning a drive from a different root records every path afresh,
+        // so a photograph first catalogued as `edits/x.jpg` reappears as
+        // `Aimee and Kent/edits/x.jpg`: the old row goes `missing` and the new
+        // path arrives as a stranger. Without this, the same picture would be
+        // decoded and analysed again, and — worse — its faces would exist
+        // twice, once on a row Reveal-in-Finder can never find. Names the
+        // owner had confirmed stay attached to the old faces, so the doubles
+        // would even disagree about who is in them. 758 photographs on a real
+        // drive sat in exactly this state.
+        //
+        // Content hash is identity here, as it already is for bit-rot
+        // detection and drive comparison. Adoption re-points the existing row
+        // at the new path; everything keyed by file id — faces, names, tags,
+        // embeddings, thumbnails, dates — simply remains true.
+        if !dry_run {
+            if let Some(adopted) =
+                self.adopt_relocated_file(drive, item, &snap, &content_hash)?
+            {
+                return Ok(adopted);
+            }
+        }
+
+        // 3. Decode read-only. Unsupported/broken decode is a recoverable error.
         //    HEIC/HEIF go through the macOS system decoder (see `decode`).
         let _ro = integrity::open_readonly(&abs)?; // prove read-only open works
         let rgb = decode::open_rgb(&abs, &self.paths.cache_dir().join("decode"))?;
         let (w, h) = (rgb.width(), rgb.height());
 
-        // 3. Content + perceptual hashes.
-        let content_hash = integrity::content_hash(&abs)?;
         let phash = phash::dhash(&rgb);
 
         // 4. Metadata.

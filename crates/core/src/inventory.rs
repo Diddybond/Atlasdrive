@@ -499,7 +499,7 @@ impl DriveCoverage {
         let never_scanned = self.discovered == 0 && self.complete == 0;
         self.can_unplug = !never_scanned && !self.is_incomplete();
         self.summary = if never_scanned {
-            "Never indexed — start a scan from Scan activity.".to_string()
+            "Never indexed — press Scan this drive to start.".to_string()
         } else if self.is_incomplete() {
             format!(
                 "{} of {} indexed ({:.0}%). {} still to do — leave this drive connected.",

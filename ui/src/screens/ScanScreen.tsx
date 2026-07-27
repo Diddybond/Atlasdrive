@@ -163,8 +163,12 @@ export function ScanScreen() {
   // finished work as outstanding.
   const queued = isLive ? progress.filesQueued : 0;
   const discovered = isLive ? progress.filesDiscovered : 0;
-  const driveTotal = Math.max(discovered, catalogued + queued, 1);
-  const pct = Math.min(100, Math.round((catalogued / driveTotal) * 100));
+  const driveTotal = Math.max(discovered, catalogued + queued);
+  // The floor lives only in the divisor. It used to be part of driveTotal
+  // itself, so a drive with nothing catalogued yet reported "Photographs
+  // found: 1" and "0 / 1 catalogued" — a phantom photograph invented to avoid
+  // dividing by zero.
+  const pct = Math.min(100, Math.round((catalogued / Math.max(driveTotal, 1)) * 100));
   const remaining = queued || Math.max(0, driveTotal - catalogued);
   const secondsLeft = secondsRemaining(remaining, rate);
 
@@ -262,7 +266,13 @@ export function ScanScreen() {
               icon="◎"
               label="Finishes in"
               value={running && secondsLeft !== null ? duration(secondsLeft) : "—"}
-              sub={running && secondsLeft !== null ? finishTime(secondsLeft) : "Estimating"}
+              sub={
+                running
+                  ? secondsLeft !== null
+                    ? finishTime(secondsLeft)
+                    : "Estimating"
+                  : "Not being read now"
+              }
             />
             <Tile
               tone="amber"

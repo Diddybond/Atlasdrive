@@ -1089,3 +1089,98 @@ fn walk(root: &Path) -> Vec<(std::path::PathBuf, std::time::SystemTime)> {
     }
     out
 }
+
+/// A file that moved is the same photograph, and must be adopted rather than
+/// re-analysed. The real case: a drive first scanned from one wedding folder,
+/// then rescanned from the drive root — 758 photographs reappeared under
+/// longer paths, went missing under their old ones, and everything the owner
+/// had confirmed about them (names above all) hung off the old rows.
+#[test]
+fn a_moved_file_is_adopted_with_everything_it_carries() {
+    let (h, opts) = setup(no_disk_floor());
+    let p = pipeline(&h);
+    p.run(&opts).unwrap();
+
+    let old_id: String = h
+        .archive
+        .query_row("SELECT id FROM files WHERE filename='xmas_1987.png'", [], |r| r.get(0))
+        .unwrap();
+    // Something user-confirmed hangs off the old row, standing in for names,
+    // tags and dates. Adoption must carry it; re-analysis would orphan it.
+    h.archive
+        .execute(
+            "UPDATE date_estimates
+                SET earliest_date='1987-12-25', latest_date='1987-12-25',
+                    is_user_confirmed=1
+              WHERE file_id=?1",
+            [&old_id],
+        )
+        .unwrap();
+
+    // The photograph moves to a new folder on the same drive.
+    let from = h.drive_dir.join("family/xmas_1987.png");
+    let to_dir = h.drive_dir.join("sorted/1987");
+    std::fs::create_dir_all(&to_dir).unwrap();
+    std::fs::rename(&from, to_dir.join("xmas_1987.png")).unwrap();
+
+    // One rescan marks it missing; the next finds it at the new path.
+    p.run(&opts).unwrap();
+    p.run(&opts).unwrap();
+
+    // Same row, new address — not a stranger with a fresh id.
+    let (id, rel, status): (String, String, String) = h
+        .archive
+        .query_row(
+            "SELECT id, relative_path, status FROM files WHERE filename='xmas_1987.png'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(id, old_id, "adoption must keep the row, or names and tags are orphaned");
+    assert_eq!(rel, "sorted/1987/xmas_1987.png");
+    assert_eq!(status, "complete");
+
+    // No duplicate row survives, and the confirmed date rode along.
+    let rows: i64 = h
+        .archive
+        .query_row("SELECT count(*) FROM files WHERE filename='xmas_1987.png'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+    let confirmed: i64 = h
+        .archive
+        .query_row(
+            "SELECT count(*) FROM date_estimates WHERE file_id=?1 AND is_user_confirmed=1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(confirmed, 1, "what the owner confirmed must survive the move");
+}
+
+/// Adoption must not fire for a file that merely looks similar — only an
+/// identical file (same content hash) on the same drive is the same photograph.
+#[test]
+fn a_genuinely_new_file_is_not_mistaken_for_a_moved_one() {
+    let (h, opts) = setup(no_disk_floor());
+    let p = pipeline(&h);
+    p.run(&opts).unwrap();
+
+    // Remove one file, and add a *different* photograph elsewhere.
+    std::fs::remove_file(h.drive_dir.join("family/xmas_1987.png")).unwrap();
+    let new_dir = h.drive_dir.join("new");
+    std::fs::create_dir_all(&new_dir).unwrap();
+    write_photo(&new_dir.join("different.png"), [7, 200, 40], 64, 48);
+
+    p.run(&opts).unwrap();
+
+    let missing: i64 = h
+        .archive
+        .query_row("SELECT count(*) FROM files WHERE status='missing'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(missing, 1, "the vanished file stays missing");
+    let complete: i64 = h
+        .archive
+        .query_row("SELECT count(*) FROM files WHERE status='complete'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(complete, 3, "two originals plus the genuinely new photograph");
+}
