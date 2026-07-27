@@ -27,6 +27,56 @@ pub struct ImageMetadata {
     pub raw: std::collections::BTreeMap<String, String>,
 }
 
+/// Longest EXIF value kept verbatim.
+///
+/// Any genuine, readable EXIF value — a camera model, an exposure, a date — is
+/// a few dozen characters. Anything longer is a binary field being rendered as
+/// text, and it is the *rendering* that is enormous, not the information.
+const MAX_TAG_VALUE_CHARS: usize = 256;
+
+/// Hard ceiling on the whole raw dump for one photograph.
+const MAX_RAW_TOTAL_CHARS: usize = 32 * 1024;
+
+/// Record one EXIF field, refusing to let a binary blob in.
+///
+/// This is the fix for the single worst defect AtlasDrive has had. The raw dump
+/// was built by calling `display_value()` on every EXIF field and keeping the
+/// result whole. For scalar tags that is a few characters. For binary ones —
+/// MakerNote, colour matrices, embedded previews — it renders every byte as
+/// text, so a tag holding a 200MB payload became a 600MB string.
+///
+/// On a real catalogue of 8,486 photographs this produced **38.08 GB** of
+/// `raw_json`, averaging 4.6MB per photograph with one row at 865MB, against
+/// 0.07GB for every face crop and 0.03GB for every embedding combined. It also
+/// caused the "string or blob too big" failures: a row past SQLite's 1GB limit
+/// cannot be stored at all, so those photographs were dropped from the
+/// catalogue entirely.
+///
+/// What is kept is the fact that the tag was present and how large it was,
+/// which is what provenance actually needs. What is discarded is a
+/// hex-rendering of bytes no part of AtlasDrive reads.
+fn record_raw(
+    raw: &mut std::collections::BTreeMap<String, String>,
+    total: &mut usize,
+    tag: &str,
+    val: &str,
+) {
+    if *total >= MAX_RAW_TOTAL_CHARS {
+        raw.insert(
+            "_note".into(),
+            format!("further tags omitted after {MAX_RAW_TOTAL_CHARS} characters"),
+        );
+        return;
+    }
+    let kept = if val.len() > MAX_TAG_VALUE_CHARS {
+        format!("[{} characters omitted — binary or oversized field]", val.len())
+    } else {
+        val.to_string()
+    };
+    *total += tag.len() + kept.len();
+    raw.insert(tag.to_string(), kept);
+}
+
 /// Read EXIF metadata from a file strictly read-only. Missing or malformed EXIF
 /// is not an error: it returns whatever could be parsed.
 pub fn extract(path: &Path, decoded_dims: Option<(u32, u32)>) -> ImageMetadata {
@@ -47,10 +97,11 @@ pub fn extract(path: &Path, decoded_dims: Option<(u32, u32)>) -> ImageMetadata {
         Err(_) => return md, // no/broken EXIF is fine
     };
 
+    let mut raw_total = 0usize;
     for field in exif.fields() {
         let tag = field.tag.to_string();
         let val = field.display_value().to_string();
-        md.raw.insert(tag.clone(), val.clone());
+        record_raw(&mut md.raw, &mut raw_total, &tag, &val);
         match field.tag {
             exif::Tag::Make => md.camera_make = Some(clean(&val)),
             exif::Tag::Model => md.camera_model = Some(clean(&val)),
@@ -119,5 +170,77 @@ mod tests {
         assert_eq!(md.width, Some(10));
         assert_eq!(md.height, Some(20));
         assert!(md.exif_capture_date.is_none());
+    }
+}
+
+#[cfg(test)]
+mod raw_size_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn record(pairs: &[(&str, String)]) -> BTreeMap<String, String> {
+        let mut raw = BTreeMap::new();
+        let mut total = 0usize;
+        for (tag, val) in pairs {
+            record_raw(&mut raw, &mut total, tag, val);
+        }
+        raw
+    }
+
+    /// The defect, at the scale it actually occurred: one binary tag rendered
+    /// as 600MB of text. It must not reach the catalogue, and the fact that it
+    /// existed must not be lost either.
+    #[test]
+    fn a_binary_tag_is_recorded_but_not_stored() {
+        let huge = "0x00, ".repeat(2_000_000); // ~12MB, same shape as the real one
+        let raw = record(&[("MakerNote", huge.clone())]);
+        let kept = &raw["MakerNote"];
+        assert!(kept.len() < MAX_TAG_VALUE_CHARS, "still {} chars", kept.len());
+        assert!(kept.contains(&huge.len().to_string()), "must say how big it was: {kept}");
+        assert!(kept.contains("omitted"));
+    }
+
+    /// Ordinary values must survive untouched — this is provenance, and a
+    /// camera model that reads "[47 characters omitted]" would be useless.
+    #[test]
+    fn ordinary_values_are_kept_exactly() {
+        let raw = record(&[
+            ("Model", "NIKON D810".into()),
+            ("DateTimeOriginal", "2018-01-18 21:42:17".into()),
+            ("FNumber", "f/2.8".into()),
+        ]);
+        assert_eq!(raw["Model"], "NIKON D810");
+        assert_eq!(raw["DateTimeOriginal"], "2018-01-18 21:42:17");
+        assert_eq!(raw["FNumber"], "f/2.8");
+    }
+
+    /// Many medium-sized tags must not add up to something enormous either.
+    #[test]
+    fn the_whole_dump_is_bounded() {
+        let pairs: Vec<(&str, String)> =
+            (0..2000).map(|_| ("Tag", "x".repeat(200))).collect();
+        let raw = record(&pairs);
+        let total: usize = raw.iter().map(|(k, v)| k.len() + v.len()).sum();
+        assert!(
+            total < MAX_RAW_TOTAL_CHARS * 2,
+            "raw dump reached {total} characters"
+        );
+    }
+
+    /// A photograph's whole dump has to stay far below SQLite's 1GB value
+    /// limit — exceeding it is what dropped photographs from the catalogue
+    /// with "string or blob too big".
+    #[test]
+    fn a_dump_can_never_approach_the_database_limit() {
+        let pairs: Vec<(&str, String)> = (0..50)
+            .map(|_| ("MakerNote", "0x00, ".repeat(1_000_000)))
+            .collect();
+        let raw = record(&pairs);
+        let json = serde_json::to_string(&raw).unwrap();
+        assert!(
+            json.len() < 1_000_000,
+            "serialised dump is {} bytes; SQLite refuses at 1,000,000,000",
+            json.len()
+        );
     }
 }

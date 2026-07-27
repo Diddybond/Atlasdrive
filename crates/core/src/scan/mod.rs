@@ -134,6 +134,38 @@ fn is_excluded(relative: &str, exclusions: &[String]) -> bool {
 /// Symlinks are never followed. Anything that resolves outside `root`, the
 /// app-manifest folder, and excluded patterns are skipped. Unreadable entries
 /// are skipped (they surface later as structured failures if queued).
+///
+/// macOS bookkeeping is skipped too — see [`is_macos_metadata`].
+/// True for files macOS writes alongside real ones that are not photographs.
+///
+/// An AppleDouble stub is named `._something.jpg`: it carries the resource fork
+/// and extended attributes of `something.jpg`, is usually a few kilobytes, and
+/// is not an image. It has a photograph's extension, so extension filtering
+/// lets it straight through.
+///
+/// On a real drive these accounted for **over 400 failures** — each one queued,
+/// attempted three times, decoded, failed, and finally reported to the owner as
+/// a photograph AtlasDrive could not read. They are not photographs and were
+/// never missing from the catalogue. Counting them as damage is worse than
+/// useless: it hides the handful of files that are genuinely unreadable.
+///
+/// `.DS_Store` and Spotlight's index are excluded on the same grounds.
+pub fn is_macos_metadata(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if name.starts_with("._") {
+        return true;
+    }
+    matches!(name, ".DS_Store" | ".localized" | "Icon\r")
+        || path.components().any(|c| {
+            matches!(
+                c.as_os_str().to_str(),
+                Some("__MACOSX") | Some(".Spotlight-V100") | Some(".Trashes") | Some(".fseventsd")
+            )
+        })
+}
+
 pub fn enumerate(root: &Path, opts: &ScanOptions) -> Result<Vec<DiscoveredFile>> {
     let root_canon = root
         .canonicalize()
@@ -151,6 +183,12 @@ pub fn enumerate(root: &Path, opts: &ScanOptions) -> Result<Vec<DiscoveredFile>>
             return false;
         }
         if e.file_type().is_symlink() {
+            return false;
+        }
+        // Prune macOS bookkeeping wholesale. `__MACOSX` is the resource-fork
+        // shadow tree a Mac writes into a zip; every file under it is metadata
+        // for a file that also exists in the real tree.
+        if name == "__MACOSX" {
             return false;
         }
         true
@@ -173,6 +211,9 @@ pub fn enumerate(root: &Path, opts: &ScanOptions) -> Result<Vec<DiscoveredFile>>
             .unwrap_or("")
             .to_ascii_lowercase();
         if !opts.accepts(&ext) {
+            continue;
+        }
+        if is_macos_metadata(abs) {
             continue;
         }
         let relative = match abs.strip_prefix(&root_canon) {
@@ -280,5 +321,62 @@ mod tests {
             let files = enumerate(&root, &ScanOptions::default()).unwrap();
             assert!(files.is_empty(), "symlinked dir must not be traversed");
         }
+    }
+}
+
+#[cfg(test)]
+mod macos_metadata_tests {
+    use super::*;
+
+    /// The exact paths a real drive produced, verbatim from the failure report.
+    #[test]
+    fn recognises_the_stubs_that_filled_the_failure_report() {
+        for p in [
+            "/V/Documents/Vuze Downloads/got/tuts/vintage papers/__MACOSX/Vintage Writers Block Backgrounds Files/._Writers Block 6.jpg",
+            "/V/Documents/Vuze Downloads/kids/Digital Backdrops/Z-Unadvertised Bonus/Inverted Shadows.tif/._x.tif",
+            "/V/tutorial/__MACOSX/Sample Images/Winter Soldier/Logo/._Logo.psd",
+        ] {
+            assert!(is_macos_metadata(Path::new(p)), "should be skipped: {p}");
+        }
+    }
+
+    #[test]
+    fn recognises_the_usual_macos_clutter() {
+        assert!(is_macos_metadata(Path::new("/V/holiday/.DS_Store")));
+        assert!(is_macos_metadata(Path::new("/V/.Spotlight-V100/store.db")));
+        assert!(is_macos_metadata(Path::new("/V/.Trashes/501/old.jpg")));
+    }
+
+    /// And must not touch real photographs — including ones whose names begin
+    /// with a dot, or merely contain an underscore.
+    #[test]
+    fn leaves_real_photographs_alone() {
+        for p in [
+            "/V/2017/_8104506-Edit.tif",
+            "/V/2017/_MG_4471.jpg",
+            "/V/macosx-shoot/beach.jpg",
+            "/V/.hidden/wedding.jpg",
+        ] {
+            assert!(!is_macos_metadata(Path::new(p)), "should be kept: {p}");
+        }
+    }
+
+    /// End to end through the walker: a folder containing one real photograph
+    /// and its AppleDouble stub yields one file, not two.
+    #[test]
+    fn the_walker_never_queues_a_resource_fork_stub() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("__MACOSX/shoot")).unwrap();
+        std::fs::write(root.join("shoot.jpg"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("shoot")).unwrap();
+        std::fs::write(root.join("shoot/real.jpg"), b"x").unwrap();
+        std::fs::write(root.join("shoot/._real.jpg"), b"x").unwrap();
+        std::fs::write(root.join("__MACOSX/shoot/._real.jpg"), b"x").unwrap();
+        std::fs::write(root.join(".DS_Store"), b"x").unwrap();
+
+        let found = enumerate(root, &ScanOptions::default()).unwrap();
+        let names: Vec<_> = found.iter().map(|f| f.relative_path.as_str()).collect();
+        assert_eq!(names, vec!["shoot.jpg", "shoot/real.jpg"], "got {names:?}");
     }
 }

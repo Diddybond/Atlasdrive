@@ -1146,3 +1146,146 @@ mod name_scan_tests {
         assert_eq!(scan_for_names(&conn, Some(99)).unwrap().examined, 0);
     }
 }
+
+/// What compacting the catalogue reclaimed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompactReport {
+    pub bytes_before: i64,
+    pub bytes_after: i64,
+    pub rows_pruned: i64,
+}
+
+impl CompactReport {
+    pub fn saved_bytes(&self) -> i64 {
+        (self.bytes_before - self.bytes_after).max(0)
+    }
+}
+
+/// Longest EXIF dump kept when compacting. Matches the indexing-time cap.
+const MAX_KEPT_RAW_JSON: i64 = 64 * 1024;
+
+/// Prune oversized EXIF dumps already stored, then compact the file.
+///
+/// Fixing the extractor stops the catalogue growing, but does nothing about
+/// what is already there — and what was already there was 38GB of EXIF on a
+/// 8,486-photograph catalogue, which is what made a backup 348GB and put the
+/// owner's 1TB disk in danger with twenty more drives still to index.
+///
+/// Only `metadata.raw_json` is touched, and only rows past the cap. Every
+/// scalar the catalogue actually uses — camera, lens, dates, dimensions, colour
+/// profile — lives in its own column and is untouched, as is every photograph,
+/// face, tag and thumbnail. The originals are not opened.
+///
+/// `VACUUM` is what returns the space to the filesystem; without it SQLite
+/// keeps the freed pages for itself and the file never shrinks.
+pub fn compact_catalogue(conn: &Connection) -> Result<CompactReport> {
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    let pages_before: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+
+    let rows_pruned = conn.execute(
+        "UPDATE metadata
+            SET raw_json = json_object(
+                  '_note',
+                  'EXIF dump pruned: ' || length(raw_json) || ' characters of binary fields removed'
+                )
+          WHERE length(raw_json) > ?1",
+        [MAX_KEPT_RAW_JSON],
+    )? as i64;
+
+    // VACUUM cannot run inside a transaction, and rebuilds the file in place.
+    conn.execute_batch("VACUUM")?;
+
+    let pages_after: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    Ok(CompactReport {
+        bytes_before: pages_before * page_size,
+        bytes_after: pages_after * page_size,
+        rows_pruned,
+    })
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+    use crate::db::{self, SchemaKind};
+
+    fn catalogue_with_metadata(sizes: &[usize]) -> Connection {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute(
+            "INSERT INTO drives(id, drive_number, volume_name, status, first_seen_at)
+             VALUES ('d1', 1, 'V', 'online', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO roots(id, drive_id, relative_root, created_at)
+             VALUES ('r1','d1','','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        for (i, n) in sizes.iter().enumerate() {
+            let fid = format!("f{i}");
+            conn.execute(
+                "INSERT INTO files(id, drive_id, root_id, relative_path, filename, size_bytes,
+                                   source_mtime_ns, status, created_at, updated_at)
+                 VALUES (?1,'d1','r1',?2,?2,1,1,'complete','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                rusqlite::params![fid, format!("{fid}.jpg")],
+            )
+            .unwrap();
+            let raw = format!(r#"{{"Model":"NIKON D810","MakerNote":"{}"}}"#, "x".repeat(*n));
+            conn.execute(
+                "INSERT INTO metadata(file_id, camera_model, raw_json)
+                 VALUES (?1, 'NIKON D810', ?2)",
+                rusqlite::params![fid, raw],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn oversized_dumps_are_pruned_and_ordinary_ones_left_alone() {
+        let conn = catalogue_with_metadata(&[10, 200_000, 50]);
+        let report = compact_catalogue(&conn).unwrap();
+        assert_eq!(report.rows_pruned, 1, "only the oversized row");
+
+        let kept: String = conn
+            .query_row("SELECT raw_json FROM metadata WHERE file_id='f0'", [], |r| r.get(0))
+            .unwrap();
+        assert!(kept.contains("NIKON D810"), "small dumps must survive intact");
+
+        let pruned: String = conn
+            .query_row("SELECT raw_json FROM metadata WHERE file_id='f1'", [], |r| r.get(0))
+            .unwrap();
+        assert!(pruned.len() < 200, "still {} chars", pruned.len());
+        assert!(pruned.contains("pruned"), "must say what happened: {pruned}");
+    }
+
+    /// Compacting must never cost a photograph, a face, a tag or a camera
+    /// model — it reclaims space, it does not edit the catalogue.
+    #[test]
+    fn nothing_the_catalogue_is_for_is_lost() {
+        let conn = catalogue_with_metadata(&[500_000, 500_000, 10]);
+        let files_before: i64 =
+            conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
+
+        compact_catalogue(&conn).unwrap();
+
+        let files_after: i64 =
+            conn.query_row("SELECT count(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(files_before, files_after);
+
+        let models: i64 = conn
+            .query_row("SELECT count(*) FROM metadata WHERE camera_model='NIKON D810'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(models, 3, "the camera is in its own column and must survive");
+    }
+
+    #[test]
+    fn compacting_twice_is_safe_and_finds_nothing_the_second_time() {
+        let conn = catalogue_with_metadata(&[500_000]);
+        assert_eq!(compact_catalogue(&conn).unwrap().rows_pruned, 1);
+        assert_eq!(compact_catalogue(&conn).unwrap().rows_pruned, 0);
+    }
+}

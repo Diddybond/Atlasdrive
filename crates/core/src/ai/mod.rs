@@ -86,6 +86,25 @@ pub trait AiEngine: Send + Sync {
 
     /// True when [`AiEngine::analyse_file`] is the efficient path for this
     /// engine, and the pipeline should prefer it over the per-capability calls.
+    /// Capabilities this engine can perform on an image already in memory.
+    ///
+    /// Distinct from [`capabilities`], which is what the engine can produce
+    /// *by any route*. An engine that works by handing a file path to an
+    /// outside process cannot be asked for one property of a decoded
+    /// `RgbImage`; it only offers the whole analysis at once.
+    ///
+    /// The distinction is not academic. The Vision engine declared
+    /// `VisualEmbedding`, `Scene`, `Ocr` and `FaceDetection` but implements
+    /// only `analyse_file`, so whenever Vision returned an analysis without a
+    /// feature print, the pipeline asked the registry for a fallback, the
+    /// registry handed back Vision again, and the direct call landed on the
+    /// trait's stub. The photograph failed with "capability not supported:
+    /// visual_embedding" — 717 of them on a real drive — when a perfectly good
+    /// local engine was registered and able to do the work.
+    fn direct_capabilities(&self) -> &[Capability] {
+        self.capabilities()
+    }
+
     fn supports_file_analysis(&self) -> bool {
         false
     }
@@ -195,8 +214,10 @@ impl EngineRegistry {
 
     /// The engine that should handle `cap` (most-recently registered wins).
     pub fn engine_for(&self, cap: Capability) -> Arc<dyn AiEngine> {
+        // Only engines that can act on an in-memory image are eligible: this
+        // call always ends in a direct method call, never in `analyse_file`.
         for e in self.engines.iter().rev() {
-            if e.capabilities().contains(&cap) {
+            if e.direct_capabilities().contains(&cap) {
                 return e.clone();
             }
         }
@@ -227,5 +248,79 @@ mod tests {
         assert!(!t.is_cancelled());
         t.cancel();
         assert!(t.is_cancelled());
+    }
+}
+
+#[cfg(test)]
+mod registry_invariant_tests {
+    use super::*;
+
+    /// An engine that claims everything but can only work from a file path —
+    /// the shape of the real Vision engine.
+    struct FileOnlyEngine {
+        caps: Vec<Capability>,
+    }
+
+    impl AiEngine for FileOnlyEngine {
+        fn model_id(&self) -> &str {
+            "file-only"
+        }
+        fn model_version(&self) -> &str {
+            "1"
+        }
+        fn capabilities(&self) -> &[Capability] {
+            &self.caps
+        }
+        fn direct_capabilities(&self) -> &[Capability] {
+            &[]
+        }
+        fn supports_file_analysis(&self) -> bool {
+            true
+        }
+    }
+
+    /// The bug this exists to prevent, stated as an invariant: whatever the
+    /// registry hands back for a capability must be able to perform it on an
+    /// image in memory. Returning an engine that answers "capability not
+    /// supported" fails the photograph while a working engine sits registered
+    /// alongside it — which is exactly what happened to 717 photographs.
+    #[test]
+    fn every_engine_the_registry_offers_can_do_the_work_directly() {
+        let mut reg = EngineRegistry::local_default();
+        reg.register(Arc::new(FileOnlyEngine {
+            caps: vec![
+                Capability::VisualEmbedding,
+                Capability::Scene,
+                Capability::Ocr,
+                Capability::FaceDetection,
+            ],
+        }));
+
+        let img = image::RgbImage::from_pixel(16, 16, image::Rgb([120, 90, 60]));
+        let cancel = CancelToken::new();
+
+        // Each of these went through the stub before the fix.
+        reg.engine_for(Capability::VisualEmbedding)
+            .visual_embedding(&img, &cancel)
+            .expect("visual_embedding must be answerable");
+        reg.engine_for(Capability::Scene)
+            .scene(&img, &cancel)
+            .expect("scene must be answerable");
+        reg.engine_for(Capability::FaceDetection)
+            .detect_faces(&img, &cancel)
+            .expect("detect_faces must be answerable");
+    }
+
+    /// The file-only engine must still win the whole-file path — the fix must
+    /// not quietly stop AtlasDrive using Apple Vision.
+    #[test]
+    fn the_file_only_engine_is_still_chosen_for_whole_file_analysis() {
+        let mut reg = EngineRegistry::local_default();
+        reg.register(Arc::new(FileOnlyEngine { caps: vec![Capability::VisualEmbedding] }));
+
+        let analyser = reg.file_analyser().expect("a file analyser must be found");
+        assert_eq!(analyser.model_id(), "file-only");
+        // And it still reports what it can produce, for diagnostics.
+        assert!(analyser.capabilities().contains(&Capability::VisualEmbedding));
     }
 }

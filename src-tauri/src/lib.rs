@@ -518,13 +518,23 @@ fn rename_person(
 
 /// Re-scan a drive for photographs added since the last scan.
 ///
-/// Uses the folder the drive was last scanned from, so the user does not have to
-/// remember or retype it. Unchanged photographs are skipped, so this is cheap.
+/// Scans the **whole drive** when it is connected, not the folder it was last
+/// scanned from. Unchanged photographs are skipped, so this is cheap.
+///
+/// The order used to be the other way round, and it quietly hid most of a
+/// drive. Drive 1 had been registered by pointing at a single wedding folder,
+/// so every later "check for new photographs" re-examined those 758 files,
+/// found nothing, and stopped — while thirty other shoots on the same disk had
+/// never been looked at once. The screen then reported "all 758 photographs
+/// indexed, safe to unplug", which was true of the folder and false of the
+/// drive.
+///
+/// A button on a drive means the drive.
 #[tauri::command]
 fn rescan_drive(state: State<AppState>, drive_number: i64) -> Result<String, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
-    let scan_root: Option<String> = archive
+    let last_scan_root: Option<String> = archive
         .query_row(
             "SELECT sr.scan_root FROM scan_runs sr
                JOIN drives d ON d.id = sr.drive_id
@@ -534,17 +544,14 @@ fn rescan_drive(state: State<AppState>, drive_number: i64) -> Result<String, Str
             |r| r.get(0),
         )
         .ok();
-    // Falling back to the folder chosen at registration is what lets a drive be
-    // scanned for the first time from the Drives screen. Before this the only
-    // record of what to scan appeared *after* the first scan, so the button
-    // could only refer the owner elsewhere — to a screen that knew no more.
-    let root = match scan_root
+    // The mounted volume first: it is the only one of these that means "the
+    // drive". The registered folder and the last-scanned folder are both
+    // whatever the owner happened to pick once, and neither is a reason to
+    // ignore the rest of the disk. They remain as fallbacks for a drive that
+    // is not currently mounted where AtlasDrive can see it.
+    let root = match family_archive_core::volumes::mount_point_for_drive(&archive, drive_number)
         .or_else(|| DriveRepo::new(&archive).registered_root(drive_number))
-        // Last resort for drives registered before the root was recorded: the
-        // volume itself, if it is plugged in. Telling someone to register a
-        // disk again when it is connected in front of them is a poor answer
-        // where a better one is available.
-        .or_else(|| family_archive_core::volumes::mount_point_for_drive(&archive, drive_number))
+        .or(last_scan_root)
     {
         Some(r) => r,
         None => {

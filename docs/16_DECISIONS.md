@@ -1728,3 +1728,98 @@ of one photograph, so against 400 it is under a third of a percent.
 reports its own process id and asserts the id is stable throughout and different
 afterwards — proving reuse *and* retirement — and one asserts the photograph
 that triggers the restart is still analysed rather than dropped.
+
+## D-065 — EXIF dumps are bounded; binary fields are recorded, not stored
+
+**Decision.** `metadata::record_raw` caps any single EXIF value at 256
+characters and the whole per-photograph dump at 32KB. An oversized value is
+replaced by `[N characters omitted — binary or oversized field]`, so the tag's
+presence and size survive while its contents do not.
+`inventory::compact_catalogue` prunes dumps already stored and `VACUUM`s.
+
+**Why.** This was the worst defect the project has had, and it was invisible
+because nothing about it failed loudly. The raw dump was built by calling
+`display_value()` on every EXIF field. For a camera model that is a dozen
+characters; for binary fields — MakerNote, colour matrices, embedded previews —
+it renders every byte as text, so a 200MB payload became a 600MB string.
+
+Measured on the real catalogue: **38.08 GB of `raw_json`** across 8,486
+photographs, averaging 4.6MB each with one row at **865MB** — against 0.07GB for
+every face crop and 0.03GB for every embedding put together. The catalogue was
+99.8% EXIF rendering. It made a backup folder reach 348GB on a 1TB disk with
+twenty drives still to index.
+
+It also silently cost photographs. A row past SQLite's 1GB value limit cannot be
+stored at all, which is what "string or blob too big" meant in the failure
+report: those photographs were dropped from the catalogue entirely. One defect,
+two symptoms, and the second one looked like a damaged file.
+
+**Why record the size rather than drop the tag.** Provenance is a real
+requirement: the catalogue should be able to say what the camera wrote. Knowing
+"MakerNote was present and was 865MB" preserves that. Knowing the hex of bytes
+no part of AtlasDrive reads does not.
+
+**Why compaction is separate and explicit.** Fixing the extractor stops the
+growth; it does nothing about what is already stored. Compaction touches only
+`metadata.raw_json`, and only rows past the cap: every scalar the catalogue
+actually uses lives in its own column. Tests assert that photographs, faces,
+tags and camera models all survive it, because a space-reclaiming operation that
+quietly loses data would be a far worse bug than the one it fixes.
+
+## D-066 — An engine is only offered for work it can actually do
+
+**Decision.** `AiEngine::direct_capabilities` is what `EngineRegistry::engine_for`
+consults, separate from `capabilities`, which is what an engine can produce by
+any route. `VisionEngine` returns none: everything it does comes from
+`analyse_file`, which takes a path.
+
+**Why.** Vision declared `VisualEmbedding`, `Scene`, `Ocr` and `FaceDetection`
+but implements only `analyse_file`. Whenever Vision returned an analysis without
+a feature print, the pipeline asked the registry for a fallback, the registry
+handed back Vision, and the direct call landed on the trait's stub. **717
+photographs** failed with "capability not supported: visual_embedding" while a
+local engine that could do the work sat registered alongside it.
+
+The invariant is now a test: whatever the registry offers for a capability must
+be able to perform it on an image in memory.
+
+## D-067 — macOS bookkeeping is never queued as a photograph
+
+**Decision.** The walker prunes `__MACOSX`, `.Spotlight-V100`, `.Trashes` and
+`.fseventsd`, and skips AppleDouble stubs (`._name.jpg`) and `.DS_Store`.
+
+**Why.** An AppleDouble stub carries the resource fork of a real file, is a few
+kilobytes, and is not an image — but it has a photograph's extension, so
+extension filtering passed it straight through. On a real drive these produced
+**over 400 failures**: each queued, attempted three times, decoded, failed, and
+finally reported to the owner as a photograph AtlasDrive could not read. They
+were never missing from the catalogue. Counting them as damage hid the handful
+of files that are genuinely unreadable.
+
+## D-068 — "Check for new photographs" means the whole drive
+
+**Decision.** `rescan_drive` prefers the mounted volume, falling back to the
+registered folder and then the last-scanned folder.
+
+**Why.** The order was the other way round, and it hid most of a disk. Drive 1
+had been registered by pointing at one wedding folder, so every later check
+re-examined those 758 files, found nothing, and stopped — while thirty other
+shoots on the same drive had never been looked at once. The screen then read
+"Finished — all 758 photographs indexed. Safe to unplug", which was true of the
+folder and false of the drive. A button on a drive means the drive.
+
+## D-069 — Scan activity shows any drive, not only the one being read
+
+**Decision.** The scan console takes a drive picker. Figures that belong to the
+running process — read speed, elapsed, files this session — appear only when the
+selected drive is the one being read; everything else comes from the catalogue
+and works for any drive, at any time. The "given up on" count now comes from the
+drive's durable queue rather than the running process.
+
+**Why.** A scan takes two days and the owner is working through twenty drives.
+"How did Drive 1 turn out?" is a fair question to ask while Drive 3 is running,
+and the screen could not answer it — it could only ever show whichever drive
+last wrote `progress.json`. The failure count had the same shape of error as
+D-058: it reported the process, not the drive, so files given up on in an
+earlier session vanished from the total while remaining absent from the
+catalogue.

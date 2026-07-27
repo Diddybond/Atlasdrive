@@ -288,6 +288,8 @@ enum DriveAction {
         #[arg(long)]
         number: Option<i64>,
     },
+    /// Reclaim space: prune oversized EXIF dumps and compact the catalogue.
+    Compact,
     /// Find every pair of drives that look like clones of one another.
     Clones,
     /// List registered drives.
@@ -593,6 +595,7 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
         }
         DriveAction::Failures { number, retry, code } => drive_failures_cmd(ctx, number, retry, code),
         DriveAction::Names { number } => drive_names_cmd(ctx, number),
+        DriveAction::Compact => drive_compact_cmd(ctx),
         DriveAction::Compare { a, b, list } => {
             let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
             let c = family_archive_core::compare::compare_drives(&archive, a, b)?;
@@ -1125,6 +1128,22 @@ fn compact_cmd(ctx: &Ctx) -> Result<()> {
     let after = std::fs::metadata(ctx.paths.archive_db()).map(|m| m.len()).unwrap_or(0);
     println!("  {} -> {}", human_bytes(before), human_bytes(after));
 
+    Ok(())
+}
+
+/// Reclaim space taken by oversized EXIF dumps.
+fn drive_compact_cmd(ctx: &Ctx) -> Result<()> {
+    let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
+    println!("Compacting the catalogue. Photographs, faces and tags are untouched.");
+    let report = family_archive_core::inventory::compact_catalogue(&archive)?;
+    let gb = |b: i64| b as f64 / 1_073_741_824.0;
+    println!(
+        "  before {:.2} GB\n  after  {:.2} GB\n  saved  {:.2} GB ({} oversized EXIF dumps pruned)",
+        gb(report.bytes_before),
+        gb(report.bytes_after),
+        gb(report.saved_bytes()),
+        report.rows_pruned
+    );
     Ok(())
 }
 

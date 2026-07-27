@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, FailureReason, Progress, ScanStats } from "../api";
+import { api, Drive, FailureReason, Progress, ScanStats } from "../api";
 import { Gauge } from "./scan/Gauge";
 import { Donut } from "./scan/Donut";
 import { AreaChart } from "./scan/AreaChart";
@@ -14,6 +14,8 @@ export function ScanScreen() {
   const [progress, setProgress] = useState<Progress | null>(null);
   const [loaded, setLoaded] = useState(false);
   const timer = useRef<number | null>(null);
+  // Read inside the poll loop, which is created once per selection.
+  const pickedRef = useRef<number | null>(null);
   // Rate is measured here rather than reported by the backend: the interface
   // already sees every update, and a figure derived from what is actually
   // arriving cannot drift from what is on screen.
@@ -30,6 +32,19 @@ export function ScanScreen() {
   const [mbHistory, setMbHistory] = useState<number[]>([]);
   const [failures, setFailures] = useState<FailureReason[] | null>(null);
   const [retryNote, setRetryNote] = useState<string | null>(null);
+  // Which drive the screen is showing. Independent of which drive is being
+  // read: a scan takes two days, and "how did Drive 1 turn out" is a fair
+  // question to ask while Drive 3 is running.
+  const [drives, setDrives] = useState<Drive[]>([]);
+  const [picked, setPicked] = useState<number | null>(null);
+  // Counted from the drive's own queue, not from the running process. A file
+  // given up on two sessions ago is still not in the catalogue.
+  const [failedCount, setFailedCount] = useState(0);
+
+  useEffect(() => {
+    void api.listDrives().then(setDrives);
+  }, []);
+  pickedRef.current = picked;
 
   useEffect(() => {
     let cancelled = false;
@@ -39,6 +54,7 @@ export function ScanScreen() {
       if (cancelled) return;
       setProgress(live);
       setLoaded(true);
+      const shown = pickedRef.current ?? live?.driveNumber ?? null;
 
       if (live) {
         const now = Date.now();
@@ -49,12 +65,15 @@ export function ScanScreen() {
       // The catalogue counts are read whether or not a run is in flight: they
       // are what the progress bar is measured against, so a finished or paused
       // scan must still show where the drive stands.
-      if (live) {
-        const s = await api.scanStats(live.driveNumber, 12);
+      if (shown !== null) {
+        const s = await api.scanStats(shown, 12);
         if (cancelled) return;
         setStats(s);
+        const reasons = await api.scanFailures(shown).catch(() => []);
+        if (cancelled) return;
+        setFailedCount(reasons.reduce((n, r) => n + r.files, 0));
 
-        if (live.status === "running") {
+        if (live && live.status === "running" && live.driveNumber === shown) {
           // Read throughput in megabytes, from bytes of original actually
           // catalogued. Photographs vary from 2MB to 80MB, so a count per
           // minute says little about how hard the drive is working.
@@ -80,11 +99,37 @@ export function ScanScreen() {
       cancelled = true;
       if (timer.current !== null) window.clearTimeout(timer.current);
     };
-  }, []);
+  }, [picked]);
 
   if (!loaded) return <p>Loading…</p>;
 
-  if (!progress) {
+  const shownDrive = picked ?? progress?.driveNumber ?? drives[0]?.drive_number ?? null;
+  // The live figures belong to the drive being read. Showing them beside
+  // another drive's totals would be the same mixing of two things that made
+  // "4 / 8,333" appear above "19.6 GB read".
+  const isLive = progress !== null && progress.driveNumber === shownDrive;
+
+  const drivePicker =
+    drives.length > 1 ? (
+      <div className="drive-filter">
+        <span className="filter-label">Show</span>
+        {drives.map((d) => (
+          <button
+            key={d.id}
+            className={shownDrive === d.drive_number ? "chip selected" : "chip"}
+            onClick={() => setPicked(d.drive_number)}
+            title={d.friendly_name ?? undefined}
+          >
+            Drive {d.drive_number}
+            {progress?.driveNumber === d.drive_number && progress.status === "running" && (
+              <span className="live-dot" aria-label="being read now" />
+            )}
+          </button>
+        ))}
+      </div>
+    ) : null;
+
+  if (shownDrive === null) {
     return (
       <section aria-labelledby="scan-heading">
         <h1 id="scan-heading">Scan activity</h1>
@@ -106,14 +151,16 @@ export function ScanScreen() {
   // restart read "4 / 8,333" above "19.6 GB read" and 432 faces. The owner
   // leaves a drive running for two days across several sessions; the question
   // being asked is "is this drive finished", not "how has this process done".
-  const running = progress.status === "running";
-  const catalogued = stats ? stats.files : progress.filesDone;
+  const running = isLive && progress.status === "running";
+  const catalogued = stats ? stats.files : 0;
   // Still queued is the durable truth about what is left: a resumed run
   // re-walks files it has already catalogued, so discovered minus done counts
   // finished work as outstanding.
-  const driveTotal = Math.max(progress.filesDiscovered, catalogued + progress.filesQueued, 1);
+  const queued = isLive ? progress.filesQueued : 0;
+  const discovered = isLive ? progress.filesDiscovered : 0;
+  const driveTotal = Math.max(discovered, catalogued + queued, 1);
   const pct = Math.min(100, Math.round((catalogued / driveTotal) * 100));
-  const remaining = progress.filesQueued || Math.max(0, driveTotal - catalogued);
+  const remaining = queued || Math.max(0, driveTotal - catalogued);
   const secondsLeft = secondsRemaining(remaining, rate);
 
   return (
@@ -124,17 +171,31 @@ export function ScanScreen() {
         batch boundary.
       </p>
 
+      {drivePicker}
+
       <div className="console">
         <div className="console-head">
           <div>
-            <h2>Drive {progress.driveNumber}</h2>
+            <h2>
+              Drive {shownDrive}
+              {drives.find((d) => d.drive_number === shownDrive)?.friendly_name && (
+                <span className="console-name">
+                  {" "}
+                  {drives.find((d) => d.drive_number === shownDrive)?.friendly_name}
+                </span>
+              )}
+            </h2>
             <p className="console-sub">
-              {running ? "Reading photographs from this drive" : statusLabel(progress.status)}
+              {running
+                ? "Reading photographs from this drive"
+                : isLive
+                  ? statusLabel(progress.status)
+                  : "Not being read now — showing what is already catalogued"}
             </p>
           </div>
           <span className={running ? "pill-live" : "pill-idle"}>
             {running && <span className="live-dot" aria-hidden />}
-            {statusLabel(progress.status)}
+            {isLive ? statusLabel(progress.status) : "Idle"}
           </span>
         </div>
 
@@ -172,9 +233,21 @@ export function ScanScreen() {
             <Tile
               tone="amber"
               icon="⧗"
-              label="Been running for"
-              value={elapsed(progress.startedAt)}
-              sub={rate ? `${(rate * 60).toFixed(1)} photographs/min` : "Elapsed"}
+              label={isLive ? "Been running for" : "Last read"}
+              value={
+                isLive
+                  ? elapsed(progress.startedAt)
+                  : stats?.recent[0]
+                    ? "—"
+                    : "never"
+              }
+              sub={
+                isLive
+                  ? rate
+                    ? `${(rate * 60).toFixed(1)} photographs/min`
+                    : "Elapsed"
+                  : "Not being read now"
+              }
             />
           </div>
         </div>
@@ -217,10 +290,12 @@ export function ScanScreen() {
               </span>
               {stats && <span>{gb(stats.bytes)} read</span>}
             </div>
-            <p className="panel-note">
-              {progress.filesDone.toLocaleString()} of those were read in this session, which began{" "}
-              {elapsed(progress.startedAt)} ago.
-            </p>
+            {isLive && (
+              <p className="panel-note">
+                {progress.filesDone.toLocaleString()} of those were read in this session, which
+                began {elapsed(progress.startedAt)} ago.
+              </p>
+            )}
           </section>
 
           {stats && stats.by_extension.length > 0 && (
@@ -241,8 +316,8 @@ export function ScanScreen() {
                 <div><dt>People known</dt><dd>{stats.people_recognised.toLocaleString()}</dd></div>
                 <div>
                   <dt>Given up on</dt>
-                  <dd className={progress.filesFailed > 0 ? "bad" : undefined}>
-                    {progress.filesFailed.toLocaleString()}
+                  <dd className={failedCount > 0 ? "bad" : undefined}>
+                    {failedCount.toLocaleString()}
                   </dd>
                 </div>
               </dl>
@@ -269,15 +344,15 @@ export function ScanScreen() {
           </div>
         )}
 
-        {progress.filesFailed > 0 && (
+        {failedCount > 0 && (
           <section className="panel">
             <div className="row-between">
-              <h3>{progress.filesFailed.toLocaleString()} photographs were given up on</h3>
+              <h3>{failedCount.toLocaleString()} photographs were given up on</h3>
               <button
                 className="ghost"
                 onClick={() =>
                   void (failures === null
-                    ? api.scanFailures(progress.driveNumber).then(setFailures)
+                    ? api.scanFailures(shownDrive).then(setFailures)
                     : setFailures(null))
                 }
               >
@@ -304,7 +379,7 @@ export function ScanScreen() {
                 <button
                   className="secondary"
                   onClick={() =>
-                    void api.retryFailedFiles(progress.driveNumber).then((n) => {
+                    void api.retryFailedFiles(shownDrive).then((n) => {
                       setRetryNote(
                         n === 0
                           ? "Nothing to retry."
@@ -334,7 +409,9 @@ export function ScanScreen() {
           <span>Originals opened read-only</span>
           <span>This Mac stays awake while scanning</span>
           <span>Interrupting loses nothing</span>
-          {progress.status === "interrupted" && <span className="warn">Paused — start it again to continue</span>}
+          {isLive && progress.status === "interrupted" && (
+            <span className="warn">Paused — start it again to continue</span>
+          )}
         </footer>
       </div>
     </section>

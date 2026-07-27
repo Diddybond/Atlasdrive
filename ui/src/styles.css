@@ -699,3 +699,6 @@ h2 {
    makes the button's result trustworthy. */
 .name-row { align-items: flex-start; gap: 16px; margin-top: 12px; }
 .name-row .panel-note { margin: 0; }
+
+/* The drive's own name beside its number on the scan console. */
+.console-name { font-weight: 400; opacity: 0.6; font-size: 0.9rem; }

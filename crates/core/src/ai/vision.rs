@@ -352,6 +352,15 @@ impl AiEngine for VisionEngine {
     fn capabilities(&self) -> &[Capability] {
         &self.caps
     }
+    /// None, on purpose.
+    ///
+    /// Everything this engine produces comes from `analyse_file`, which hands a
+    /// *path* to the worker. There is no way to ask it for the embedding of an
+    /// `RgbImage` that is already decoded, so it must never be selected as the
+    /// fallback for a direct call — see `AiEngine::direct_capabilities`.
+    fn direct_capabilities(&self) -> &[Capability] {
+        &[]
+    }
     fn supports_file_analysis(&self) -> bool {
         true
     }
