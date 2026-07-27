@@ -313,7 +313,22 @@ export interface NamedPerson {
 
 /// Set by tests to simulate a background run that died. Nothing in the app
 /// writes it; the real value comes from the backend.
+/// Whether the mock backend has a scan in flight.
+///
+/// Defaults to true because the scan console needs one to exercise. Tests about
+/// what the Drives screen offers when the machine is idle turn it off, rather
+/// than each quietly assuming the opposite of the other.
+export let mockScanRunning = true;
+export function setMockScanning(v: boolean) {
+  mockScanRunning = v;
+}
+
+export let mockStopping = false;
+
 export let mockScanError: string | null = null;
+export function setMockStopping(v: boolean) {
+  mockStopping = v;
+}
 export function setMockScanError(v: string | null) {
   mockScanError = v;
 }
@@ -354,6 +369,8 @@ export const api = {
   isIndexing: () => call<boolean>("is_indexing"),
   getProgress: () => call<Progress | null>("get_progress"),
   lastScanError: () => call<string | null>("last_scan_error"),
+  stopScan: () => call<string>("stop_scan"),
+  stopPending: () => call<boolean>("stop_pending"),
   scanFailures: (driveNumber: number) =>
     call<FailureReason[]>("scan_failures", { driveNumber }),
   retryFailedFiles: (driveNumber: number, code?: string) =>
@@ -579,7 +596,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case "cancel_index":
       return Promise.resolve(undefined as unknown as T);
     case "is_indexing":
-      return Promise.resolve(false as unknown as T);
+      return Promise.resolve(mockScanRunning as unknown as T);
     case "get_progress": {
       // A run that actually advances, so the rate and finish-time working is
       // exercised rather than assumed. A frozen mock would have let a broken
@@ -587,8 +604,11 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       const done = mockDone();
       return Promise.resolve({
         runId: "mock-run",
-        driveNumber: 2,
-        scanRoot: "/Volumes/New Volume",
+        // Must be a drive that is actually in `mockDrives`: a run on a drive
+        // the list has never heard of is not a state the app can ever be in,
+        // and a fixture like that hides every bug about the two agreeing.
+        driveNumber: 14,
+        scanRoot: "/Volumes/AtlasDrive A",
         startedAt: new Date(mockRunStarted).toISOString(),
         updatedAt: new Date().toISOString(),
         filesDiscovered: 8333,
@@ -597,7 +617,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         filesQueued: 8333 - done,
         currentBatch: Math.floor(done / 64) + 1,
         lastCompletedFile: `Weddings/2019/IMG_${String(4000 + done).padStart(4, "0")}.jpg`,
-        status: done >= 8333 ? "complete" : "running",
+        status: !mockScanRunning || done >= 8333 ? "complete" : "running",
       } as unknown as T);
     }
     case "scan_stats": {
@@ -743,6 +763,11 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         tagged: 11,
         names: [{ tag: "asda", count: 2 }],
       } as unknown as T);
+    case "stop_scan":
+      mockStopping = true;
+      return Promise.resolve("Stopping after the current batch." as unknown as T);
+    case "stop_pending":
+      return Promise.resolve(mockStopping as unknown as T);
     case "last_scan_error":
       return Promise.resolve(mockScanError as unknown as T);
     case "scan_failures":

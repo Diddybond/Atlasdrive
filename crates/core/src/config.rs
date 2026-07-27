@@ -59,6 +59,10 @@ impl AppPaths {
     pub fn queue_db(&self) -> PathBuf {
         self.root.join("queue.db")
     }
+    /// Where a stop request is left for whichever process is scanning.
+    pub fn stop_flag(&self) -> PathBuf {
+        self.root.join("stop.request")
+    }
     pub fn progress_json(&self) -> PathBuf {
         self.root.join("progress.json")
     }

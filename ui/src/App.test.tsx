@@ -1,6 +1,17 @@
-import { setMockScanError } from "./api";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { setMockScanError, setMockScanning, setMockStopping } from "./api";
+import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { App } from "./App";
+
+// The mock backend keeps state between calls on purpose — a scan that advances
+// is what makes the rate and finish-time working testable. That state has to be
+// reset, or a test that turns the scan off silently changes what every later
+// test is looking at.
+beforeEach(() => {
+  cleanup();
+  setMockScanning(true);
+  setMockStopping(false);
+  setMockScanError(null);
+});
 
 describe("AtlasDrive UI", () => {
   it("renders the main navigation and search screen", () => {
@@ -324,6 +335,7 @@ describe("AtlasDrive UI", () => {
   });
 
   it("offers to check a drive for photographs added since the last scan", async () => {
+    setMockScanning(false);
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
     await waitFor(() => {
@@ -772,6 +784,69 @@ describe("Read-only drives", () => {
   });
 });
 
+describe("Stopping a scan", () => {
+  /// A scan runs for days. The owner has to be able to end it and put a
+  /// different drive on instead, without waiting for it or resorting to the
+  /// command line.
+  it("offers a stop button while a scan is running", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Scan activity/ }));
+    const stop = await screen.findByRole("button", { name: /Stop scanning/ });
+    expect(stop).toBeDefined();
+
+    fireEvent.click(stop);
+    await waitFor(() => {
+      expect(screen.getByText(/Stopping after the current batch/i)).toBeDefined();
+    });
+    // And it must not invite a second press while the first is being obeyed.
+    expect(
+      (screen.getByRole("button", { name: /Stopping/ }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    setMockStopping(false);
+  });
+
+  /// Nothing about stopping should suggest work has been thrown away.
+  it("says plainly that stopping loses nothing", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Scan activity/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Stop scanning/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/Interrupting loses nothing/i)).toBeDefined();
+    });
+    setMockStopping(false);
+  });
+});
+
+describe("Managing scans from the Drives screen", () => {
+  /// The owner's requirement, stated plainly: stop a scan, come back to that
+  /// drive later, or put a different drive on — all without a command line.
+  it("offers to stop the drive that is being scanned", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    const stop = await screen.findByRole("button", { name: /Stop scanning Drive 14/ });
+    fireEvent.click(stop);
+    await waitFor(() => {
+      expect(screen.getByText(/Stopping after the current batch/i)).toBeDefined();
+    });
+    setMockStopping(false);
+  });
+
+  /// While one drive is being read, another must not be startable behind its
+  /// back — and the screen has to say which drive is holding things up rather
+  /// than presenting a dead button.
+  it("says which drive is busy instead of offering a second scan", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /Drive 14 is scanning/ }).length).toBeGreaterThan(
+        0,
+      );
+    });
+    const busy = screen.getAllByRole("button", { name: /Drive 14 is scanning/ })[0];
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
 describe("Scanning a drive from the Drives screen", () => {
   async function openDrives() {
     render(<App />);
@@ -782,6 +857,7 @@ describe("Scanning a drive from the Drives screen", () => {
   }
 
   it("offers to scan a drive that has never been indexed", async () => {
+    setMockScanning(false);
     await openDrives();
     // The never-scanned drive must offer a first scan, not a check for new
     // photographs -- and must not send you to another screen to do it.
@@ -789,6 +865,7 @@ describe("Scanning a drive from the Drives screen", () => {
   });
 
   it("offers to check an already-indexed drive for new photographs", async () => {
+    setMockScanning(false);
     await openDrives();
     expect(
       screen.getByRole("button", { name: /Check Drive 14 for new photographs/ }),
@@ -800,6 +877,7 @@ describe("Scanning a drive from the Drives screen", () => {
   /// immediately, and nothing ever contradicted the note.
   it("says so when a scan dies instead of leaving the note on screen", async () => {
     setMockScanError("/Volumes/Late 25 A is not available.");
+    setMockScanning(false);
     try {
       await openDrives();
       fireEvent.click(screen.getByRole("button", { name: /^Scan Drive 22$/ }));
@@ -817,6 +895,7 @@ describe("Scanning a drive from the Drives screen", () => {
   }, 10000);
 
   it("shows the outcome against the drive it concerns", async () => {
+    setMockScanning(false);
     await openDrives();
     fireEvent.click(screen.getByRole("button", { name: /^Scan Drive 22$/ }));
 

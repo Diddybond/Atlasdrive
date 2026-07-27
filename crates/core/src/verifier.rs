@@ -152,11 +152,56 @@ pub fn run(ctx: &VerifyContext) -> Result<VerifierReport> {
     })
 }
 
+/// How many times to re-attempt an integrity check that could not acquire a lock.
+const INTEGRITY_LOCK_RETRIES: u32 = 3;
+
 fn check_db_integrity(conn: &Connection) -> Check {
-    match crate::db::integrity_check(conn) {
-        Ok(()) => Check::pass("db_integrity", "integrity_check and foreign_key_check ok"),
-        Err(e) => Check::halt("integrity_db_corruption", format!("{e}")),
+    // A lock is not corruption, and the difference matters enormously: one is a
+    // reason to stop everything, the other is a reason to look again in a
+    // moment.
+    //
+    // `PRAGMA integrity_check` needs to read the whole file, including the FTS5
+    // index. If another connection holds a write lock it answers "database is
+    // locked" — the check did not fail, it did not run. Treating that as
+    // corruption halted a real 102,000-photograph scan after five batches,
+    // because the owner had opened AtlasDrive to watch it. The catalogue was
+    // fine; two things were simply reading it at once.
+    let mut last = String::new();
+    for attempt in 0..=INTEGRITY_LOCK_RETRIES {
+        match crate::db::integrity_check(conn) {
+            Ok(()) => {
+                return Check::pass("db_integrity", "integrity_check and foreign_key_check ok")
+            }
+            Err(e) => {
+                last = e.to_string();
+                if !is_lock_contention(&last) {
+                    return Check::halt("integrity_db_corruption", last);
+                }
+                if attempt < INTEGRITY_LOCK_RETRIES {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        250 * (1 << attempt) as u64,
+                    ));
+                }
+            }
+        }
     }
+    // Still locked. Say so as a warning: indexing continues, and the check runs
+    // again after the next batch.
+    Check::warn(
+        "db_integrity",
+        format!(
+            "could not verify just now — the catalogue was busy ({last}).              Not a sign of damage; it will be checked again after the next batch."
+        ),
+    )
+}
+
+/// True when a database error means "busy", not "broken".
+fn is_lock_contention(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("database is locked")
+        || m.contains("database table is locked")
+        || m.contains("database schema is locked")
+        || m.contains("busy")
 }
 
 fn check_catalogue_rows(conn: &Connection) -> Check {
@@ -524,5 +569,55 @@ mod tests {
         assert!(!report.ok(), "missing perceptual hash should fail");
         let hashes = report.checks.iter().find(|c| c.name == "hashes").unwrap();
         assert_eq!(hashes.status, CheckStatus::Fail);
+    }
+}
+
+#[cfg(test)]
+mod lock_vs_corruption_tests {
+    use super::*;
+
+    /// The exact message SQLite produced on the owner's machine when the app
+    /// was open while a scan ran. It stopped a 102,000-photograph scan after
+    /// five batches by reporting a healthy catalogue as corrupt.
+    #[test]
+    fn the_message_that_halted_a_real_scan_is_recognised_as_a_lock() {
+        let real = "integrity_check failed: unable to validate the inverted index for \
+                    FTS5 table main.files_fts: database is locked";
+        assert!(is_lock_contention(real), "must be treated as busy, not broken");
+    }
+
+    #[test]
+    fn other_ways_sqlite_says_busy_are_recognised() {
+        for m in [
+            "database table is locked",
+            "database is locked",
+            "SQLITE_BUSY: database is busy",
+            "Database Is Locked",
+        ] {
+            assert!(is_lock_contention(m), "{m} should count as busy");
+        }
+    }
+
+    /// The half that must not regress: real damage still has to halt. A
+    /// verifier that shrugs at corruption is worse than none.
+    #[test]
+    fn real_corruption_is_not_mistaken_for_a_lock() {
+        for m in [
+            "integrity_check failed: *** in database main *** page 42 is never used",
+            "database disk image is malformed",
+            "integrity_check failed: row missing from index idx_files_drive",
+            "foreign_key_check failed: files references a missing drive",
+        ] {
+            assert!(!is_lock_contention(m), "{m} must still halt");
+        }
+    }
+
+    /// A healthy catalogue passes, and the check that runs against it is the
+    /// real one — not a stub that would pass whatever it was given.
+    #[test]
+    fn a_healthy_catalogue_passes() {
+        let conn = crate::db::open_in_memory(crate::db::SchemaKind::Archive).unwrap();
+        let check = check_db_integrity(&conn);
+        assert_eq!(check.status, CheckStatus::Pass, "{:?}", check.detail);
     }
 }

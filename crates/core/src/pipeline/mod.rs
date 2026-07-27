@@ -299,7 +299,14 @@ impl<'a> Pipeline<'a> {
         let mut interrupted = false;
 
         loop {
-            if self.cancel.is_cancelled() {
+            // Two ways to be asked to stop, checked in the same place.
+            //
+            // The token stops a run from inside this process. The file stops
+            // whichever process is actually scanning — which matters because a
+            // scan is often started from the command line and left for two
+            // days, while the owner is looking at the desktop app. See
+            // `crate::stop`.
+            if self.cancel.is_cancelled() || crate::stop::requested(self.paths) {
                 logger.warn("cancelled").emit_best_effort();
                 interrupted = true;
                 break;

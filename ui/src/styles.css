@@ -702,3 +702,7 @@ h2 {
 
 /* The drive's own name beside its number on the scan console. */
 .console-name { font-weight: 400; opacity: 0.6; font-size: 0.9rem; }
+
+/* Stop sits beside the status pill, where the eye already goes to check
+   whether a scan is running. */
+.head-actions { display: flex; align-items: center; gap: 12px; }

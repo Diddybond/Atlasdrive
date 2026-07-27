@@ -1851,3 +1851,44 @@ failure. The gap this closes is the one where nothing appears there at all.
 run, and asserts the note is replaced by the actual reason. It was confirmed to
 fail with the watch removed and pass with it, because a test for a silence that
 passes for some other reason would be worth nothing.
+
+## D-071 — A lock is not corruption
+
+**Decision.** `check_db_integrity` retries a `PRAGMA integrity_check` that could
+not acquire a lock, three times with a backoff, and reports a warning if it is
+still busy. Only a genuine integrity failure halts.
+
+**Why.** `integrity_check` reads the whole catalogue including the FTS5 index.
+If another connection holds a write lock it answers "database is locked" — the
+check did not fail, it did not run. The verifier treated that string as
+corruption and triggered a hard halt, which stopped a real 102,000-photograph
+scan after five batches. The catalogue was perfectly healthy; the owner had
+simply opened AtlasDrive to watch the scan, so two processes were reading at
+once. That is not an edge case, it is the normal way the app is used.
+
+The other half is protected by test: `page 42 is never used`, `database disk
+image is malformed` and a foreign-key failure must all still halt. A verifier
+that shrugs at corruption is worse than no verifier at all.
+
+## D-072 — Stopping a scan is a file, not a flag in memory
+
+**Decision.** `crate::stop` writes a request into the application-support
+directory. Every scan checks for it at each batch boundary; any process may ask.
+`CancelToken` remains for stopping a run from inside the process that owns it.
+Starting a run withdraws any outstanding request.
+
+**Why.** The owner's requirement: manage scans entirely within the app — stop
+one, come back to that drive later, or put a different drive on. A scan may have
+been started from the command line and left running for two days while the owner
+is looking at the desktop app, which is a different process whose cancel token
+reaches nothing at all. Stop has to stop the scan that is *actually running*.
+
+**Why batch boundaries only.** Stopping mid-photograph would abandon a
+half-written catalogue row. Interrupting between batches is what the pipeline is
+already built around — it is exactly what unplugging a drive does, and it loses
+nothing. The interface says so rather than leaving the owner to wonder.
+
+**Why the Drives screen shows it too.** That is where the owner decides what to
+work on. It now names the drive being read, offers Stop against that drive, and
+tells the other drives which one is holding things up instead of presenting a
+button that would fail.

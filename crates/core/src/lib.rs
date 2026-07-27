@@ -37,6 +37,7 @@ pub mod queue;
 pub mod scan;
 pub mod search;
 pub mod settings;
+pub mod stop;
 pub mod signing;
 pub mod util;
 pub mod verifier;

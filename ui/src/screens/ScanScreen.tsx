@@ -41,6 +41,8 @@ export function ScanScreen() {
   // given up on two sessions ago is still not in the catalogue.
   const [failedCount, setFailedCount] = useState(0);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [stopNote, setStopNote] = useState<string | null>(null);
 
   useEffect(() => {
     void api.listDrives().then(setDrives);
@@ -57,6 +59,7 @@ export function ScanScreen() {
       setLoaded(true);
       const shown = pickedRef.current ?? live?.driveNumber ?? null;
       setScanError(await api.lastScanError().catch(() => null));
+      setStopping(await api.stopPending().catch(() => false));
 
       if (live) {
         const now = Date.now();
@@ -173,6 +176,12 @@ export function ScanScreen() {
         batch boundary.
       </p>
 
+      {stopNote && (
+        <p className="search-note" role="status">
+          {stopNote}
+        </p>
+      )}
+
       {scanError && (
         <p className="search-note warn" role="alert">
           The last scan stopped before it finished: {scanError}. Nothing was lost — start it again
@@ -202,9 +211,25 @@ export function ScanScreen() {
                   : "Not being read now — showing what is already catalogued"}
             </p>
           </div>
-          <span className={running ? "pill-live" : "pill-idle"}>
-            {running && <span className="live-dot" aria-hidden />}
-            {isLive ? statusLabel(progress.status) : "Idle"}
+          <span className="head-actions">
+            {running && (
+              <button
+                className="secondary"
+                disabled={stopping}
+                onClick={() =>
+                  void api.stopScan().then((m) => {
+                    setStopping(true);
+                    setStopNote(m);
+                  })
+                }
+              >
+                {stopping ? "Stopping…" : "Stop scanning"}
+              </button>
+            )}
+            <span className={running ? "pill-live" : "pill-idle"}>
+              {running && <span className="live-dot" aria-hidden />}
+              {stopping ? "Stopping" : isLive ? statusLabel(progress.status) : "Idle"}
+            </span>
           </span>
         </div>
 

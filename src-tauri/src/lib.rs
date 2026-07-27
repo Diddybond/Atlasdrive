@@ -780,8 +780,10 @@ fn start_index(
         *running = Some(CancelToken::new());
     }
     // A new run clears the last failure: what is on screen should describe
-    // this attempt, not the previous one.
+    // this attempt, not the previous one. It also withdraws any outstanding
+    // stop request, so a Stop pressed yesterday cannot kill today's scan.
     *state.last_error.lock().unwrap() = None;
+    let _ = family_archive_core::stop::clear(&paths);
     let cancel = state.running.lock().unwrap().clone().unwrap();
     let running_slot = state.running.clone();
     let error_slot = state.last_error.clone();
@@ -1155,6 +1157,34 @@ fn find_names(
     family_archive_core::inventory::scan_for_names(&archive, drive_number).map_err(map_err)
 }
 
+/// Ask whichever process is scanning to stop at the next batch boundary.
+///
+/// Deliberately not limited to runs this app started. A scan may have been
+/// launched from the command line and left running for days; Stop has to stop
+/// the scan that is actually running, not the one this process knows about.
+/// Nothing is lost — stopping between batches is exactly what unplugging the
+/// drive does, and the queue is durable.
+#[tauri::command]
+fn stop_scan(state: State<AppState>) -> Result<String, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    // Cancel our own run too, so a scan started here stops without waiting for
+    // the flag to be noticed.
+    if let Some(token) = state.running.lock().unwrap().as_ref() {
+        token.cancel();
+    }
+    family_archive_core::stop::request(&paths).map_err(map_err)?;
+    Ok("Stopping after the current batch. Nothing is lost — the drive can be \
+        started again, or a different one scanned, whenever you like."
+        .to_string())
+}
+
+/// True when a stop has been asked for and the scan has not yet noticed.
+#[tauri::command]
+fn stop_pending(state: State<AppState>) -> bool {
+    let paths = state.paths.lock().unwrap().clone();
+    family_archive_core::stop::requested(&paths)
+}
+
 /// Why the last background scan stopped, if it stopped badly.
 ///
 /// `None` while a run is healthy or has never failed.
@@ -1503,6 +1533,8 @@ pub fn run() {
             scan_stats,
             scan_failures,
             last_scan_error,
+            stop_scan,
+            stop_pending,
             find_names,
             retry_failed_files,
             estimate_index,

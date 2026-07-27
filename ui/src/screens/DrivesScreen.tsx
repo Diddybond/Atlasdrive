@@ -9,6 +9,8 @@ export function DrivesScreen() {
   const [folders, setFolders] = useState<string[]>([]);
   const [drives, setDrives] = useState<Drive[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [scanningDrive, setScanningDrive] = useState<number | null>(null);
+  const [stopPending, setStopPending] = useState(false);
   const [number, setNumber] = useState("");
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
@@ -23,6 +25,15 @@ export function DrivesScreen() {
   /// The outcome is shown against the drive it concerns. It used to go to a
   /// note at the top of the page, far enough from the button that pressing it
   /// looked like nothing had happened.
+  /// Stop whatever is scanning, from here.
+  async function stopScanning() {
+    const message = await api.stopScan();
+    setStopPending(true);
+    if (scanningDrive !== null) {
+      setDriveNotes((n) => ({ ...n, [scanningDrive]: message }));
+    }
+  }
+
   async function rescan(drive: Drive) {
     setRescanning(drive.drive_number);
     setDriveNotes((n) => ({ ...n, [drive.drive_number]: "" }));
@@ -59,6 +70,18 @@ export function DrivesScreen() {
       const running = await api.isIndexing().catch(() => false);
       if (running) return; // healthy; Scan activity has it from here
     }
+  }
+
+  /// Which drive is being read right now, and whether a stop is pending.
+  ///
+  /// Polled rather than assumed: a scan may have been started from another
+  /// screen, or from a previous session that is still going. The Drives screen
+  /// is where the owner decides what to work on, so it has to know.
+  async function refreshScanState() {
+    const p = await api.getProgress().catch(() => null);
+    const busy = await api.isIndexing().catch(() => false);
+    setScanningDrive(p && (busy || p.status === "running") ? p.driveNumber : null);
+    setStopPending(await api.stopPending().catch(() => false));
   }
 
   async function load() {
@@ -109,6 +132,13 @@ export function DrivesScreen() {
       setFolders([]);
     }
   }
+
+  useEffect(() => {
+    void refreshScanState();
+    const t = window.setInterval(() => void refreshScanState(), 3000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     void load();
@@ -335,21 +365,36 @@ export function DrivesScreen() {
                 </form>
               ) : (
                 <>
+                  {scanningDrive === d.drive_number ? (
+                    <button
+                      className="secondary"
+                      disabled={stopPending}
+                      onClick={() => void stopScanning()}
+                      aria-label={`Stop scanning Drive ${d.drive_number}`}
+                    >
+                      {stopPending ? "Stopping…" : "Stop scanning this drive"}
+                    </button>
+                  ) : (
                   <button
                     onClick={() => void rescan(d)}
-                    disabled={rescanning === d.drive_number}
+                    disabled={rescanning === d.drive_number || scanningDrive !== null}
                     aria-label={
-                      coverage[d.drive_number] && coverage[d.drive_number].discovered === 0
-                        ? `Scan Drive ${d.drive_number}`
-                        : `Check Drive ${d.drive_number} for new photographs`
+                      scanningDrive !== null
+                        ? `Drive ${scanningDrive} is scanning — stop it before starting another`
+                        : coverage[d.drive_number] && coverage[d.drive_number].discovered === 0
+                          ? `Scan Drive ${d.drive_number}`
+                          : `Check Drive ${d.drive_number} for new photographs`
                     }
                   >
                     {rescanning === d.drive_number
                       ? "Starting…"
-                      : coverage[d.drive_number] && coverage[d.drive_number].discovered === 0
-                        ? "Scan this drive"
-                        : "Check for new photographs"}
+                      : scanningDrive !== null
+                        ? `Drive ${scanningDrive} is scanning`
+                        : coverage[d.drive_number] && coverage[d.drive_number].discovered === 0
+                          ? "Scan this drive"
+                          : "Check for new photographs"}
                   </button>
+                  )}
                   <button
                     className="ghost"
                     onClick={() => setEditing(d.id)}
