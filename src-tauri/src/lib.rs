@@ -26,6 +26,14 @@ struct AppState {
     paths: Mutex<AppPaths>,
     /// Cancel token for the in-flight index run, if any.
     running: Arc<Mutex<Option<CancelToken>>>,
+    /// Why the last background run stopped, if it stopped badly.
+    ///
+    /// Indexing runs on its own thread, so a failure there has no caller to
+    /// return to. Without somewhere to put it the error went to stderr, which
+    /// in a packaged app goes nowhere: the screen kept saying "Looking for new
+    /// photographs in ..." and the owner watched nothing happen for a day. A
+    /// scan that dies has to be able to say so.
+    last_error: Arc<Mutex<Option<String>>>,
 }
 
 fn map_err<E: std::fmt::Display>(e: E) -> String {
@@ -771,8 +779,12 @@ fn start_index(
         }
         *running = Some(CancelToken::new());
     }
+    // A new run clears the last failure: what is on screen should describe
+    // this attempt, not the previous one.
+    *state.last_error.lock().unwrap() = None;
     let cancel = state.running.lock().unwrap().clone().unwrap();
     let running_slot = state.running.clone();
+    let error_slot = state.last_error.clone();
 
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
@@ -837,8 +849,12 @@ fn start_index(
         }
 
         if let Err(e) = result {
-            // Surfaced to the UI through progress.json / index.log.
+            // Recorded where the interface can find it. A run that fails
+            // before it writes any progress — a folder that vanished, a drive
+            // unplugged between the click and the walk — leaves no other trace
+            // at all, which is exactly the case that went unnoticed.
             eprintln!("index run failed: {e}");
+            *error_slot.lock().unwrap() = Some(e);
         }
         *running_slot.lock().unwrap() = None;
     });
@@ -1137,6 +1153,14 @@ fn find_names(
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
     family_archive_core::inventory::scan_for_names(&archive, drive_number).map_err(map_err)
+}
+
+/// Why the last background scan stopped, if it stopped badly.
+///
+/// `None` while a run is healthy or has never failed.
+#[tauri::command]
+fn last_scan_error(state: State<AppState>) -> Option<String> {
+    state.last_error.lock().unwrap().clone()
 }
 
 /// Why files on this drive were given up on, most common reason first.
@@ -1468,6 +1492,7 @@ pub fn run() {
             app.manage(AppState {
                 paths: Mutex::new(paths),
                 running: Arc::new(Mutex::new(None)),
+                last_error: Arc::new(Mutex::new(None)),
             });
             Ok(())
         })
@@ -1477,6 +1502,7 @@ pub fn run() {
             drive_coverage,
             scan_stats,
             scan_failures,
+            last_scan_error,
             find_names,
             retry_failed_files,
             estimate_index,

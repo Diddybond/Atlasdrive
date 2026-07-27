@@ -311,6 +311,13 @@ export interface NamedPerson {
   suggested_faces: number;
 }
 
+/// Set by tests to simulate a background run that died. Nothing in the app
+/// writes it; the real value comes from the backend.
+export let mockScanError: string | null = null;
+export function setMockScanError(v: string | null) {
+  mockScanError = v;
+}
+
 // Detect the Tauri runtime.
 function hasTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -346,6 +353,7 @@ export const api = {
   cancelIndex: () => call<void>("cancel_index"),
   isIndexing: () => call<boolean>("is_indexing"),
   getProgress: () => call<Progress | null>("get_progress"),
+  lastScanError: () => call<string | null>("last_scan_error"),
   scanFailures: (driveNumber: number) =>
     call<FailureReason[]>("scan_failures", { driveNumber }),
   retryFailedFiles: (driveNumber: number, code?: string) =>
@@ -735,6 +743,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         tagged: 11,
         names: [{ tag: "asda", count: 2 }],
       } as unknown as T);
+    case "last_scan_error":
+      return Promise.resolve(mockScanError as unknown as T);
     case "scan_failures":
       return Promise.resolve([
         {

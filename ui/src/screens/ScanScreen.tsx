@@ -40,6 +40,7 @@ export function ScanScreen() {
   // Counted from the drive's own queue, not from the running process. A file
   // given up on two sessions ago is still not in the catalogue.
   const [failedCount, setFailedCount] = useState(0);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   useEffect(() => {
     void api.listDrives().then(setDrives);
@@ -55,6 +56,7 @@ export function ScanScreen() {
       setProgress(live);
       setLoaded(true);
       const shown = pickedRef.current ?? live?.driveNumber ?? null;
+      setScanError(await api.lastScanError().catch(() => null));
 
       if (live) {
         const now = Date.now();
@@ -170,6 +172,13 @@ export function ScanScreen() {
         Indexing reads your photographs without ever changing them, and can be safely paused at any
         batch boundary.
       </p>
+
+      {scanError && (
+        <p className="search-note warn" role="alert">
+          The last scan stopped before it finished: {scanError}. Nothing was lost — start it again
+          from <strong>Drives</strong> and it will carry on from where it stopped.
+        </p>
+      )}
 
       {drivePicker}
 

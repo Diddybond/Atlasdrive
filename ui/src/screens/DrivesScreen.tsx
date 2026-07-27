@@ -29,10 +29,35 @@ export function DrivesScreen() {
     try {
       const message = await api.rescanDrive(drive.drive_number);
       setDriveNotes((n) => ({ ...n, [drive.drive_number]: message }));
+      // `rescanDrive` returns as soon as the run is handed to a background
+      // thread, so a run that dies immediately used to leave "Looking for new
+      // photographs in ..." on screen permanently. Watch briefly for that.
+      void watchForEarlyFailure(drive.drive_number);
     } catch (err) {
       setDriveNotes((n) => ({ ...n, [drive.drive_number]: String(err) }));
     } finally {
       setRescanning(null);
+    }
+  }
+
+  /// Replace the "looking for photographs" note if the run stops straight away.
+  ///
+  /// Only the first few seconds are watched: a run that survives them is
+  /// reporting through Scan activity, which shows any later failure. This is
+  /// for the case where nothing ever appears there at all.
+  async function watchForEarlyFailure(driveNumber: number) {
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const failed = await api.lastScanError().catch(() => null);
+      if (failed) {
+        setDriveNotes((n) => ({
+          ...n,
+          [driveNumber]: `That scan stopped before it started properly: ${failed}`,
+        }));
+        return;
+      }
+      const running = await api.isIndexing().catch(() => false);
+      if (running) return; // healthy; Scan activity has it from here
     }
   }
 

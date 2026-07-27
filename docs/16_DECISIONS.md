@@ -1823,3 +1823,31 @@ last wrote `progress.json`. The failure count had the same shape of error as
 D-058: it reported the process, not the drive, so files given up on in an
 earlier session vanished from the total while remaining absent from the
 catalogue.
+
+## D-070 — A background scan that dies has to say so
+
+**Decision.** `AppState` carries `last_error`, cleared when a run starts and set
+when the background thread's work returns an error. `last_scan_error` exposes
+it. The Drives screen watches for a few seconds after starting a scan and
+replaces "Looking for new photographs in …" with the real reason if the run
+stops immediately; Scan activity shows it persistently.
+
+**Why.** Indexing runs on its own thread, so a failure there has no caller to
+return to. The error went to stderr, which in a packaged app goes nowhere. The
+owner pressed "Check for new photographs" on Drive 1, the note said it was
+looking, the run died before it wrote any progress, and nothing ever
+contradicted the note. They watched nothing happen for a day and reported it as
+"nothing seems to be happening" — which was exactly right.
+
+Fixing the cause of that particular death (D-068) does not fix this. A drive
+unplugged between the click and the walk, a folder renamed, a permission
+withdrawn — each would produce the same silence.
+
+**Why only the first few seconds are watched from the Drives screen.** A run
+that survives them is reporting through Scan activity, which shows any later
+failure. The gap this closes is the one where nothing appears there at all.
+
+**Evidence.** A test drives the real screen with a backend that reports a dead
+run, and asserts the note is replaced by the actual reason. It was confirmed to
+fail with the watch removed and pass with it, because a test for a silence that
+passes for some other reason would be worth nothing.

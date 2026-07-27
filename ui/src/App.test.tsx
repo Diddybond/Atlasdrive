@@ -1,3 +1,4 @@
+import { setMockScanError } from "./api";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { App } from "./App";
 
@@ -793,6 +794,27 @@ describe("Scanning a drive from the Drives screen", () => {
       screen.getByRole("button", { name: /Check Drive 14 for new photographs/ }),
     ).toBeDefined();
   });
+
+  /// The silence that cost a day: the owner pressed "Check for new
+  /// photographs", the note said it was looking, the background run died
+  /// immediately, and nothing ever contradicted the note.
+  it("says so when a scan dies instead of leaving the note on screen", async () => {
+    setMockScanError("/Volumes/Late 25 A is not available.");
+    try {
+      await openDrives();
+      fireEvent.click(screen.getByRole("button", { name: /^Scan Drive 22$/ }));
+      await waitFor(
+        () => {
+          expect(screen.getByText(/stopped before it started properly/i)).toBeDefined();
+        },
+        { timeout: 4000 },
+      );
+      // And the reason has to be the real one, not a generic apology.
+      expect(screen.getByText(/is not available/)).toBeDefined();
+    } finally {
+      setMockScanError(null);
+    }
+  }, 10000);
 
   it("shows the outcome against the drive it concerns", async () => {
     await openDrives();
