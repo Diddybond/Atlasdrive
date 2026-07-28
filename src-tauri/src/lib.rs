@@ -723,22 +723,31 @@ fn search_catalogue(
         ..Default::default()
     };
 
-    // Embed the query locally so it can be compared against image embeddings.
-    let registry = EngineRegistry::local_default();
-    let engine = registry.engine_for(Capability::TextEmbedding);
-    let embedded = engine.text_embedding(&query, &CancelToken::new()).ok();
-    let visual = embedded.as_ref().map(|q| VisualQuery {
-        vector: &q.value.vector,
-        model_id: engine.model_id(),
-        model_version: engine.model_version(),
-        coverage: q.meta.confidence,
-    });
-    let text_only = embedded.as_ref().is_none_or(|q| q.meta.confidence == 0.0);
-    let understood = family_archive_core::ai::text::render_query(&query).matched_terms;
+    // An empty box with subjects picked is a browse, not a search: the tag
+    // rows answer it exactly, and routing it through free text told the owner
+    // a subject with 995 photographs had none.
+    let browsing = query.trim().is_empty() && !filters.tags.is_empty();
 
-    let mut results = repo
-        .natural_language_search(&query, visual, &filters)
-        .map_err(map_err)?;
+    let (mut results, text_only, understood) = if browsing {
+        (repo.browse_by_tags(&filters).map_err(map_err)?, false, Vec::new())
+    } else {
+        // Embed the query locally so it can be compared against image embeddings.
+        let registry = EngineRegistry::local_default();
+        let engine = registry.engine_for(Capability::TextEmbedding);
+        let embedded = engine.text_embedding(&query, &CancelToken::new()).ok();
+        let visual = embedded.as_ref().map(|q| VisualQuery {
+            vector: &q.value.vector,
+            model_id: engine.model_id(),
+            model_version: engine.model_version(),
+            coverage: q.meta.confidence,
+        });
+        let text_only = embedded.as_ref().is_none_or(|q| q.meta.confidence == 0.0);
+        let understood = family_archive_core::ai::text::render_query(&query).matched_terms;
+        let results = repo
+            .natural_language_search(&query, visual, &filters)
+            .map_err(map_err)?;
+        (results, text_only, understood)
+    };
     // Populate a friendly date label from the stored range.
     for r in &mut results {
         if let Some((a, b)) = &r.date_range {

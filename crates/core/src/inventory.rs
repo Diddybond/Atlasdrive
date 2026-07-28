@@ -1041,10 +1041,29 @@ pub fn scan_for_names(conn: &Connection, drive_number: Option<i64>) -> Result<Na
         }
     }
     tx.commit()?;
+    // The new tags must be findable by typing, not only by chip.
+    refresh_fts_tags(conn)?;
 
     out.names = counts.into_iter().map(|(tag, count)| TagCount { tag, count }).collect();
     out.names.sort_by(|a, b| b.count.cmp(&a.count).then(a.tag.cmp(&b.tag)));
     Ok(out)
+}
+
+/// Rebuild the text index's tag column from the tag rows, for every file.
+///
+/// The text index used to be written from scene concepts alone, so system
+/// tags (likely-scan) and names read off objects never reached it: the chip
+/// showed the tag and typing it found nothing. Indexing now writes all tags,
+/// and this repairs rows written before it did.
+pub fn refresh_fts_tags(conn: &Connection) -> Result<i64> {
+    let updated = conn.execute(
+        "UPDATE files_fts SET tags = COALESCE((
+             SELECT group_concat(t.name, ' ')
+               FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+              WHERE ft.file_id = files_fts.file_id), '')",
+        [],
+    )?;
+    Ok(updated as i64)
 }
 
 #[cfg(test)]

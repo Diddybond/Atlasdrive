@@ -984,7 +984,23 @@ impl<'a> Pipeline<'a> {
         }
 
         // FTS index row (rebuild for this file).
-        let tag_text: String = scene.concepts.iter().map(|c| c.tag.clone()).collect::<Vec<_>>().join(" ");
+        //
+        // Read the tags back from the catalogue rather than from the scene
+        // analysis: names read off things in the picture and system tags like
+        // likely-scan are inserted above but were never scene concepts, so
+        // building the text index from concepts alone left them unsearchable
+        // by typing — the tag existed, the chip showed it, and the search box
+        // denied it.
+        let tag_text: String = {
+            let mut stmt = tx.prepare(
+                "SELECT t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+                  WHERE ft.file_id = ?1 ORDER BY t.name",
+            )?;
+            let names: Vec<String> = stmt
+                .query_map([file_id], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            names.join(" ")
+        };
         tx.execute("DELETE FROM files_fts WHERE file_id=?1", [file_id])?;
         tx.execute(
             "INSERT INTO files_fts (file_id, filename, relative_path, tags, ocr_text, description)

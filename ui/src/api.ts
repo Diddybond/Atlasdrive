@@ -554,6 +554,17 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       const q = String(args?.query ?? "").toLowerCase();
       const includeOffline = Boolean(args?.includeOffline);
       let results = mockResults.filter((r) => q === "" || r.filename.toLowerCase().includes(q) || r.matched.join(" ").includes(q) || r.relative_path.toLowerCase().includes(q));
+      // Picked subjects intersect, exactly as the real backend's tag filter
+      // does — including when the box is empty and this is a pure browse.
+      const picked: string[] = (args?.tags as string[]) ?? [];
+      if (picked.length > 0) {
+        const tagOf: Record<string, string[]> = {
+          f1: ["wedding", "beach"],
+          f2: ["wedding", "child"],
+          f3: ["likely-scan"],
+        };
+        results = results.filter((r) => picked.every((t) => (tagOf[r.file_id] ?? []).includes(t)));
+      }
       if (!includeOffline) results = results.filter((r) => r.online);
       if (args?.drive) results = results.filter((r) => r.drive_number === args.drive);
       // The real backend embeds the query locally; the mock just echoes any
@@ -700,6 +711,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         { tag: "suit", count: 411 },
         { tag: "outdoor", count: 283 },
         { tag: "wedding", count: 131 },
+        { tag: "likely-scan", count: 995 },
       ] as unknown as T);
     case "photo_thumbnail": {
       const seed = String(args?.fileId ?? "").length * 47;

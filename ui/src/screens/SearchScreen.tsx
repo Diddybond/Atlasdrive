@@ -262,7 +262,12 @@ export function SearchScreen({
                         ? pickedTags.filter((x) => x !== t.tag)
                         : [...pickedTags, t.tag];
                       setPickedTags(next);
-                      void search(query || next[0] || t.tag, next);
+                      // Subjects are filters, not text. Clicking one used to
+                      // write it into the search box, and the leftover words
+                      // were then silently intersected with the next click —
+                      // "jeans" answered through the lens of "likely-scan".
+                      // The box now belongs to the owner's own typing.
+                      void search(query, next);
                     }}
                     aria-label={
                       on

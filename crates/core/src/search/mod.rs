@@ -120,6 +120,48 @@ impl<'a> SearchRepo<'a> {
         })
     }
 
+    /// Browse by subject alone: every photograph carrying all of the picked
+    /// tags, no text query involved.
+    ///
+    /// Clicking a subject chip used to be routed through free-text search,
+    /// which failed three ways at once: `likely-scan` was mangled to
+    /// `likelyscan` and matched nothing, system and name tags were never in
+    /// the text index to begin with, and stale text in the search box was
+    /// silently intersected with the click. The owner clicked a chip listing
+    /// 995 photographs and was told there were none. The tag rows are the
+    /// truth about tags; ask them directly.
+    pub fn browse_by_tags(&self, filters: &SearchFilters) -> Result<Vec<SearchResult>> {
+        if filters.tags.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut sql = String::from(
+            "SELECT f.id
+             FROM files f
+             JOIN drives d ON d.id = f.drive_id
+             WHERE f.status = 'complete'",
+        );
+        push_filter_sql(&mut sql, filters);
+        // Newest first, so a browse opens on the work the owner remembers.
+        sql.push_str(
+            " ORDER BY (SELECT de.earliest_date FROM date_estimates de
+                         WHERE de.file_id = f.id) DESC NULLS LAST
+              LIMIT ?1",
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let ids: Vec<String> = stmt
+            .query_map(params![filters.limit_or(100) as i64], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(mut res) = self.load_result(&id)? {
+                res.matched.push("tag".into());
+                res.score = 1.0;
+                out.push(res);
+            }
+        }
+        Ok(out)
+    }
+
     /// Full-text search over filename, path, tags, OCR text and scene text.
     pub fn text_search(&self, query: &str, filters: &SearchFilters) -> Result<Vec<SearchResult>> {
         let match_query = sanitize_fts(query);
@@ -498,9 +540,17 @@ fn sanitize_fts(query: &str) -> String {
         .split_whitespace()
         .filter(|t| t.chars().any(|c| c.is_alphanumeric()))
         .map(|t| {
-            let cleaned: String = t.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
-            format!("\"{cleaned}\"")
+            // Punctuation becomes a space *inside* a quoted phrase, so
+            // `likely-scan` searches as the phrase "likely scan" — which is
+            // how FTS tokenised the indexed text. It used to be stripped,
+            // turning the term into `likelyscan`, a word that exists nowhere.
+            let cleaned: String = t
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+                .collect();
+            format!("\"{}\"", cleaned.split_whitespace().collect::<Vec<_>>().join(" "))
         })
+        .filter(|t| t.len() > 2)
         .collect();
     terms.join(" OR ")
 }
@@ -586,18 +636,21 @@ mod tests {
     #[test]
     fn fts_sanitize() {
         assert_eq!(sanitize_fts("bike images"), "\"bike\" OR \"images\"");
-        // Injection characters are stripped; only alphanumerics survive per term.
-        assert_eq!(sanitize_fts("a\" OR 1=1 --"), "\"a\" OR \"OR\" OR \"11\"");
+        // Injection characters become spaces *inside* a quoted phrase, so the
+        // syntax can never escape the quotes. Punctuation used to be stripped
+        // instead, which welded `likely-scan` into `likelyscan` — a word that
+        // matched nothing anywhere.
+        assert_eq!(sanitize_fts("a\" OR 1=1 --"), "\"a\" OR \"OR\" OR \"1 1\"");
     }
 }
 
 #[cfg(test)]
-mod tag_filter_tests {
+pub(crate) mod tag_filter_tests {
     use super::*;
     use crate::db::{self, SchemaKind};
 
     /// Two drives, four photographs, overlapping subjects.
-    fn catalogue() -> rusqlite::Connection {
+    pub(crate) fn catalogue() -> rusqlite::Connection {
         let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
         for (id, n, vol) in [("d1", 1i64, "Late25A"), ("d2", 2, "NewVolume")] {
             conn.execute(
@@ -739,5 +792,53 @@ mod tag_filter_tests {
         );
         let n: i64 = conn.query_row(&q, [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+    }
+}
+
+#[cfg(test)]
+mod browse_tests {
+    use super::*;
+
+    /// The owner's exact case: a subject chip listing hundreds of photographs
+    /// answered "no matching photographs". Hyphenated tag, no query text.
+    #[test]
+    fn browsing_a_hyphenated_subject_finds_its_photographs() {
+        let conn = tag_filter_tests::catalogue();
+        conn.execute(
+            "INSERT INTO tags(id, name, tag_type, created_at)
+             VALUES ('t9','likely-scan','system','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO file_tags(file_id, tag_id, confidence, source, created_at)
+             VALUES ('f1','t9',0.9,'system','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let repo = SearchRepo::new(&conn);
+        let filters = SearchFilters { tags: vec!["likely-scan".into()], ..Default::default() };
+        let hits = repo.browse_by_tags(&filters).unwrap();
+        assert_eq!(hits.len(), 1, "the tagged photograph must be found");
+        assert!(hits[0].matched.contains(&"tag".to_string()));
+    }
+
+    #[test]
+    fn browsing_with_no_subjects_returns_nothing_rather_than_everything() {
+        let conn = tag_filter_tests::catalogue();
+        let repo = SearchRepo::new(&conn);
+        assert!(repo.browse_by_tags(&SearchFilters::default()).unwrap().is_empty());
+    }
+
+    /// Typed text with a hyphen must search as the phrase FTS indexed, not as
+    /// a fused word that exists nowhere.
+    #[test]
+    fn a_hyphenated_query_becomes_a_phrase_not_a_fused_word() {
+        let q = sanitize_fts("likely-scan");
+        assert_eq!(q, "\"likely scan\"", "got {q}");
+        assert_eq!(sanitize_fts("wedding_dress"), "\"wedding dress\"");
+        // And ordinary words are untouched.
+        assert_eq!(sanitize_fts("beach"), "\"beach\"");
     }
 }

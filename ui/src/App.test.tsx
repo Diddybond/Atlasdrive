@@ -62,26 +62,38 @@ describe("AtlasDrive UI", () => {
     expect(screen.getAllByText(/1 photograph$/).length).toBeGreaterThan(0);
   });
 
-  it("lists what is in the photographs and narrows when a subject is picked", async () => {
+  it("browses a subject without disturbing the search box", async () => {
     render(<App />);
     // The archive is browsable without having to guess a search term.
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
     });
-    // Counts are shown, so you know whether a subject is worth clicking.
     const chip = screen.getByRole("button", { name: /Narrow to the 131 photographs showing wedding/ });
-    expect(chip).toBeDefined();
-    expect(chip.getAttribute("aria-pressed")).toBe("false");
-
     fireEvent.click(chip);
-    // Picking is the same operation as typing it, so the box reflects it, and
-    // the chip now reads as a filter that is on.
+
+    // Results arrive from the tag itself — no text search involved, and the
+    // box stays the owner's own. Writing the tag into it was how "jeans"
+    // ended up answered through the lens of a stale "likely-scan".
     await waitFor(() => {
-      expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("wedding");
+      expect(screen.getByText("beach_1998.jpg")).toBeDefined();
     });
+    expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("");
     expect(
       screen.getByRole("button", { name: /Stop narrowing to wedding/ }).getAttribute("aria-pressed"),
     ).toBe("true");
+  });
+
+  /// The exact failure the owner hit: a hyphenated subject with hundreds of
+  /// photographs behind it must browse to them, not to an empty page.
+  it("a hyphenated subject still finds its photographs", async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /showing likely-scan/ }));
+    await waitFor(() => {
+      expect(screen.getByText("old_scan.jpg")).toBeDefined();
+    });
   });
 
   /// Two subjects must mean "both", not "either" — the whole point of picking

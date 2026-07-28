@@ -1928,3 +1928,23 @@ Requested as "one final, thorough audit". Findings, all fixed and tested:
 Verified clean at audit end: 307 Rust tests, 70 UI tests, typecheck; Drive 3
 scanning live through the app (0 failures); catalogue 213MB and growing at
 ~43KB per photograph; backups 0.5GB on the Myers Creative Drive.
+
+## D-074 — Clicking a subject asks the tag rows, not the search box
+
+**Decision.** Picking subject chips with an empty search box browses via
+`browse_by_tags` — a direct query of `file_tags`, newest photographs first —
+and chips never write text into the box. Typed text with punctuation searches
+as the phrase FTS actually indexed (`likely-scan` → `"likely scan"`), the text
+index's tag column is built from *all* of a file's tags rather than scene
+concepts alone, and `refresh_fts_tags` repaired the rows indexed before that
+(0 → 2,075 hits for the owner's own case, matching the tag rows exactly).
+
+**Why.** The owner clicked a chip listing 995 photographs and was told there
+were none. Three defects stacked: the chip was routed through free-text search;
+the sanitiser welded `likely-scan` into `likelyscan`, a word that exists
+nowhere; and system and name tags had never been written into the text index
+anyway. A fourth compounded them: chips wrote their tag into the search box, so
+the leftover words were silently intersected with the next click — "jeans"
+answered through the lens of a stale "likely-scan". A count on a chip is a
+promise; clicking it must show those photographs, so the click now goes to the
+same rows the count came from.
