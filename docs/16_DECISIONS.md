@@ -1948,3 +1948,34 @@ the leftover words were silently intersected with the next click — "jeans"
 answered through the lens of a stale "likely-scan". A count on a chip is a
 promise; clicking it must show those photographs, so the click now goes to the
 same rows the count came from.
+
+## D-075 — Every folder gets one honest sentence
+
+**Decision.** `foldersum::folder_summaries` describes each shoot folder on a
+drive in plain language — "Looks like an event. 118 photos, from October 2018.
+The name 'blackburn' shows up in 3 photos." — from evidence indexing already
+recorded: subject tags, face counts, names read off things in the pictures,
+and dates. Surfaced as "What's in each folder" on the drive card and
+`atlasdrive drive folders --number N`. Works with the drive in a drawer.
+
+**How the folder is found.** Workflow layers are stripped from the path —
+`Desktop/05August17Wedding backup/waynes edits/x.jpg` summarises as
+`05August17Wedding backup`, because `raws`/`edits`/`exports` are stages of one
+shoot, not shoots.
+
+**How the guess is made.** Rules ordered from most to least specific evidence:
+scanned prints (likely-scan share), weddings (bride/dress/groom), family
+shoots (children), portrait sessions (one face per photo, photo after photo),
+product photography (few faces, object tags dominate — named, e.g. "mostly
+food and tableware"), events (many faces per photo plus crowd/celebration),
+then an admitted "a mix of photos — mostly X and Y". A client name is only
+claimed when read in three or more photographs — one stray label is not a
+client. Portraits are judged *before* events because headshots are shot in
+suits and "suit" is what the event rule looks for; a real folder of 36
+headshots was called "an event" until that ordering was fixed against the
+owner's actual Drive 4, where the full set of 17 folders was reviewed by hand.
+
+**Why sentences hedge.** Every description begins "Looks like" and ends with
+its evidence — counts, dates, the name and how often it was read — because
+these are inferences, and an inference the owner can check is worth more than
+a confident label they cannot.

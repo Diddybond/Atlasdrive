@@ -288,6 +288,11 @@ enum DriveAction {
         #[arg(long)]
         number: Option<i64>,
     },
+    /// What each folder on a drive appears to contain, in plain language.
+    Folders {
+        #[arg(long)]
+        number: i64,
+    },
     /// Reclaim space: prune oversized EXIF dumps and compact the catalogue.
     Compact,
     /// Find every pair of drives that look like clones of one another.
@@ -595,6 +600,7 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
         }
         DriveAction::Failures { number, retry, code } => drive_failures_cmd(ctx, number, retry, code),
         DriveAction::Names { number } => drive_names_cmd(ctx, number),
+        DriveAction::Folders { number } => drive_folders_cmd(ctx, number),
         DriveAction::Compact => drive_compact_cmd(ctx),
         DriveAction::Compare { a, b, list } => {
             let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
@@ -1128,6 +1134,22 @@ fn compact_cmd(ctx: &Ctx) -> Result<()> {
     let after = std::fs::metadata(ctx.paths.archive_db()).map(|m| m.len()).unwrap_or(0);
     println!("  {} -> {}", human_bytes(before), human_bytes(after));
 
+    Ok(())
+}
+
+/// Describe what each folder on a drive appears to contain.
+fn drive_folders_cmd(ctx: &Ctx, number: i64) -> Result<()> {
+    let archive = db::open(&ctx.paths.archive_db(), db::SchemaKind::Archive)?;
+    let folders = family_archive_core::foldersum::folder_summaries(&archive, number)?;
+    if folders.is_empty() {
+        println!("Drive {number}: nothing catalogued yet.");
+        return Ok(());
+    }
+    println!("Drive {number} — {} folder(s):\n", folders.len());
+    for f in folders {
+        println!("  {}", f.folder);
+        println!("      {}\n", f.description);
+    }
     Ok(())
 }
 

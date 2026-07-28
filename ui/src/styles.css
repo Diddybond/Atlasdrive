@@ -706,3 +706,9 @@ h2 {
 /* Stop sits beside the status pill, where the eye already goes to check
    whether a scan is running. */
 .head-actions { display: flex; align-items: center; gap: 12px; }
+
+/* Each folder gets its name and one honest sentence about what it holds. */
+.folder-stories { list-style: none; padding: 0; margin: 14px 0 4px; display: grid; gap: 10px; }
+.folder-stories li { display: grid; gap: 2px; }
+.folder-name { font-weight: 600; }
+.folder-story { font-size: 0.9rem; opacity: 0.75; }

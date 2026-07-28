@@ -1202,6 +1202,18 @@ fn last_scan_error(state: State<AppState>) -> Option<String> {
     state.last_error.lock().unwrap().clone()
 }
 
+/// What each folder on a drive appears to contain, in plain language.
+/// Works with the drive disconnected — it reads only the catalogue.
+#[tauri::command]
+fn folder_summaries(
+    state: State<AppState>,
+    drive_number: i64,
+) -> Result<Vec<family_archive_core::foldersum::FolderSummary>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::foldersum::folder_summaries(&archive, drive_number).map_err(map_err)
+}
+
 /// Why files on this drive were given up on, most common reason first.
 #[tauri::command]
 fn scan_failures(
@@ -1541,6 +1553,7 @@ pub fn run() {
             drive_coverage,
             scan_stats,
             scan_failures,
+            folder_summaries,
             last_scan_error,
             stop_scan,
             stop_pending,

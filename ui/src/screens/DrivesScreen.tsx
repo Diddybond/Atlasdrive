@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, Drive, DriveContents, DriveCoverage, Volume } from "../api";
+import { api, FolderSummary, Drive, DriveContents, DriveCoverage, Volume } from "../api";
 
 export function DrivesScreen() {
   const [coverage, setCoverage] = useState<Record<number, DriveCoverage>>({});
@@ -10,6 +10,8 @@ export function DrivesScreen() {
   const [drives, setDrives] = useState<Drive[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [scanningDrive, setScanningDrive] = useState<number | null>(null);
+  // Folder stories, loaded on demand per drive. null = not asked yet.
+  const [folderView, setFolderView] = useState<Record<number, FolderSummary[] | null>>({});
   const [stopPending, setStopPending] = useState(false);
   const [number, setNumber] = useState("");
   const [name, setName] = useState("");
@@ -402,7 +404,30 @@ export function DrivesScreen() {
                   >
                     Edit location &amp; categories
                   </button>
+                  <button
+                    className="ghost"
+                    onClick={() =>
+                      folderView[d.drive_number]
+                        ? setFolderView((v) => ({ ...v, [d.drive_number]: null }))
+                        : void api
+                            .folderSummaries(d.drive_number)
+                            .then((f) => setFolderView((v) => ({ ...v, [d.drive_number]: f })))
+                    }
+                    aria-label={`What is in each folder on Drive ${d.drive_number}`}
+                  >
+                    {folderView[d.drive_number] ? "Hide folders" : "What's in each folder"}
+                  </button>
                 </>
+              )}
+              {folderView[d.drive_number] && (
+                <ul className="folder-stories" aria-label={`Folders on Drive ${d.drive_number}`}>
+                  {folderView[d.drive_number]!.map((f) => (
+                    <li key={f.folder}>
+                      <span className="folder-name">{f.folder}</span>
+                      <span className="folder-story">{f.description}</span>
+                    </li>
+                  ))}
+                </ul>
               )}
               {driveNotes[d.drive_number] && (
                 <p className="drive-note" role="status">

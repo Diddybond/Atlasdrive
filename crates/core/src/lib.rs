@@ -27,6 +27,7 @@ pub mod error;
 pub mod events;
 pub mod export;
 pub mod faces;
+pub mod foldersum;
 pub mod integrity;
 pub mod inventory;
 pub mod logging;

@@ -829,6 +829,26 @@ describe("Stopping a scan", () => {
   });
 });
 
+describe("Folder stories on the Drives screen", () => {
+  /// The owner's ask, near-verbatim: "This folder appears to contain an event
+  /// for Crown Paints." One button per drive, one sentence per folder.
+  it("tells the story of each folder in plain language", async () => {
+    setMockScanning(false);
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    const btn = (await screen.findAllByRole("button", { name: /What is in each folder/ }))[0];
+    fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(screen.getByText("Crown 6th July 2025")).toBeDefined();
+    });
+    expect(screen.getByText(/Looks like an event/)).toBeDefined();
+    expect(screen.getByText(/crown-paints/)).toBeDefined();
+    // And the guess always carries its evidence, so it can be judged.
+    expect(screen.getByText(/132 photos/)).toBeDefined();
+  });
+});
+
 describe("Managing scans from the Drives screen", () => {
   /// The owner's requirement, stated plainly: stop a scan, come back to that
   /// drive later, or put a different drive on — all without a command line.

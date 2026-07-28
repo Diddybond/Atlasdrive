@@ -296,6 +296,14 @@ export interface NameScan {
   names: TagCount[];
 }
 
+export interface FolderSummary {
+  folder: string;
+  photo_count: number;
+  description: string;
+  earliest: string | null;
+  latest: string | null;
+}
+
 export interface FailureReason {
   code: string;
   message: string;
@@ -371,6 +379,8 @@ export const api = {
   lastScanError: () => call<string | null>("last_scan_error"),
   stopScan: () => call<string>("stop_scan"),
   stopPending: () => call<boolean>("stop_pending"),
+  folderSummaries: (driveNumber: number) =>
+    call<FolderSummary[]>("folder_summaries", { driveNumber }),
   scanFailures: (driveNumber: number) =>
     call<FailureReason[]>("scan_failures", { driveNumber }),
   retryFailedFiles: (driveNumber: number, code?: string) =>
@@ -782,6 +792,24 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(mockStopping as unknown as T);
     case "last_scan_error":
       return Promise.resolve(mockScanError as unknown as T);
+    case "folder_summaries":
+      return Promise.resolve([
+        {
+          folder: "Crown 6th July 2025",
+          photo_count: 132,
+          description:
+            "Looks like an event. 132 photos, from July 2025. The name \u201ccrown-paints\u201d shows up in 24 photos.",
+          earliest: "2025-07-06",
+          latest: "2025-07-06",
+        },
+        {
+          folder: "JWP",
+          photo_count: 306,
+          description: "Looks like product photography \u2014 mostly container and carton. 306 photos, from March 2026.",
+          earliest: "2026-03-01",
+          latest: "2026-03-02",
+        },
+      ] as unknown as T);
     case "scan_failures":
       return Promise.resolve([
         {
