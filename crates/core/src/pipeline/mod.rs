@@ -352,6 +352,19 @@ impl<'a> Pipeline<'a> {
             let mut batch_failure = 0u64;
 
             for item in &batch {
+                // Stop is answered between photographs, not only between
+                // batches. Every commit is per-file and atomic, so stopping
+                // here is exactly as safe as stopping at the batch boundary —
+                // and a batch of 64 large TIFFs can take an hour, which is
+                // how "stop at the next batch boundary" became "carry on for
+                // an hour after being told to stop" on a real drive. The
+                // unfinished lease simply expires and the file is redone next
+                // run.
+                if self.cancel.is_cancelled() || crate::stop::requested(self.paths) {
+                    logger.warn("cancelled").emit_best_effort();
+                    interrupted = true;
+                    break;
+                }
                 match self.process_file(opts, &drive, item, &opts.path, &thumbs_dir, dry_run) {
                     Ok(rel) => {
                         batch_success += 1;

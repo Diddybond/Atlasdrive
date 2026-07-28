@@ -1184,3 +1184,21 @@ fn a_genuinely_new_file_is_not_mistaken_for_a_moved_one() {
         .unwrap();
     assert_eq!(complete, 3, "two originals plus the genuinely new photograph");
 }
+
+/// A stop request on disk is obeyed before any photograph is touched, and
+/// leaves the queue intact for the next run.
+#[test]
+fn a_standing_stop_request_interrupts_without_losing_work() {
+    let (h, opts) = setup(no_disk_floor());
+    let p = pipeline(&h);
+    crate::stop::request(&h.paths).unwrap();
+
+    let summary = p.run(&opts).unwrap();
+    assert_eq!(summary.files_done, 0, "nothing should be processed after a stop");
+    assert!(!summary.halted, "a stop is an interruption, not a failure");
+
+    // Withdraw the request and the same run finishes normally.
+    crate::stop::clear(&h.paths).unwrap();
+    let resumed = p.run(&opts).unwrap();
+    assert_eq!(resumed.files_done, 3, "the queue must have survived the stop");
+}
