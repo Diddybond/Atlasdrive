@@ -423,7 +423,22 @@ export function DrivesScreen() {
                 <ul className="folder-stories" aria-label={`Folders on Drive ${d.drive_number}`}>
                   {folderView[d.drive_number]!.map((f) => (
                     <li key={f.folder}>
-                      <span className="folder-name">{f.folder}</span>
+                      <span className="folder-head">
+                        <span className="folder-name">{f.folder}</span>
+                        <button
+                          className="ghost"
+                          onClick={() =>
+                            void api
+                              .revealFolder(d.drive_number, f.folder, f.example_path)
+                              .then((m) =>
+                                setDriveNotes((n) => ({ ...n, [d.drive_number]: m })),
+                              )
+                          }
+                          aria-label={`Go to the ${f.folder} folder on Drive ${d.drive_number}`}
+                        >
+                          Go to folder
+                        </button>
+                      </span>
                       <span className="folder-story">{f.description}</span>
                     </li>
                   ))}

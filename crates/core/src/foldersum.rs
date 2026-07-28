@@ -28,6 +28,11 @@ pub struct FolderSummary {
     pub description: String,
     pub earliest: Option<String>,
     pub latest: Option<String>,
+    /// One real file inside the folder, kept so "go to folder" can resolve the
+    /// folder's true place on the mounted drive. The displayed name is a
+    /// cleaned shoot name — `JWP` may really live at `Desktop/JWP/raws` — so
+    /// the way back is through a file that is actually there.
+    pub example_path: String,
 }
 
 /// Folder components that are workflow, not identity.
@@ -86,6 +91,8 @@ pub fn folder_key(relative_path: &str) -> String {
 #[derive(Debug, Default)]
 struct Evidence {
     photos: i64,
+    /// First relative path seen in the folder.
+    example: String,
     /// tag name → photographs carrying it.
     tags: BTreeMap<String, i64>,
     /// Photographs with at least one face.
@@ -256,6 +263,9 @@ pub fn folder_summaries(conn: &Connection, drive_number: i64) -> Result<Vec<Fold
         for row in rows {
             let (rel, date, faces) = row?;
             let ev = folders.entry(folder_key(&rel)).or_default();
+            if ev.example.is_empty() {
+                ev.example = rel.clone();
+            }
             ev.photos += 1;
             if faces > 0 {
                 ev.with_faces += 1;
@@ -304,13 +314,64 @@ pub fn folder_summaries(conn: &Connection, drive_number: i64) -> Result<Vec<Fold
         .map(|(folder, ev)| FolderSummary {
             description: describe(&folder, &ev),
             photo_count: ev.photos,
-            earliest: ev.earliest,
-            latest: ev.latest,
+            earliest: ev.earliest.clone(),
+            latest: ev.latest.clone(),
+            example_path: ev.example.clone(),
             folder,
         })
         .collect();
     out.sort_by_key(|f| std::cmp::Reverse(f.photo_count));
     Ok(out)
+}
+
+/// The folder's real location on the connected drive, found through one of
+/// its files.
+///
+/// The displayed folder is a cleaned name, so the absolute path is recovered
+/// by resolving a real file inside it and then walking back up until the
+/// component matching the shoot name is reached. If no component matches —
+/// "(top of the drive)" — the file's own directory is the honest answer.
+pub fn folder_abs_path(
+    conn: &Connection,
+    drive_number: i64,
+    example_path: &str,
+    folder: &str,
+) -> Result<Option<std::path::PathBuf>> {
+    use rusqlite::OptionalExtension;
+
+    let (scan_root, volume): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT (SELECT sr.scan_root FROM scan_runs sr
+                      JOIN drives dd ON dd.id = sr.drive_id
+                     WHERE dd.drive_number = ?1 AND sr.mode <> 'dry-run'
+                     ORDER BY sr.started_at DESC LIMIT 1),
+                    d.volume_name
+               FROM drives d WHERE d.drive_number = ?1",
+            [drive_number],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or((None, None));
+
+    let candidates = [
+        scan_root.map(|root| std::path::Path::new(&root).join(example_path)),
+        volume.map(|v| std::path::Path::new("/Volumes").join(v).join(example_path)),
+    ];
+    let Some(file) = candidates.into_iter().flatten().find(|p| p.exists()) else {
+        return Ok(None);
+    };
+
+    // Walk up from the file until the folder's own component is reached.
+    let mut dir = file.parent().map(|p| p.to_path_buf());
+    let mut probe = dir.clone();
+    while let Some(p) = probe {
+        if p.file_name().is_some_and(|n| n.to_string_lossy() == folder) {
+            dir = Some(p);
+            break;
+        }
+        probe = p.parent().map(|q| q.to_path_buf());
+    }
+    Ok(dir.filter(|d| d.is_dir()))
 }
 
 #[cfg(test)]
@@ -455,5 +516,68 @@ mod portrait_tests {
         e.tags.insert("celebration".into(), 30);
         let s = describe("BlackburnYouthZonePatrons25thOct18", &e);
         assert!(s.contains("an event"), "{s}");
+    }
+}
+
+#[cfg(test)]
+mod goto_tests {
+    use super::*;
+    use crate::db::{self, SchemaKind};
+
+    fn catalogue(scan_root: &str) -> rusqlite::Connection {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute(
+            "INSERT INTO drives(id, drive_number, volume_name, status, first_seen_at)
+             VALUES ('d1', 4, 'NoSuchVolume', 'online', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scan_runs(id, drive_id, drive_number, scan_root, mode, started_at)
+             VALUES ('run1','d1',4,?1,'initial','2026-01-01T00:00:00Z')",
+            [scan_root],
+        )
+        .unwrap();
+        conn
+    }
+
+    /// The real shape: the shown name is `JWP`, the file lives under
+    /// `Desktop/JWP/raws`. Go-to must land on the JWP folder itself.
+    #[test]
+    fn lands_on_the_shoot_folder_not_the_workflow_subfolder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("Desktop/JWP/raws")).unwrap();
+        std::fs::write(root.join("Desktop/JWP/raws/a.tif"), b"x").unwrap();
+
+        let conn = catalogue(&root.to_string_lossy());
+        let found = folder_abs_path(&conn, 4, "Desktop/JWP/raws/a.tif", "JWP")
+            .unwrap()
+            .expect("must resolve while the drive is present");
+        assert_eq!(found, root.join("Desktop/JWP"));
+    }
+
+    /// Files at the top of the drive have no shoot component; their own
+    /// directory is the honest answer.
+    #[test]
+    fn top_of_drive_opens_the_directory_the_file_is_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("IMG_0001.jpg"), b"x").unwrap();
+
+        let conn = catalogue(&root.to_string_lossy());
+        let found = folder_abs_path(&conn, 4, "IMG_0001.jpg", "(top of the drive)")
+            .unwrap()
+            .expect("must resolve");
+        assert_eq!(found, root);
+    }
+
+    /// A drive in a drawer resolves to nothing — the caller says "connect
+    /// Drive 4", it does not guess.
+    #[test]
+    fn an_unplugged_drive_resolves_to_nothing() {
+        let conn = catalogue("/no/such/place");
+        let found = folder_abs_path(&conn, 4, "Desktop/JWP/raws/a.tif", "JWP").unwrap();
+        assert!(found.is_none());
     }
 }

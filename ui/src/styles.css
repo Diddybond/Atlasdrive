@@ -712,3 +712,4 @@ h2 {
 .folder-stories li { display: grid; gap: 2px; }
 .folder-name { font-weight: 600; }
 .folder-story { font-size: 0.9rem; opacity: 0.75; }
+.folder-head { display: flex; align-items: baseline; gap: 10px; }

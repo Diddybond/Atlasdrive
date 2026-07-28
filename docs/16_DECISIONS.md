@@ -1979,3 +1979,15 @@ owner's actual Drive 4, where the full set of 17 folders was reviewed by hand.
 its evidence — counts, dates, the name and how often it was read — because
 these are inferences, and an inference the owner can check is worth more than
 a confident label they cannot.
+
+## D-076 — Every folder story has a way back to the folder
+
+**Decision.** Each folder summary carries `example_path` — one real file inside
+it — and "Go to folder" resolves the folder's true place on the mounted drive
+by resolving that file and walking up to the component matching the shoot
+name. `JWP` opens `Desktop/JWP`, not `Desktop/JWP/raws`. A drive in a drawer
+answers "Connect Drive 4 to open this folder" rather than guessing.
+
+**Why the indirection.** The displayed name is a cleaned shoot name with
+furniture and workflow layers stripped, so it cannot simply be joined to the
+mount point — the way back is through a file that is actually there.

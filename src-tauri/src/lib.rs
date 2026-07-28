@@ -1214,6 +1214,40 @@ fn folder_summaries(
     family_archive_core::foldersum::folder_summaries(&archive, drive_number).map_err(map_err)
 }
 
+/// Open a shoot folder in Finder, when its drive is connected.
+#[tauri::command]
+fn reveal_folder(
+    state: State<AppState>,
+    drive_number: i64,
+    folder: String,
+    example_path: String,
+) -> Result<String, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    match family_archive_core::foldersum::folder_abs_path(
+        &archive,
+        drive_number,
+        &example_path,
+        &folder,
+    )
+    .map_err(map_err)?
+    {
+        Some(dir) => {
+            #[cfg(target_os = "macos")]
+            {
+                std::process::Command::new("open")
+                    .arg(&dir)
+                    .spawn()
+                    .map_err(|e| format!("could not open Finder: {e}"))?;
+            }
+            Ok(format!("Opened {} in Finder.", dir.display()))
+        }
+        None => Ok(format!(
+            "Connect Drive {drive_number} to open this folder — it is not plugged in right now."
+        )),
+    }
+}
+
 /// Why files on this drive were given up on, most common reason first.
 #[tauri::command]
 fn scan_failures(
@@ -1554,6 +1588,7 @@ pub fn run() {
             scan_stats,
             scan_failures,
             folder_summaries,
+            reveal_folder,
             last_scan_error,
             stop_scan,
             stop_pending,

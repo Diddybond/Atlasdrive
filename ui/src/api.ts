@@ -302,6 +302,7 @@ export interface FolderSummary {
   description: string;
   earliest: string | null;
   latest: string | null;
+  example_path: string;
 }
 
 export interface FailureReason {
@@ -379,6 +380,8 @@ export const api = {
   lastScanError: () => call<string | null>("last_scan_error"),
   stopScan: () => call<string>("stop_scan"),
   stopPending: () => call<boolean>("stop_pending"),
+  revealFolder: (driveNumber: number, folder: string, examplePath: string) =>
+    call<string>("reveal_folder", { driveNumber, folder, examplePath }),
   folderSummaries: (driveNumber: number) =>
     call<FolderSummary[]>("folder_summaries", { driveNumber }),
   scanFailures: (driveNumber: number) =>
@@ -792,6 +795,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       return Promise.resolve(mockStopping as unknown as T);
     case "last_scan_error":
       return Promise.resolve(mockScanError as unknown as T);
+    case "reveal_folder":
+      return Promise.resolve(`Opened /Volumes/Drive/${args?.folder} in Finder.` as unknown as T);
     case "folder_summaries":
       return Promise.resolve([
         {
@@ -801,6 +806,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
             "Looks like an event. 132 photos, from July 2025. The name \u201ccrown-paints\u201d shows up in 24 photos.",
           earliest: "2025-07-06",
           latest: "2025-07-06",
+          example_path: "Crown 6th July 2025/img1.jpg",
         },
         {
           folder: "JWP",
@@ -808,6 +814,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
           description: "Looks like product photography \u2014 mostly container and carton. 306 photos, from March 2026.",
           earliest: "2026-03-01",
           latest: "2026-03-02",
+          example_path: "Desktop/JWP/raws/a.tif",
         },
       ] as unknown as T);
     case "scan_failures":

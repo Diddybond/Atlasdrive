@@ -847,6 +847,23 @@ describe("Folder stories on the Drives screen", () => {
     // And the guess always carries its evidence, so it can be judged.
     expect(screen.getByText(/132 photos/)).toBeDefined();
   });
+
+  /// Reading about a folder invites going to it. The button resolves the real
+  /// path on the mounted drive, and says plainly when the drive is not there.
+  it("goes to the folder in Finder from its story", async () => {
+    setMockScanning(false);
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    const btn = (await screen.findAllByRole("button", { name: /What is in each folder/ }))[0];
+    fireEvent.click(btn);
+    const goto = await screen.findByRole("button", {
+      name: /Go to the Crown 6th July 2025 folder/,
+    });
+    fireEvent.click(goto);
+    await waitFor(() => {
+      expect(screen.getByText(/Opened .*Crown 6th July 2025.* in Finder/)).toBeDefined();
+    });
+  });
 });
 
 describe("Managing scans from the Drives screen", () => {
