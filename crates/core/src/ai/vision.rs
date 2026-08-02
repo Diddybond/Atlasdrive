@@ -93,7 +93,12 @@ struct WorkerAnalysis {
 struct Worker {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// Replies arrive through a dedicated reader thread, so waiting for one
+    /// can carry a deadline. Reading the pipe directly cannot: a worker that
+    /// dies or wedges mid-photograph leaves a blocking read that never
+    /// returns, and the scan with it. A real overnight run sat frozen for two
+    /// days exactly that way — no error, no progress, no way to stop it.
+    replies: std::sync::mpsc::Receiver<std::io::Result<String>>,
     /// Photographs this process has analysed, so it can be retired before its
     /// memory becomes a problem for the machine.
     served: u32,
@@ -239,14 +244,26 @@ impl VisionEngine {
 
         worker.served += 1;
 
-        let mut line = String::new();
-        let read = worker
-            .stdout
-            .read_line(&mut line)
-            .map_err(|e| Error::Other(format!("vision worker read failed: {e}")))?;
-        if read == 0 {
-            return Err(Error::Other("vision worker closed its output".into()));
-        }
+        // Wait for the reply with a deadline. A worker that wedges on one
+        // photograph is killed and the photograph fails retryably; the scan
+        // moves on to the next file instead of freezing for days.
+        let line = match worker.replies.recv_timeout(Self::exchange_timeout()) {
+            Ok(Ok(line)) => line,
+            Ok(Err(e)) => return Err(Error::Other(format!("vision worker read failed: {e}"))),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(Error::Other("vision worker closed its output".into()));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let _ = worker.child.kill();
+                let _ = worker.child.wait();
+                *guard = None;
+                return Err(Error::Other(format!(
+                    "vision worker did not answer within {:?} for {} — killed and will restart",
+                    Self::exchange_timeout(),
+                    abs.display()
+                )));
+            }
+        };
         serde_json::from_str::<WorkerAnalysis>(line.trim())
             .map_err(|e| Error::Other(format!("vision worker sent malformed JSON: {e}")))
     }
@@ -260,7 +277,44 @@ impl VisionEngine {
             .map_err(|e| Error::ModelMissing(format!("could not start vision worker: {e}")))?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
-        Ok(Worker { child, stdin, stdout, served: 0 })
+
+        // The reader thread owns the pipe; each line is handed over a channel.
+        // When the worker exits, read_line returns 0, the loop ends and the
+        // thread with it — nothing here outlives the process it serves.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = stdout;
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if tx.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(Worker { child, stdin, replies: rx, served: 0 })
+    }
+
+    /// How long one photograph may take before the worker is declared wedged.
+    ///
+    /// Generous on purpose: the slowest legitimate photograph seen on a real
+    /// drive — a 1.2GB sixteen-bit TIFF — analysed in a few minutes. Ten is
+    /// comfortably past honest work and far short of the two days a wedged
+    /// worker actually cost. Overridable for tests.
+    fn exchange_timeout() -> std::time::Duration {
+        std::env::var("ATLASDRIVE_VISION_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(std::time::Duration::from_secs(600))
     }
 
     fn meta(&self, confidence: f32, exec_ms: u64) -> AiMeta {
@@ -647,5 +701,93 @@ done
         }
         let result = engine.exchange(&file).expect("the restart must not drop the request");
         assert!(result.ok);
+    }
+}
+
+#[cfg(test)]
+mod wedge_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    fn stub(dir: &std::path::Path, body: &str) -> PathBuf {
+        let path = dir.join("atlasdrive-vision");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--selftest\" ]; then echo \"atlasdrive-vision 1\"; exit 0; fi\n{body}\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    const REPLY: &str = r#"printf '{"ok":true,"error":null,"width":1,"height":1,"faces":[],"labels":[],"ocr":"","print":[]}\n'"#;
+
+    /// A worker that wedges after its first answer — the shape of the failure
+    /// that froze a real scan for two days. The engine must kill it at the
+    /// deadline and recover on a fresh worker: one wedge costs one timeout,
+    /// not the scan.
+    #[test]
+    fn a_wedged_worker_is_killed_and_the_next_exchange_recovers() {
+        std::env::set_var("ATLASDRIVE_VISION_TIMEOUT_SECS", "2");
+        let dir = tempfile::tempdir().unwrap();
+        let engine = VisionEngine::new(stub(
+            dir.path(),
+            // Three properties, each earned by a wrong version of this stub:
+            // `|| exit 0` makes it exit at stdin EOF like the real worker, so
+            // the engine's Drop (which waits for the child) is not left
+            // waiting on a sleeper; the wedge keeps stdout OPEN, because
+            // redirecting it closes the pipe the engine reads and turns the
+            // wedge into an instant, unrepresentative EOF; and the sleep is
+            // short so a killed worker's orphan outlives the test by minutes,
+            // not an hour.
+            &format!("IFS= read -r _a || exit 0\n{REPLY}\nIFS= read -r _b || exit 0\nsleep 120"),
+        ))
+        .unwrap();
+        let file = dir.path().join("photo.jpg");
+        std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
+
+        assert!(engine.exchange(&file).is_ok(), "healthy worker must answer");
+
+        // The worker now wedges. The deadline kills it, the retry gets a
+        // fresh worker, and the photograph still gets analysed.
+        let started = std::time::Instant::now();
+        let second = engine.exchange(&file);
+        let took = started.elapsed();
+        std::env::remove_var("ATLASDRIVE_VISION_TIMEOUT_SECS");
+        assert!(second.is_ok(), "the retry must recover: {second:?}");
+        assert!(
+            took >= std::time::Duration::from_secs(2),
+            "recovery cannot be faster than the deadline that triggered it"
+        );
+        assert!(took < std::time::Duration::from_secs(30), "took {took:?}");
+    }
+
+    /// A worker that never answers at all: the photograph must fail within a
+    /// bounded time — twice the deadline, once for the first try and once for
+    /// the retry — never hang.
+    #[test]
+    fn a_worker_that_never_answers_fails_the_photograph_in_bounded_time() {
+        std::env::set_var("ATLASDRIVE_VISION_TIMEOUT_SECS", "2");
+        let dir = tempfile::tempdir().unwrap();
+        let engine = VisionEngine::new(stub(
+            dir.path(),
+            "IFS= read -r _a || exit 0\nsleep 120",
+        ))
+        .unwrap();
+        let file = dir.path().join("photo.jpg");
+        std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
+
+        let started = std::time::Instant::now();
+        let out = engine.exchange(&file);
+        let took = started.elapsed();
+        std::env::remove_var("ATLASDRIVE_VISION_TIMEOUT_SECS");
+        assert!(out.is_err(), "a worker that never answers must fail the file");
+        assert!(
+            took < std::time::Duration::from_secs(30),
+            "took {took:?} — this is the two-day freeze in miniature"
+        );
+        let msg = out.unwrap_err().to_string();
+        assert!(msg.contains("did not answer"), "the error must say what happened: {msg}");
     }
 }

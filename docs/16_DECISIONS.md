@@ -1991,3 +1991,38 @@ answers "Connect Drive 4 to open this folder" rather than guessing.
 **Why the indirection.** The displayed name is a cleaned shoot name with
 furniture and workflow layers stripped, so it cannot simply be joined to the
 mount point — the way back is through a file that is actually there.
+
+## D-077 — A scan may crash, wedge or stall; it may never lie about it
+
+**Decision.** Three layers, one incident. The scan thread runs inside
+`catch_unwind`: a panic is recorded to `last_error` and clears the running
+state, exactly as an error would. The Vision exchange waits for its reply
+through a reader thread with a ten-minute deadline: a wedged or dead worker is
+killed, the photograph fails retryably, and the next file proceeds. And
+`get_progress` reports a "running" scan whose progress file has not moved for
+thirty minutes as **stalled**, with interface text saying that stopping and
+restarting is safe.
+
+**The incident.** Drive 5, batch 56 completed 19:19, a few photographs of
+batch 57 committed, then silence — for **two days**. The Vision helper process
+was gone; a process sample showed no pipeline frames in any thread. The scan
+thread had panicked mid-batch, unwinding past the cleanup that clears
+`running`. The consequences cascaded: the interface showed a live scan that
+did not exist, Stop showed "Stopping…" forever because the flag addressed a
+dead thread, no new scan could start because "an index run is already in
+progress", and nothing anywhere said a word. The owner found it by noticing
+the screen never changed.
+
+**Why three layers rather than the one that fired.** The panic was the cause
+this time; a wedged read would produce the same two silent days through a
+different door (`read_line` on a pipe held by a hung worker has no deadline),
+and both fixes still leave the *display* trusting a progress file that a stuck
+photograph stops updating. Each layer covers the failure the others cannot
+see. The deadline is generous — ten minutes, against a slowest-observed
+legitimate photograph of a few minutes — because a false kill costs one retry,
+while a missed wedge costs a night.
+
+**Also fixed here.** `stop_pending` reported the bare flag file, so
+"Stopping…" showed even when nothing was running; it now requires a live run.
+`stop_scan` with nothing running clears any stale flag rather than planting
+one for the next scan to trip over.

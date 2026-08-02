@@ -157,6 +157,7 @@ export function ScanScreen() {
   // leaves a drive running for two days across several sessions; the question
   // being asked is "is this drive finished", not "how has this process done".
   const running = isLive && progress.status === "running";
+  const stalled = isLive && progress.status === "stalled";
   const catalogued = stats ? stats.files : 0;
   // Still queued is the durable truth about what is left: a resumed run
   // re-walks files it has already catalogued, so discovered minus done counts
@@ -183,6 +184,13 @@ export function ScanScreen() {
       {stopNote && (
         <p className="search-note" role="status">
           {stopNote}
+        </p>
+      )}
+
+      {isLive && progress.status === "stalled" && (
+        <p className="search-note warn" role="alert">
+          This scan has not moved for over half an hour — it looks stuck on one photograph.
+          Stopping and starting it again is safe and loses nothing.
         </p>
       )}
 
@@ -216,7 +224,7 @@ export function ScanScreen() {
             </p>
           </div>
           <span className="head-actions">
-            {running && (
+            {(running || stalled) && (
               <button
                 className="secondary"
                 disabled={stopping}
@@ -540,6 +548,8 @@ function statusLabel(status: string): string {
       return "Finished";
     case "interrupted":
       return "Paused";
+    case "stalled":
+      return "Stalled";
     case "halted":
       return "Stopped for safety";
     default:

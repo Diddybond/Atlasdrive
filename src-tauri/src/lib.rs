@@ -798,6 +798,14 @@ fn start_index(
     let error_slot = state.last_error.clone();
 
     std::thread::spawn(move || {
+        // The whole run is held inside catch_unwind. A panic anywhere in the
+        // pipeline used to unwind straight past the cleanup at the bottom of
+        // this closure, leaving `running` set forever: the interface showed a
+        // scan that no longer existed, Stop waited politely on a dead thread,
+        // and no new scan could start — "an index run is already in progress",
+        // said an app whose scan thread had been gone for two days. A crash
+        // must land in the same place as an error: recorded, visible, cleared.
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let result = (|| -> Result<(), String> {
             let archive = open_archive(&paths)?;
             let queue = open_queue(&paths)?;
@@ -859,7 +867,21 @@ fn start_index(
             }
         }
 
-        if let Err(e) = result {
+        result
+        }));
+
+        let outcome = match caught {
+            Ok(r) => r,
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown internal error".into());
+                Err(format!("the scan crashed: {msg}"))
+            }
+        };
+        if let Err(e) = outcome {
             // Recorded where the interface can find it. A run that fails
             // before it writes any progress — a folder that vanished, a drive
             // unplugged between the click and the walk — leaves no other trace
@@ -903,6 +925,15 @@ fn get_progress(state: State<AppState>) -> Result<Option<Progress>, String> {
         let in_flight = state.running.lock().unwrap().is_some();
         if p.status == "running" && !in_flight {
             p.status = "interrupted".to_string();
+        } else if p.status == "running" {
+            // Progress is written after every photograph, so half an hour of
+            // silence from a "running" scan means it is stuck, whatever the
+            // thread believes. A real scan showed "running" for two days
+            // without moving; the label is the only thing the owner can see.
+            let stale = chrono_free_age_minutes(&p.updated_at).map_or(false, |m| m >= 30);
+            if stale {
+                p.status = "stalled".to_string();
+            }
         }
     }
     Ok(progress)
@@ -1166,6 +1197,32 @@ fn find_names(
     family_archive_core::inventory::scan_for_names(&archive, drive_number).map_err(map_err)
 }
 
+/// Minutes since an ISO-8601 UTC timestamp, without pulling in a time crate.
+fn chrono_free_age_minutes(iso: &str) -> Option<i64> {
+    // "2026-07-31T19:23:38Z" — parsed as days-since-epoch arithmetic.
+    let (date, time) = iso.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, mo, day): (i64, i64, i64) =
+        (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let mut t = time.trim_end_matches('Z').split(':');
+    let (h, mi): (i64, i64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?);
+    // Days since civil epoch (Howard Hinnant's algorithm, i64 throughout).
+    let y_adj = if mo <= 2 { y - 1 } else { y };
+    let era = y_adj.div_euclid(400);
+    let yoe = y_adj - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let then_minutes = days * 1440 + h * 60 + mi;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64
+        / 60;
+    Some(now - then_minutes)
+}
+
 /// Ask whichever process is scanning to stop at the next batch boundary.
 ///
 /// Deliberately not limited to runs this app started. A scan may have been
@@ -1176,6 +1233,12 @@ fn find_names(
 #[tauri::command]
 fn stop_scan(state: State<AppState>) -> Result<String, String> {
     let paths = state.paths.lock().unwrap().clone();
+    // Nothing running means nothing to stop — and no flag left on disk to
+    // ambush the next run.
+    if state.running.lock().unwrap().is_none() {
+        let _ = family_archive_core::stop::clear(&paths);
+        return Ok("Nothing is scanning right now.".to_string());
+    }
     // Cancel our own run too, so a scan started here stops without waiting for
     // the flag to be noticed.
     if let Some(token) = state.running.lock().unwrap().as_ref() {
@@ -1190,8 +1253,11 @@ fn stop_scan(state: State<AppState>) -> Result<String, String> {
 /// True when a stop has been asked for and the scan has not yet noticed.
 #[tauri::command]
 fn stop_pending(state: State<AppState>) -> bool {
+    // Pending means a running scan has been asked and has not yet obeyed.
+    // Reporting the bare flag showed "Stopping..." forever when the scan it
+    // was addressed to no longer existed.
     let paths = state.paths.lock().unwrap().clone();
-    family_archive_core::stop::requested(&paths)
+    state.running.lock().unwrap().is_some() && family_archive_core::stop::requested(&paths)
 }
 
 /// Why the last background scan stopped, if it stopped badly.
