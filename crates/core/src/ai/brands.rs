@@ -160,41 +160,40 @@ pub fn detect(text: &str) -> Vec<BrandHit> {
 /// The mask is byte-aligned with the returned string so a match's span can be
 /// checked for capitalisation without re-scanning the original.
 fn normalise_with_case(s: &str) -> (String, Vec<bool>) {
+    // The output is ASCII by construction, which is what keeps the mask
+    // honest: one byte per character, so byte offsets from the matcher index
+    // the mask directly. An earlier version pushed folded characters through
+    // as-is and rebuilt the string byte-by-byte, which re-encoded every
+    // multi-byte character and silently made the text longer than the mask.
+    // OCR of a motocross event — race plates, stylised sponsor text misread
+    // as accented letters — then produced a match whose offset lay past the
+    // mask's end, and the panic took the whole scan down, file after file.
+    // Characters the fold table cannot bring to ASCII become spaces: no brand
+    // in the lexicon contains them, so they can only ever be word boundaries.
     let mut out = String::with_capacity(s.len());
     let mut upper: Vec<bool> = Vec::with_capacity(s.len());
+    let mut last_space = true;
     for ch in s.chars() {
         let was_upper = ch.is_uppercase();
         let folded = fold(ch);
-        if folded.is_alphanumeric() {
-            let before = out.len();
-            out.extend(folded.to_lowercase());
-            upper.resize(before, false);
-            upper.resize(out.len(), was_upper);
+        if folded.is_ascii_alphanumeric() {
+            out.push(folded.to_ascii_lowercase());
+            upper.push(was_upper);
+            last_space = false;
         } else if matches!(folded, '\'' | '\u{2019}') {
             // dropped, not spaced
-        } else {
+        } else if !last_space {
             out.push(' ');
             upper.push(false);
+            last_space = true;
         }
     }
-    // Collapse runs of spaces, keeping the mask aligned.
-    let mut squeezed = String::with_capacity(out.len());
-    let mut mask = Vec::with_capacity(upper.len());
-    let mut last_space = true; // trims the leading space too
-    for (i, b) in out.bytes().enumerate() {
-        let is_space = b == b' ';
-        if is_space && last_space {
-            continue;
-        }
-        squeezed.push(b as char);
-        mask.push(upper.get(i).copied().unwrap_or(false));
-        last_space = is_space;
+    while out.ends_with(' ') {
+        out.pop();
+        upper.pop();
     }
-    while squeezed.ends_with(' ') {
-        squeezed.pop();
-        mask.pop();
-    }
-    (squeezed, mask)
+    debug_assert_eq!(out.len(), upper.len());
+    (out, upper)
 }
 
 pub(crate) fn fold(ch: char) -> char {
@@ -399,5 +398,38 @@ mod tests {
         for brand in BRAND_LEXICON {
             assert!(seen.insert(normalise(brand)), "duplicate entry: {brand}");
         }
+    }
+}
+
+#[cfg(test)]
+mod mask_alignment_tests {
+    use super::*;
+
+    /// The crash that kept stopping a real scan: OCR with multi-byte
+    /// characters before an ambiguous brand in capitals. The mask used to be
+    /// shorter than the text it guarded, and the offset landed past its end —
+    /// "range start index 20 out of range for slice of length 17", raised from
+    /// inside commit, taking the run down file after file.
+    #[test]
+    fn multibyte_text_before_an_ambiguous_brand_does_not_panic() {
+        for text in [
+            "mañana mañana mañana FORD",
+            "señor garage — SKY banner",
+            "café früh straße BT tower",
+            "гонка мотокросс FORD transit",
+            "日本語のテキスト APPLE store",
+        ] {
+            let _ = detect(text); // must simply not panic
+        }
+    }
+
+    /// And the capitalisation rule still works on both sides of the fold.
+    #[test]
+    fn the_ambiguity_rule_survives_the_ascii_fold() {
+        assert_eq!(
+            detect("mañana FORD mañana").into_iter().map(|b| b.name).collect::<Vec<_>>(),
+            vec!["ford"]
+        );
+        assert!(detect("mañana ford mañana").is_empty(), "lower case must still be refused");
     }
 }

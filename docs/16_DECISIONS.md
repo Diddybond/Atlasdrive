@@ -2026,3 +2026,32 @@ while a missed wedge costs a night.
 "Stopping…" showed even when nothing was running; it now requires a live run.
 `stop_scan` with nothing running clears any stale flag rather than planting
 one for the next scan to trip over.
+
+## D-078 — The Drive 5 crash, named: a mask one byte out of step with its text
+
+**Decision.** `brands::normalise_with_case` now emits ASCII only — one byte per
+character, so the capitalisation mask indexes the text directly, with a
+`debug_assert` holding the two the same length. Characters the fold table
+cannot bring to ASCII become word boundaries, which is safe because no brand
+in the lexicon contains them. And `process_file` runs inside `catch_unwind`:
+a panic in one photograph fails that photograph as "internal error: …" and the
+run continues — per-file commits are what make unwinding there safe.
+
+**The chase.** The crash surfaced only because D-077's thread-boundary catch
+put its message on screen: "the scan crashed: range start index 20 out of
+range for slice of length 17". The catalogue's own vector-index file was the
+obvious suspect — its header layout even puts a read at offset 20 — but the
+file on disk was healthy, and a CLI run with backtraces named the real site:
+the brand matcher, called from name tagging, on OCR text from a motocross
+folder. Stylised race-plate text misread as accented characters was re-encoded
+byte-by-byte during normalisation, growing the text while the mask kept its
+old length; the first capitalised brand match past the drift — FORD, on a
+motocross banner — indexed beyond the mask's end. Five consecutive resumes
+crashed within two minutes each, which the owner reported, accurately, as
+"starts but keeps stopping".
+
+**Evidence.** Regression tests drive the matcher over multibyte OCR shapes —
+Spanish, German, Cyrillic, Japanese — with ambiguous brands beyond them, and
+assert the capitalisation rule survives the fold. Against the real drive: the
+zone that had crashed five runs in a row passed 140 photographs in two clean
+batches with zero failures before the proof run was deliberately stopped.

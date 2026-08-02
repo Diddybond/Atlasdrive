@@ -754,7 +754,10 @@ mod wedge_tests {
         let started = std::time::Instant::now();
         let second = engine.exchange(&file);
         let took = started.elapsed();
-        std::env::remove_var("ATLASDRIVE_VISION_TIMEOUT_SECS");
+        // Deliberately not removed: the two wedge tests run in parallel and
+        // share the process's environment. One removing the override while
+        // the other was mid-exchange reset the deadline to ten minutes and
+        // failed it on duration — flaky only in full-suite runs.
         assert!(second.is_ok(), "the retry must recover: {second:?}");
         assert!(
             took >= std::time::Duration::from_secs(2),
@@ -781,7 +784,6 @@ mod wedge_tests {
         let started = std::time::Instant::now();
         let out = engine.exchange(&file);
         let took = started.elapsed();
-        std::env::remove_var("ATLASDRIVE_VISION_TIMEOUT_SECS");
         assert!(out.is_err(), "a worker that never answers must fail the file");
         assert!(
             took < std::time::Duration::from_secs(30),

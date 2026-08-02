@@ -365,7 +365,25 @@ impl<'a> Pipeline<'a> {
                     interrupted = true;
                     break;
                 }
-                match self.process_file(opts, &drive, item, &opts.path, &thumbs_dir, dry_run) {
+                // A panic while processing one photograph is that
+                // photograph's failure, never the run's. Without this, a
+                // slice-index bug tripped by OCR text in one folder crashed
+                // the whole scan every couple of minutes, and before crashes
+                // were caught at the thread boundary it froze the app for two
+                // days. Per-file commits make unwinding here safe: the file's
+                // transaction either committed or it did not.
+                let processed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.process_file(opts, &drive, item, &opts.path, &thumbs_dir, dry_run)
+                }))
+                .unwrap_or_else(|payload| {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|m| m.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown internal error".into());
+                    Err(Error::Other(format!("internal error: {msg}")))
+                });
+                match processed {
                     Ok(rel) => {
                         batch_success += 1;
                         summary.files_done += 1;
