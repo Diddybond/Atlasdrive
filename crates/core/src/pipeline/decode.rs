@@ -49,6 +49,28 @@ pub fn open_rgb(abs: &Path, scratch_dir: &Path) -> Result<RgbImage> {
         return open_via_system_decoder(abs, scratch_dir);
     }
 
+    // A photograph far larger than any camera produces is decoded at reduced
+    // size, because nothing downstream needs the full grid.
+    //
+    // The pixels are used for a thumbnail (a few hundred pixels), a perceptual
+    // fingerprint (32x32), colour statistics and scanned-print detection. Apple
+    // Vision is handed the original *path* and reads the file itself, so what
+    // the catalogue knows about the picture is unaffected.
+    //
+    // Without this, one shoot on a real drive brought a scan to a visible
+    // standstill: single TIFFs of 2.6GB — over four hundred megapixels —
+    // decoding to gigabytes in memory and then walked several times over. The
+    // scan was working the whole time; from the outside it was indistinguishable
+    // from frozen, and a handful of those files can hold up a night.
+    if let Some((w, h)) = probe_dimensions(abs) {
+        if u64::from(w) * u64::from(h) > MAX_FULL_DECODE_PIXELS {
+            if let Ok(img) = open_downsampled(abs, scratch_dir) {
+                return Ok(img);
+            }
+            // Falling through is deliberate: a slow decode beats no photograph.
+        }
+    }
+
     match open_with_generous_limits(abs) {
         Ok(img) => Ok(img),
         Err(first) => {
@@ -70,6 +92,70 @@ pub fn open_rgb(abs: &Path, scratch_dir: &Path) -> Result<RgbImage> {
             }
         }
     }
+}
+
+/// Above this, decode a reduced copy rather than the full grid.
+///
+/// Generously above any camera: a 100-megapixel medium-format back still takes
+/// the direct path. Only scanned composites and stitched panoramas — the files
+/// that measure in gigabytes — go the other way.
+const MAX_FULL_DECODE_PIXELS: u64 = 120_000_000;
+
+/// Longest edge of the reduced copy.
+///
+/// Comfortably more than every downstream use needs, so the reduction can never
+/// cost detail that ends up in the catalogue.
+const DOWNSAMPLE_EDGE: u32 = 4096;
+
+/// Read an image's dimensions without decoding it — a header read only.
+fn probe_dimensions(abs: &Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(abs)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// Decode a reduced copy through ImageIO, which resizes as it reads.
+///
+/// The original is only ever read: `sips` writes to a path inside the app's own
+/// scratch directory, and that copy is deleted before returning.
+#[cfg(target_os = "macos")]
+fn open_downsampled(abs: &Path, scratch_dir: &Path) -> Result<RgbImage> {
+    use std::process::Command;
+
+    std::fs::create_dir_all(scratch_dir)?;
+    let out = scratch_dir.join(format!("large-{}.jpg", crate::util::new_uuid()));
+
+    let result = Command::new("/usr/bin/sips")
+        .args(["-Z", &DOWNSAMPLE_EDGE.to_string()])
+        .args(["-s", "format", "jpeg"])
+        .arg(abs)
+        .arg("--out")
+        .arg(&out)
+        .output();
+
+    let decoded = (|| -> Result<RgbImage> {
+        let output = result.map_err(|e| Error::Other(format!("sips could not run: {e}")))?;
+        if !output.status.success() {
+            return Err(Error::Other(format!(
+                "reduced decode failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(image::open(&out)
+            .map_err(|e| Error::Other(format!("reduced copy failed to decode: {e}")))?
+            .to_rgb8())
+    })();
+
+    let _ = std::fs::remove_file(&out);
+    decoded
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_downsampled(abs: &Path, _scratch_dir: &Path) -> Result<RgbImage> {
+    open_with_generous_limits(abs)
 }
 
 /// Decode with limits sized for photographs rather than for untrusted input.
@@ -279,5 +365,75 @@ mod large_image_tests {
         std::fs::write(&path, b"this is plainly not a photograph").unwrap();
         let err = open_rgb(&path, &dir.path().join("scratch")).unwrap_err().to_string();
         assert!(err.contains("decode failed"), "unhelpful error: {err}");
+    }
+}
+
+#[cfg(test)]
+mod downsample_tests {
+    use super::*;
+
+    /// Dimensions must come from the header alone: the whole point is to know
+    /// a file is enormous *before* paying to decode it.
+    #[test]
+    fn dimensions_are_read_without_decoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wide.png");
+        image::RgbImage::from_pixel(1200, 800, image::Rgb([10, 20, 30]))
+            .save(&path)
+            .unwrap();
+        assert_eq!(probe_dimensions(&path), Some((1200, 800)));
+        assert_eq!(probe_dimensions(&dir.path().join("absent.png")), None);
+    }
+
+    /// An ordinary photograph must keep every pixel — the reduced path is for
+    /// gigapixel composites, not for the archive's normal work.
+    #[test]
+    fn an_ordinary_photograph_is_not_reduced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("normal.png");
+        image::RgbImage::from_pixel(900, 600, image::Rgb([200, 40, 40]))
+            .save(&path)
+            .unwrap();
+        let img = open_rgb(&path, &dir.path().join("scratch")).unwrap();
+        assert_eq!(img.dimensions(), (900, 600));
+        assert!(
+            u64::from(900u32) * 600 < MAX_FULL_DECODE_PIXELS,
+            "the fixture must sit below the threshold or it proves nothing"
+        );
+    }
+
+    /// The reduced path bounds the long edge and leaves the original untouched.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_reduced_copy_is_bounded_and_the_original_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.png");
+        image::RgbImage::from_fn(6000, 4000, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 241) as u8, ((x + y) % 239) as u8])
+        })
+        .save(&path)
+        .unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+
+        let scratch = dir.path().join("scratch");
+        let img = open_downsampled(&path, &scratch).unwrap();
+        assert!(
+            img.width().max(img.height()) <= DOWNSAMPLE_EDGE,
+            "long edge {} exceeds the cap",
+            img.width().max(img.height())
+        );
+        // Aspect ratio survives, so a fingerprint taken from this still
+        // describes the same picture.
+        let ratio = img.width() as f64 / img.height() as f64;
+        assert!((ratio - 1.5).abs() < 0.01, "aspect drifted to {ratio}");
+
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+
+        let leftovers: Vec<_> = std::fs::read_dir(&scratch)
+            .map(|d| d.filter_map(|e| e.ok()).collect())
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "scratch must be left clean: {leftovers:?}");
     }
 }

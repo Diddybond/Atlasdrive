@@ -189,8 +189,9 @@ export function ScanScreen() {
 
       {isLive && progress.status === "stalled" && (
         <p className="search-note warn" role="alert">
-          This scan has not moved for over half an hour — it looks stuck on one photograph.
-          Stopping and starting it again is safe and loses nothing.
+          This scan has not moved for over half an hour. Usually that is one very large
+          photograph — a stitched composite or a big scan — still being read. Leaving it is
+          fine; stopping and starting it again is also safe and loses nothing.
         </p>
       )}
 

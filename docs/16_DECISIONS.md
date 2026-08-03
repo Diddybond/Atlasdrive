@@ -2055,3 +2055,34 @@ Spanish, German, Cyrillic, Japanese — with ambiguous brands beyond them, and
 assert the capitalisation rule survives the fold. Against the real drive: the
 zone that had crashed five runs in a row passed 140 photographs in two clean
 batches with zero failures before the proof run was deliberately stopped.
+
+## D-079 — Gigapixel composites are decoded small
+
+**Decision.** `open_rgb` reads dimensions from the header first, and above 120
+megapixels decodes a reduced copy through ImageIO (`sips -Z 4096`) instead of
+the full grid. If the reduced path fails it falls through to the old one — a
+slow photograph beats a missing photograph.
+
+**Why this is safe.** The decoded pixels are used for a thumbnail of a few
+hundred pixels, a 32×32 perceptual fingerprint, colour statistics and
+scanned-print detection. Apple Vision — which supplies labels, text, faces and
+the feature print — is handed the original *path* and reads the file itself.
+Nothing the catalogue stores about the picture is reduced.
+
+**Why it was needed.** Drive 5 reported "Stalled". It was not stuck: a process
+sample showed the scan thread inside `open_rgb` and `color_stats`, burning CPU,
+holding 3.1GB. The drive holds single files of 2.6GB, and Drive 1 holds a
+12,265 × 12,265 TIFF — 150 megapixels, 2.48GB — which decodes to gigabytes and
+is then walked several times. From outside, indistinguishable from frozen, and a
+handful of them can hold up a night.
+
+**Measured on that exact file:** the reduced decode takes **6 seconds** and
+yields a 1.6MB working image, against many minutes for the full decode.
+
+The threshold sits far above any camera — a 100-megapixel medium-format back
+still takes the direct path — so only stitched composites and large flatbed
+scans go the other way.
+
+**The stall message was also wrong in tone.** It said the scan "looks stuck on
+one photograph", which reads as a fault; it now explains that a very large
+photograph is usually the cause and that leaving it alone is fine.
