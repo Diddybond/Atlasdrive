@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, Drive, DriveMatch, SearchResult, TagCount } from "../api";
 import type { SearchContext } from "../App";
 
@@ -22,6 +21,8 @@ export function SearchScreen({
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [tags, setTags] = useState<TagCount[]>([]);
+  // Bumped on every search, so thumbnails from an abandoned one are dropped.
+  const searchToken = useRef(0);
   // Which drive is being browsed, and which subjects have been picked. Both
   // narrow the search rather than replacing the typed query, so they can be
   // combined: "children, at weddings, on Drive 2".
@@ -100,6 +101,26 @@ export function SearchScreen({
     }
   }
 
+  /// Fill in thumbnails a batch at a time, abandoning the work if the owner
+  /// searches again — a slow batch from a discarded search must never paint
+  /// over the results now on screen.
+  async function loadThumbnailsProgressively(ids: string[], token: number) {
+    const BATCH = 60;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      if (searchToken.current !== token) return;
+      const slice = ids.slice(i, i + BATCH);
+      const loaded: Record<string, string> = {};
+      await Promise.all(
+        slice.map(async (id) => {
+          const src = await api.photoThumbnail(id, 240);
+          if (src) loaded[id] = src;
+        }),
+      );
+      if (searchToken.current !== token) return;
+      setThumbs((prev) => ({ ...prev, ...loaded }));
+    }
+  }
+
   async function run(e: React.FormEvent) {
     e.preventDefault();
     await search(query);
@@ -111,6 +132,8 @@ export function SearchScreen({
     setQuery(term);
     setSimilarTo(null);
     setLoading(true);
+    const token = ++searchToken.current;
+    void token;
     try {
       const r = await api.search(term, {
         includeOffline,
@@ -128,14 +151,14 @@ export function SearchScreen({
 
       // Thumbnails come from the local catalogue, so they appear whether or not
       // the drive is connected.
-      const loaded: Record<string, string> = {};
-      await Promise.all(
-        r.results.map(async (x) => {
-          const src = await api.photoThumbnail(x.file_id, 240);
-          if (src) loaded[x.file_id] = src;
-        }),
-      );
-      setThumbs(loaded);
+      //
+      // Fetched in batches rather than all at once. A subject like "people"
+      // matches ten thousand photographs, and asking for ten thousand
+      // thumbnails in one breath locks the window; asking for sixty at a time
+      // fills the page as you read it. Every result is on screen immediately
+      // either way — only the pictures arrive progressively.
+      setThumbs({});
+      void loadThumbnailsProgressively(r.results.map((x) => x.file_id), searchToken.current);
     } finally {
       setLoading(false);
     }
@@ -336,6 +359,14 @@ export function SearchScreen({
       {searched && textOnly && (
         <p className="search-note" role="status">
           No visual terms recognised in that wording — searched names, folders and tags only.
+        </p>
+      )}
+
+      {searched && results.length > 0 && (
+        <p className="search-note" role="status">
+          {pickedTags.length > 0
+            ? `${results.length.toLocaleString()} photograph${results.length === 1 ? "" : "s"} — every match, not a sample.`
+            : `${results.length.toLocaleString()} photograph${results.length === 1 ? "" : "s"} found.`}
         </p>
       )}
 

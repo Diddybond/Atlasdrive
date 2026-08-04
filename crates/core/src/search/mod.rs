@@ -142,14 +142,19 @@ impl<'a> SearchRepo<'a> {
         );
         push_filter_sql(&mut sql, filters);
         // Newest first, so a browse opens on the work the owner remembers.
+        //
+        // Every match is returned, with no page limit. A chip that says "hat
+        // 571" and then shows a hundred photographs is not a search, it is a
+        // sample — and the owner has no way of knowing which 471 were left
+        // out. The query is a single indexed pass over `file_tags`; the cost
+        // of being complete is milliseconds.
         sql.push_str(
             " ORDER BY (SELECT de.earliest_date FROM date_estimates de
-                         WHERE de.file_id = f.id) DESC NULLS LAST
-              LIMIT ?1",
+                         WHERE de.file_id = f.id) DESC NULLS LAST",
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let ids: Vec<String> = stmt
-            .query_map(params![filters.limit_or(100) as i64], |r| r.get::<_, String>(0))?
+            .query_map([], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut out = Vec::new();
         for id in ids {
@@ -160,6 +165,25 @@ impl<'a> SearchRepo<'a> {
             }
         }
         Ok(out)
+    }
+
+    /// How many photographs carry all the picked subjects, ignoring any limit.
+    ///
+    /// A chip says "hat 571"; the results used to show 100 and say nothing
+    /// about the other 471. A count on a chip is a promise, so the screen has
+    /// to be able to state the true total and offer the rest.
+    pub fn count_by_tags(&self, filters: &SearchFilters) -> Result<i64> {
+        if filters.tags.is_empty() {
+            return Ok(0);
+        }
+        let mut sql = String::from(
+            "SELECT count(*)
+               FROM files f
+               JOIN drives d ON d.id = f.drive_id
+              WHERE f.status = 'complete'",
+        );
+        push_filter_sql(&mut sql, filters);
+        Ok(self.conn.query_row(&sql, [], |r| r.get(0))?)
     }
 
     /// Full-text search over filename, path, tags, OCR text and scene text.
@@ -840,5 +864,57 @@ mod browse_tests {
         assert_eq!(sanitize_fts("wedding_dress"), "\"wedding dress\"");
         // And ordinary words are untouched.
         assert_eq!(sanitize_fts("beach"), "\"beach\"");
+    }
+}
+
+#[cfg(test)]
+mod completeness_tests {
+    use super::*;
+
+    /// The complaint, stated as a test: a subject chip promising a number must
+    /// hand back that many photographs, not a sample of them.
+    #[test]
+    fn browsing_returns_every_match_not_a_page() {
+        let conn = tag_filter_tests::catalogue();
+        conn.execute(
+            "INSERT INTO tags(id, name, tag_type, created_at)
+             VALUES ('th','hat','automatic','2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // Every one of the fixture's four photographs wears a hat.
+        for f in ["f1", "f2", "f3", "f4"] {
+            conn.execute(
+                "INSERT INTO file_tags(file_id, tag_id, confidence, source, created_at)
+                 VALUES (?1,'th',0.9,'automatic','2026-01-01T00:00:00Z')",
+                [f],
+            )
+            .unwrap();
+        }
+
+        let repo = SearchRepo::new(&conn);
+        // A deliberately small page limit must not truncate a browse.
+        let filters = SearchFilters { tags: vec!["hat".into()], limit: 2, ..Default::default() };
+        let hits = repo.browse_by_tags(&filters).unwrap();
+        assert_eq!(hits.len(), 4, "a browse must not be paged");
+
+        // And the number the chip shows is the number that comes back.
+        assert_eq!(repo.count_by_tags(&filters).unwrap(), hits.len() as i64);
+    }
+
+    /// The count and the results must agree under a drive filter too, or the
+    /// chip and the page tell different stories again.
+    #[test]
+    fn the_count_and_the_results_agree_when_scoped_to_a_drive() {
+        let conn = tag_filter_tests::catalogue();
+        let filters = SearchFilters {
+            tags: vec!["wedding".into()],
+            drive_number: Some(1),
+            ..Default::default()
+        };
+        let repo = SearchRepo::new(&conn);
+        let hits = repo.browse_by_tags(&filters).unwrap();
+        assert_eq!(repo.count_by_tags(&filters).unwrap(), hits.len() as i64);
+        assert_eq!(hits.len(), 2, "f1 and f2 are the Drive 1 weddings");
     }
 }

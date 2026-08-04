@@ -179,6 +179,10 @@ struct SearchResponse {
     drives: Vec<family_archive_core::inventory::DriveMatch>,
     /// One line answering "which drive do I need to connect?".
     where_to_look: String,
+    /// How many photographs match in total, when that can be counted exactly.
+    /// `None` for free-text searches, where no total is claimed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_matches: Option<i64>,
 }
 
 /// Tag a face group with a person's name.
@@ -703,6 +707,9 @@ fn search_catalogue(
     client: Option<String>,
     // Subjects every result must carry. Each one narrows the search.
     tags: Option<Vec<String>>,
+    // How many results to return. The screen raises this when the owner asks
+    // to see the rest.
+    limit: Option<usize>,
 ) -> Result<SearchResponse, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
@@ -719,7 +726,7 @@ fn search_catalogue(
         event_id,
         client,
         tags: tags.unwrap_or_default(),
-        limit: 100,
+        limit: limit.unwrap_or(100).clamp(1, 5000),
         ..Default::default()
     };
 
@@ -763,7 +770,12 @@ fn search_catalogue(
     family_archive_core::inventory::locate_matches(&archive, &mut drives).map_err(map_err)?;
     let where_to_look = family_archive_core::inventory::where_to_look(&drives);
 
-    Ok(SearchResponse { results, understood, text_only, drives, where_to_look })
+    // Only browsing can state an exact total cheaply; a fused text/visual
+    // search does not, and claiming one would be a guess dressed as a fact.
+    let total_matches =
+        if browsing { repo.count_by_tags(&filters).ok() } else { None };
+
+    Ok(SearchResponse { results, understood, text_only, drives, where_to_look, total_matches })
 }
 
 /// Start (or resume) an index run in the background and return immediately.

@@ -83,6 +83,19 @@ describe("AtlasDrive UI", () => {
     ).toBe("true");
   });
 
+  /// "No point having a search that does not bring the full results." The
+  /// screen must state how many it is showing, and it must be all of them.
+  it("says how many it found and shows every one", async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /showing wedding/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/every match, not a sample/i)).toBeDefined();
+    });
+  });
+
   /// The exact failure the owner hit: a hyphenated subject with hundreds of
   /// photographs behind it must browse to them, not to an empty page.
   it("a hyphenated subject still finds its photographs", async () => {

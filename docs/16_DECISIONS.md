@@ -2086,3 +2086,35 @@ scans go the other way.
 **The stall message was also wrong in tone.** It said the scan "looks stuck on
 one photograph", which reads as a fault; it now explains that a very large
 photograph is usually the cause and that leaving it alone is fine.
+
+## D-080 — A search returns every match, not a page of them
+
+**Decision.** `browse_by_tags` has no limit: clicking a subject returns every
+photograph carrying it. The screen states the number it is showing, and
+thumbnails load sixty at a time so a ten-thousand-result subject fills in
+rather than freezing the window. `count_by_tags` gives an exact total for the
+same filters, and a test asserts the two agree.
+
+**Why.** The owner clicked "hat 571" and got 100 photographs. The chip's number
+came from the tag rows; the results came from a query with `LIMIT 100`, and
+nothing on screen said the other 471 existed — or which 471 they were. Their
+verdict was the right one: "no point having a search that does not bring the
+full results."
+
+The first attempt at this was "Showing the first 100 of 571" with a Show-more
+button. That is still a sample by default, and it makes the owner ask for what
+they already asked for. The query is a single indexed pass over `file_tags`;
+the cost of being complete is milliseconds, and the honest default is
+everything.
+
+**What is bounded instead.** Not the results — the *pictures*. Ten thousand
+thumbnail requests in one breath locks the window, so they are fetched in
+batches of sixty, each batch painting as it arrives. Every result card is on
+screen immediately; only the images fill in. A search token is bumped on each
+new search so a slow batch from an abandoned one can never paint over what is
+on screen now.
+
+**Where no total is claimed.** Free-text search fuses ranked text and visual
+results, where an exact total is not cheap and would be a guess dressed as a
+fact. `total_matches` is `None` there, and the screen simply reports how many
+it found.
