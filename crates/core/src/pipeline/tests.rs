@@ -1185,20 +1185,63 @@ fn a_genuinely_new_file_is_not_mistaken_for_a_moved_one() {
     assert_eq!(complete, 3, "two originals plus the genuinely new photograph");
 }
 
-/// A stop request on disk is obeyed before any photograph is touched, and
-/// leaves the queue intact for the next run.
+/// A stop asked for while a run is under way is obeyed, leaves the queue
+/// intact, and is consumed so it cannot haunt the next run.
 #[test]
-fn a_standing_stop_request_interrupts_without_losing_work() {
+fn a_stop_request_interrupts_without_losing_work() {
     let (h, opts) = setup(no_disk_floor());
     let p = pipeline(&h);
+
+    // A request belongs to the run that is going when it is made. The runs here
+    // are far too quick to press Stop during, so the request is dated a minute
+    // ahead: to any run starting now it reads as "asked for after you began",
+    // which is exactly the case being tested.
     crate::stop::request(&h.paths).unwrap();
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    filetime::set_file_mtime(
+        h.paths.stop_flag(),
+        filetime::FileTime::from_system_time(ahead),
+    )
+    .unwrap();
 
     let summary = p.run(&opts).unwrap();
     assert_eq!(summary.files_done, 0, "nothing should be processed after a stop");
     assert!(!summary.halted, "a stop is an interruption, not a failure");
+    assert!(
+        !crate::stop::requested(&h.paths),
+        "the run that obeys a stop must also consume it"
+    );
 
-    // Withdraw the request and the same run finishes normally.
-    crate::stop::clear(&h.paths).unwrap();
+    // The queue survived, so the same run picks up where it left off.
     let resumed = p.run(&opts).unwrap();
     assert_eq!(resumed.files_done, 3, "the queue must have survived the stop");
+}
+
+/// A stop request left over from an earlier scan must not stop a new one.
+///
+/// This is the bug that made a stopped drive impossible to rescan: the request
+/// is a file, it outlived the scan it was meant for, and every later run found
+/// it at the first batch boundary and quit. The desktop app hid it by deleting
+/// the file in its own start command; a scan started from the command line had
+/// no such protection and stopped dead every time, for ever.
+#[test]
+fn a_stop_left_over_from_a_previous_scan_does_not_block_the_next_one() {
+    let (h, opts) = setup(no_disk_floor());
+    let p = pipeline(&h);
+
+    // Yesterday's Stop, still sitting on disk.
+    crate::stop::request(&h.paths).unwrap();
+    let yesterday = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60);
+    filetime::set_file_mtime(
+        h.paths.stop_flag(),
+        filetime::FileTime::from_system_time(yesterday),
+    )
+    .unwrap();
+
+    let summary = p.run(&opts).unwrap();
+    assert_eq!(
+        summary.files_done, 3,
+        "a stop from before this run began must not stop it"
+    );
+    assert!(!summary.halted);
 }

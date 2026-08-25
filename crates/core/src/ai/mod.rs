@@ -188,6 +188,8 @@ impl EngineRegistry {
     /// heuristic engine when it cannot. Indexing never depends on Vision being
     /// present.
     pub fn local_with_vision() -> Self {
+        // Only the macOS branch below mutates this.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut reg = Self::local_default();
         #[cfg(target_os = "macos")]
         if let Some(v) = vision::VisionEngine::detect() {

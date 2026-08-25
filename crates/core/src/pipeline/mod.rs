@@ -201,6 +201,11 @@ impl<'a> Pipeline<'a> {
     }
 
     fn run_index(&self, opts: &IndexOptions, dry_run: bool) -> Result<IndexSummary> {
+        // Everything from here on belongs to this run, including a stop asked
+        // for while preflight is still working. Taken before preflight so that
+        // window is covered rather than being a gap where Stop does nothing.
+        let run_started_at = std::time::SystemTime::now();
+
         self.preflight(opts)?;
 
         // Engage the network isolation guard for the whole indexing operation.
@@ -306,7 +311,7 @@ impl<'a> Pipeline<'a> {
             // scan is often started from the command line and left for two
             // days, while the owner is looking at the desktop app. See
             // `crate::stop`.
-            if self.cancel.is_cancelled() || crate::stop::requested(self.paths) {
+            if self.cancel.is_cancelled() || crate::stop::requested_since(self.paths, run_started_at) {
                 logger.warn("cancelled").emit_best_effort();
                 interrupted = true;
                 break;
@@ -360,7 +365,7 @@ impl<'a> Pipeline<'a> {
                 // an hour after being told to stop" on a real drive. The
                 // unfinished lease simply expires and the file is redone next
                 // run.
-                if self.cancel.is_cancelled() || crate::stop::requested(self.paths) {
+                if self.cancel.is_cancelled() || crate::stop::requested_since(self.paths, run_started_at) {
                     logger.warn("cancelled").emit_best_effort();
                     interrupted = true;
                     break;
@@ -515,6 +520,12 @@ impl<'a> Pipeline<'a> {
 
         // Finalize.
         if interrupted {
+            // The request has been carried out, so take it off disk. Leaving it
+            // would not block the next run — that one starts later than this
+            // file was written — but a stale request makes `stop::requested`
+            // read true for ever, which is a lie about the state of the system.
+            let _ = crate::stop::clear(self.paths);
+
             // Leave the run resumable: record interrupted state, do not complete.
             progress.status = "interrupted".into();
             progress.touch();

@@ -43,6 +43,33 @@ pub fn requested(paths: &AppPaths) -> bool {
     is_requested_at(&paths.stop_flag())
 }
 
+/// True when a stop was asked for at or after `since`.
+///
+/// A run must tell a request aimed at *itself* from one left lying around by an
+/// earlier scan. The request is a file, so it outlives the process that wrote
+/// it and the scan it was meant for: press Stop today and the file is still
+/// there tomorrow. A run that treats every such file as its own can never
+/// start — it reaches the first batch boundary, finds yesterday's request and
+/// exits, for ever. That is precisely how a stopped drive became a drive that
+/// could not be rescanned at all.
+///
+/// Comparing against the moment the run began settles it without deleting
+/// anything: older than this run means it belonged to a previous one and is
+/// ignored; newer means someone asked *this* run to stop, and it obeys. Nothing
+/// is cleared merely by starting, so a Stop pressed in the moments before the
+/// first batch is still honoured rather than being wiped by the run it was
+/// meant for.
+pub fn requested_since(paths: &AppPaths, since: std::time::SystemTime) -> bool {
+    match std::fs::metadata(paths.stop_flag()).and_then(|m| m.modified()) {
+        Ok(written) => written >= since,
+        // The file is there but carries no usable timestamp. Obey it: a stop
+        // that does not stop is worse than one obeyed a second time, and the
+        // run that obeys it also consumes it.
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
 fn is_requested_at(flag: &Path) -> bool {
     flag.exists()
 }

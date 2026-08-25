@@ -36,6 +36,8 @@ walkdir = "2.5.0"
 fs2 = "0.4.3"
 hex = "0.4.3"
 tempfile = "3.10.1"
+# Dev-only: deterministic file timestamps in tests (stop-request staleness).
+filetime = "0.2.23"
 zeroize = { version = "1.7.0", features = ["derive"] }
 
 [profile.release]

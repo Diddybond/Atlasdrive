@@ -105,6 +105,8 @@ const MAX_FULL_DECODE_PIXELS: u64 = 120_000_000;
 ///
 /// Comfortably more than every downstream use needs, so the reduction can never
 /// cost detail that ends up in the catalogue.
+// Both users (the sips downsample and the test that checks it) are macOS-only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const DOWNSAMPLE_EDGE: u32 = 4096;
 
 /// Read an image's dimensions without decoding it — a header read only.

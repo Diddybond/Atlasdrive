@@ -43,10 +43,35 @@ pub const DEFAULT_CLUSTER_THRESHOLD: f32 = 0.92;
 /// `--threshold` lets it be tuned per archive.
 pub const VISION_CLUSTER_THRESHOLD: f32 = 0.84;
 
+/// Model id of the Apple Vision face engine.
+///
+/// Spelled out here rather than read from `crate::ai::vision`, which only
+/// exists on macOS. A model id is a stored data contract: it is written into
+/// every `face_embeddings` row, so any platform must be able to read a
+/// catalogue back and know which engine produced it, even where that engine
+/// cannot itself run. Referring to the gated module made the whole crate
+/// macOS-only and stopped it building — and therefore being tested — anywhere
+/// else.
+const VISION_MODEL_ID: &str = "apple-vision";
+
+// The two declarations must never drift apart. On macOS, where both exist,
+// this fails the build the moment they do.
+#[cfg(target_os = "macos")]
+const _: () = {
+    let here = VISION_MODEL_ID.as_bytes();
+    let engine = crate::ai::vision::MODEL_ID.as_bytes();
+    assert!(here.len() == engine.len(), "vision model id out of step with the engine");
+    let mut i = 0;
+    while i < here.len() {
+        assert!(here[i] == engine[i], "vision model id out of step with the engine");
+        i += 1;
+    }
+};
+
 /// The clustering threshold to use for a given face-embedding model.
 pub fn cluster_threshold_for(model_id: &str) -> f32 {
     match model_id {
-        crate::ai::vision::MODEL_ID => VISION_CLUSTER_THRESHOLD,
+        VISION_MODEL_ID => VISION_CLUSTER_THRESHOLD,
         _ => DEFAULT_CLUSTER_THRESHOLD,
     }
 }

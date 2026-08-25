@@ -19,6 +19,8 @@
 //!     someone else's machine, and the only kind that can be notarised.
 
 use std::path::PathBuf;
+// Only the macOS-gated checks below shell out; elsewhere this would be unused.
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 /// What kind of signature the running binary carries.
