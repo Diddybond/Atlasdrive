@@ -542,6 +542,33 @@ filesystem or shell access; originals stay read-only; indexing makes no network
 call; face embeddings and face crops are encrypted at rest; the verifier still
 exits non-zero.
 
+## D-025: Every external command the scan depends on runs under a time budget
+
+**Status:** Settled
+
+**Context:** A scan is a long unattended job. `Command::output()` waits for
+ever, and the pipeline checks for cancellation *between* photographs, so a run
+wedged inside one external call cannot be stopped, cannot report and cannot be
+resumed. The Vision worker already had a 10-minute budget for this reason; the
+decode path did not, which left `/usr/bin/sips` able to hold a whole scan on one
+malformed photograph. A real drive sat at "Stalled", nothing being read, for
+close to two days.
+
+**Decision:** External commands go through `crate::proc::output_within`, which
+kills and reaps the child at a budget and returns a timeout error. The decode
+budget is 10 minutes (`ATLASDRIVE_DECODE_TIMEOUT_SECS`), matching Vision's and
+chosen the same way: far past the slowest honest photograph observed, far short
+of the stall it prevents. Output is drained on separate threads, so a chatty
+child cannot deadlock the parent instead.
+
+**Consequences:** A wedged decoder becomes one photograph's failure, which the
+pipeline already isolates and requeues, rather than the run's. This satisfies
+`docs/13`'s requirement that single slow files are timed out and isolated. A
+stall lasting longer than the budget now means something other than a hung
+decoder, which makes the "Stalled" label meaningful rather than a dead end.
+
+**Supersedes:** None
+
 ## New decision template
 
 ```markdown

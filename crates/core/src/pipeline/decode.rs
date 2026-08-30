@@ -32,6 +32,18 @@ use crate::error::{Error, Result};
 const SYSTEM_DECODE_EXTENSIONS: &[&str] =
     &["heic", "heif", "psd", "arw", "cr2", "cr3", "nef", "dng", "raf", "rw2", "orf"];
 
+/// How long one system decode may take before that photograph is given up on.
+///
+/// Ten minutes, matching the Vision worker's budget and chosen the same way:
+/// the slowest honest photograph seen on a real drive — a 1.2GB sixteen-bit
+/// TIFF — converted in a few minutes, so this is well past legitimate work and
+/// far short of the two days a wedged decode actually cost. Raise it with
+/// `ATLASDRIVE_DECODE_TIMEOUT_SECS` on a slow machine.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn decode_budget() -> std::time::Duration {
+    crate::proc::budget_from_env("ATLASDRIVE_DECODE_TIMEOUT_SECS", 600)
+}
+
 /// True when `path` needs the platform decoder.
 pub fn needs_system_decoder(path: &Path) -> bool {
     path.extension()
@@ -130,20 +142,20 @@ fn open_downsampled(abs: &Path, scratch_dir: &Path) -> Result<RgbImage> {
     std::fs::create_dir_all(scratch_dir)?;
     let out = scratch_dir.join(format!("large-{}.jpg", crate::util::new_uuid()));
 
-    let result = Command::new("/usr/bin/sips")
-        .args(["-Z", &DOWNSAMPLE_EDGE.to_string()])
+    let mut cmd = Command::new("/usr/bin/sips");
+    cmd.args(["-Z", &DOWNSAMPLE_EDGE.to_string()])
         .args(["-s", "format", "jpeg"])
         .arg(abs)
         .arg("--out")
-        .arg(&out)
-        .output();
+        .arg(&out);
+    let result = crate::proc::output_within(&mut cmd, decode_budget());
 
     let decoded = (|| -> Result<RgbImage> {
-        let output = result.map_err(|e| Error::Other(format!("sips could not run: {e}")))?;
-        if !output.status.success() {
+        let output = result?;
+        if !output.success() {
             return Err(Error::Other(format!(
                 "reduced decode failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                output.stderr_text()
             )));
         }
         Ok(image::open(&out)
@@ -193,22 +205,22 @@ fn open_via_system_decoder(abs: &Path, scratch_dir: &Path) -> Result<RgbImage> {
     // A unique name so concurrent workers cannot collide.
     let out = scratch_dir.join(format!("heic-{}.png", crate::util::new_uuid()));
 
-    let result = Command::new("/usr/bin/sips")
-        .arg("-s")
+    let mut cmd = Command::new("/usr/bin/sips");
+    cmd.arg("-s")
         .arg("format")
         .arg("png")
         .arg(abs)
         // Writing to our own path is what keeps this a read of the original.
         .arg("--out")
-        .arg(&out)
-        .output();
+        .arg(&out);
+    let result = crate::proc::output_within(&mut cmd, decode_budget());
 
     let decoded = (|| -> Result<RgbImage> {
-        let output = result.map_err(|e| Error::Other(format!("sips could not run: {e}")))?;
-        if !output.status.success() {
+        let output = result?;
+        if !output.success() {
             return Err(Error::Other(format!(
                 "system HEIC decode failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                output.stderr_text()
             )));
         }
         let img = image::open(&out)
