@@ -16,6 +16,9 @@ pub mod exit {
     pub const SOURCE_INTEGRITY: i32 = 10;
     pub const INSUFFICIENT_DISK: i32 = 11;
     pub const DRIVE_IDENTITY_CONFLICT: i32 = 12;
+    /// The drive went away mid-scan. An interruption, not a fault: the queue is
+    /// intact and the run continues when the drive comes back.
+    pub const DRIVE_DISCONNECTED: i32 = 13;
     pub const VERIFIER_FAILURE: i32 = 20;
     pub const REPEATED_VERIFIER_FAILURE: i32 = 21;
     pub const MODEL_MISSING: i32 = 30;
@@ -60,8 +63,24 @@ pub enum Error {
     MigrationOrCorruption(String),
 
     /// An unsafe path (traversal, symlink escape, outside approved root).
+    ///
+    /// Reserved for a path that is genuinely *dangerous*. A path that is merely
+    /// **absent** is [`Error::DriveDisconnected`] or [`Error::NotFound`]: the
+    /// two were once the same variant, so unplugging a drive mid-scan reported
+    /// "unsafe path" and stopped the run for safety, which is neither accurate
+    /// nor what the owner needed to be told.
     #[error("unsafe path: {0}")]
     UnsafePath(String),
+
+    /// The scan root disappeared while the scan was running — almost always a
+    /// drive unplugged without ejecting.
+    ///
+    /// Not a fault and not a safety event. Every remaining file is on that
+    /// drive, so the run ends as an interruption: leases expire, the queue is
+    /// untouched, and reconnecting and starting again carries on where it left
+    /// off.
+    #[error("drive disconnected: {0}")]
+    DriveDisconnected(String),
 
     /// The indexing path attempted a network operation. Hard safety halt.
     #[error("network isolation violated: {0}")]
@@ -94,6 +113,7 @@ impl Error {
             Error::SourceIntegrity(_) => exit::SOURCE_INTEGRITY,
             Error::InsufficientDisk(_) => exit::INSUFFICIENT_DISK,
             Error::DriveIdentityConflict(_) => exit::DRIVE_IDENTITY_CONFLICT,
+            Error::DriveDisconnected(_) => exit::DRIVE_DISCONNECTED,
             Error::VerifierFailure(_) => exit::VERIFIER_FAILURE,
             Error::RepeatedVerifierFailure(_) => exit::REPEATED_VERIFIER_FAILURE,
             Error::ModelMissing(_) => exit::MODEL_MISSING,

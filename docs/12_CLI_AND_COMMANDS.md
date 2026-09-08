@@ -198,6 +198,7 @@ Define stable exit codes, including:
 - `10` source integrity violation
 - `11` insufficient disk space
 - `12` drive identity conflict
+- `13` drive disconnected mid-scan (an interruption; reconnect and resume)
 - `20` verifier failure
 - `21` repeated verifier failure halt
 - `30` local model missing or incompatible

@@ -456,11 +456,17 @@ fn drive_disconnected_mid_batch_is_survivable_and_resumable() {
     std::fs::rename(&h.drive_dir, &backup).unwrap();
 
     // A run against a vanished drive must fail cleanly, not panic or corrupt.
+    //
+    // Reported as a disconnection rather than the older "scan path is not a
+    // directory": both are clean refusals, but only one tells the owner that
+    // the drive is unplugged and that reconnecting it will do. The same cause
+    // now reads the same way whether it is noticed at preflight or mid-scan.
     let err = p.run(&opts).expect_err("scanning a vanished volume must fail");
     assert!(
-        matches!(err, crate::error::Error::InvalidArgs(_)),
-        "expected a clear 'not a directory' error, got {err:?}"
+        matches!(err, crate::error::Error::DriveDisconnected(_)),
+        "expected a clear 'drive disconnected' error, got {err:?}"
     );
+    assert!(!err.is_hard_halt(), "an unplugged drive is not a safety halt");
 
     // The catalogue is intact and no file was falsely marked complete.
     assert!(crate::db::integrity_check(&h.archive).is_ok());
@@ -507,6 +513,128 @@ fn a_file_vanishing_mid_run_is_isolated_not_fatal() {
         .query_row("SELECT count(*) FROM files WHERE status='complete'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(complete, 2);
+}
+
+/// The scan root vanishing mid-run is a disconnected drive, not a safety event.
+///
+/// This is the exact condition that ended a two-day scan of Drive 10 with
+/// "Stopped for safety": the volume was unplugged without ejecting, so
+/// `canonicalize` returned "No such file or directory", and *every* failure to
+/// canonicalize was reported as `UnsafePath` — a hard safety halt. Pulling an
+/// external drive is ordinary, and the pipeline is built to survive it.
+///
+/// Tested at the function that makes the decision rather than through a whole
+/// run: a real mid-run unplug lands between preflight and a file being read,
+/// and racing the filesystem to hit that window would only buy a flaky test.
+#[test]
+fn a_vanished_scan_root_is_a_disconnected_drive_not_an_unsafe_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("NOV 22 A");
+    std::fs::create_dir_all(&root).unwrap();
+    let photo = root.join("shoot/_DSC9418-Edit-Edit.tif");
+    std::fs::create_dir_all(photo.parent().unwrap()).unwrap();
+    std::fs::write(&photo, b"x").unwrap();
+
+    // While the drive is present the path resolves normally.
+    crate::scan::ensure_contained(&root, &photo).unwrap();
+
+    // The drive is unplugged mid-scan.
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let err = crate::scan::ensure_contained(&root, &photo).unwrap_err();
+    assert!(
+        matches!(err, crate::error::Error::DriveDisconnected(_)),
+        "an unplugged drive must not read as an unsafe path, got: {err}"
+    );
+    assert!(
+        !err.is_hard_halt(),
+        "unplugging a drive must not stop the scan for safety"
+    );
+    assert_eq!(err.exit_code(), crate::error::exit::DRIVE_DISCONNECTED);
+    // The message tells the owner what to do, not what a syscall returned.
+    assert!(
+        format!("{err}").contains("reconnect the drive"),
+        "unhelpful message: {err}"
+    );
+}
+
+/// Handing work back on a disconnection must not spend the item's attempts.
+#[test]
+fn releasing_work_returns_it_unspent() {
+    let (h, opts) = setup(no_disk_floor());
+    pipeline(&h).run(&opts).unwrap();
+
+    let drive_id: String = h
+        .archive
+        .query_row("SELECT id FROM drives WHERE drive_number = 14", [], |r| r.get(0))
+        .unwrap();
+    let q = crate::queue::Queue::new(&h.queue);
+
+    // Re-queue one item, claim it, then release it as a disconnection would.
+    let id: String = h
+        .queue
+        .query_row("SELECT id FROM queue_items LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    h.queue
+        .execute("UPDATE queue_items SET state='queued', attempts=0 WHERE id=?1", [&id])
+        .unwrap();
+
+    let claimed = q.claim_batch(&drive_id, 1, 300, "w").unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].attempts, 1, "claiming counts as an attempt");
+
+    q.release(&claimed[0].id).unwrap();
+
+    let (state, attempts): (String, i64) = h
+        .queue
+        .query_row("SELECT state, attempts FROM queue_items WHERE id=?1", [&id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(state, "queued", "released work waits, it does not fail");
+    assert_eq!(attempts, 0, "a drive leaving must not count against the photograph");
+}
+
+/// The safety half of the same distinction must not be weakened: a path that
+/// genuinely escapes the approved root is still a hard halt.
+#[test]
+fn a_path_escaping_the_root_is_still_a_hard_halt() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let secret = outside.join("elsewhere.jpg");
+    std::fs::write(&secret, b"x").unwrap();
+
+    let err = crate::scan::ensure_contained(&root, &secret).unwrap_err();
+    assert!(
+        matches!(err, crate::error::Error::UnsafePath(_)),
+        "escaping the root must stay an unsafe path, got: {err}"
+    );
+    assert!(err.is_hard_halt(), "an escape must still stop the run");
+
+    // A '..' component is refused before the filesystem is touched at all.
+    let traversal = crate::scan::ensure_contained(&root, std::path::Path::new("../etc/passwd"));
+    assert!(matches!(
+        traversal.unwrap_err(),
+        crate::error::Error::UnsafePath(_)
+    ));
+}
+
+/// A single original disappearing is that photograph's problem, not the run's.
+#[test]
+fn one_missing_original_is_not_an_unsafe_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    std::fs::create_dir_all(&root).unwrap();
+
+    let err = crate::scan::ensure_contained(&root, &root.join("gone.jpg")).unwrap_err();
+    assert!(
+        matches!(err, crate::error::Error::NotFound(_)),
+        "an absent file is not a dangerous path, got: {err}"
+    );
+    assert!(!err.is_hard_halt(), "a missing photograph must not stop the run");
 }
 
 /// A real HEIC photograph indexes end to end on macOS: thumbnail, hash and

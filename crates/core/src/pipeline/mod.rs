@@ -190,7 +190,15 @@ impl<'a> Pipeline<'a> {
                 free, opts.config.free_space_floor_bytes
             )));
         }
-        // Path exists and is a directory.
+        // The same cause deserves the same words wherever it is noticed. A
+        // drive that is simply not plugged in was reporting "scan path is not a
+        // directory", which describes a syscall rather than the situation.
+        if !opts.path.exists() {
+            return Err(Error::DriveDisconnected(format!(
+                "{} is no longer available — reconnect the drive and start the scan again",
+                opts.path.display()
+            )));
+        }
         if !opts.path.is_dir() {
             return Err(Error::InvalidArgs(format!(
                 "scan path is not a directory: {}",
@@ -302,6 +310,9 @@ impl<'a> Pipeline<'a> {
         let mut consecutive_verifier_failures = 0u32;
         let batch_size = opts.config.batch_size.max(1);
         let mut interrupted = false;
+        // Set when the scan root vanished mid-run, so the outer loop stops trying
+        // to claim more work from a drive that is no longer there.
+        let mut disconnected: Option<String> = None;
 
         loop {
             // Two ways to be asked to stop, checked in the same place.
@@ -429,6 +440,28 @@ impl<'a> Pipeline<'a> {
                         self.finish_run(&run_id, "halted", &summary)?;
                         return Err(e);
                     }
+                    Err(Error::DriveDisconnected(reason)) => {
+                        // The drive left. Everything still queued lives on it,
+                        // so carrying on would fail thousands of files one at a
+                        // time, burn their retries and leave the queue looking
+                        // like the photographs were bad rather than absent.
+                        //
+                        // This is the interruption the whole pipeline is built
+                        // around — the same shape as a stop — so the lease is
+                        // released, the item stays queued, and reconnecting and
+                        // starting again carries on where it left off.
+                        logger
+                            .warn("drive_disconnected")
+                            .relative_path(item.relative_path.clone())
+                            .field("reason", reason.clone())
+                            .emit_best_effort();
+                        if !dry_run {
+                            q.release(&item.id)?;
+                        }
+                        disconnected = Some(reason);
+                        interrupted = true;
+                        break;
+                    }
                     Err(e) => {
                         // Recoverable file-level failure: record and requeue.
                         batch_failure += 1;
@@ -445,6 +478,12 @@ impl<'a> Pipeline<'a> {
                         }
                     }
                 }
+            }
+
+            // Nothing left to read from a drive that has gone; stop before
+            // claiming another batch of files that are all on it.
+            if disconnected.is_some() {
+                break;
             }
 
             let elapsed = batch_started.elapsed().as_secs_f64().max(1e-6);
@@ -519,6 +558,12 @@ impl<'a> Pipeline<'a> {
         }
 
         // Finalize.
+        if let Some(reason) = &disconnected {
+            // Says what happened in the owner's terms. "Stopped for safety" was
+            // both alarming and wrong for a drive someone unplugged.
+            summary.halt_reason = Some(reason.clone());
+        }
+
         if interrupted {
             // The request has been carried out, so take it off disk. Leaving it
             // would not block the next run — that one starts later than this

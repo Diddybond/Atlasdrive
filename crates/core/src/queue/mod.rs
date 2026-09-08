@@ -224,6 +224,25 @@ impl<'a> Queue<'a> {
     }
 
     /// Mark an item complete and drop its lease (atomic).
+    /// Hand a leased item back untouched, as though it had never been claimed.
+    ///
+    /// Distinct from [`Queue::fail`] on purpose. Failing records a reason and
+    /// spends one of the item's three attempts, which is right when the
+    /// photograph is the problem. When the *drive* left, the photograph is
+    /// fine and has not been tried: charging it an attempt would eventually
+    /// mark perfectly good originals as failed for the crime of being on a
+    /// drive that was unplugged.
+    pub fn release(&self, item_id: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE queue_items SET state='queued', attempts = MAX(attempts - 1, 0) WHERE id=?1",
+            [item_id],
+        )?;
+        tx.execute("DELETE FROM queue_leases WHERE item_id=?1", [item_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn complete(&self, item_id: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(

@@ -83,12 +83,37 @@ pub fn ensure_contained(root: &Path, candidate: &Path) -> Result<PathBuf> {
             )));
         }
     }
-    let root_canon = root
-        .canonicalize()
-        .map_err(|e| Error::UnsafePath(format!("cannot canonicalize root {}: {e}", root.display())))?;
-    let canon = candidate
-        .canonicalize()
-        .map_err(|e| Error::UnsafePath(format!("cannot canonicalize {}: {e}", candidate.display())))?;
+    // A path that cannot be resolved is not the same thing as a path that is
+    // dangerous, and the difference decides whether the whole scan stops.
+    //
+    // Both were once reported as "unsafe path", which is a hard safety halt. So
+    // unplugging a drive without ejecting it — the ordinary thing that happens
+    // to an external drive — ended a two-day scan with "Stopped for safety" and
+    // an error about canonicalization, when all that had happened was that the
+    // volume went away. Absence is expected and recoverable; escaping the
+    // approved root is neither.
+    let root_canon = root.canonicalize().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // The scan root itself is gone: the drive was disconnected. Every
+            // remaining file is on it, so this ends the run rather than failing
+            // thousands of files one at a time.
+            Error::DriveDisconnected(format!(
+                "{} is no longer available — reconnect the drive and start the scan again",
+                root.display()
+            ))
+        } else {
+            Error::UnsafePath(format!("cannot canonicalize root {}: {e}", root.display()))
+        }
+    })?;
+    let canon = candidate.canonicalize().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // One original has gone since it was queued — deleted, moved, or on
+            // a drive that has just left. One photograph's problem.
+            Error::NotFound(format!("{} is no longer there", candidate.display()))
+        } else {
+            Error::UnsafePath(format!("cannot canonicalize {}: {e}", candidate.display()))
+        }
+    })?;
     if !canon.starts_with(&root_canon) {
         return Err(Error::UnsafePath(format!(
             "path escapes approved root: {} not under {}",

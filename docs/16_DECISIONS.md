@@ -569,6 +569,32 @@ decoder, which makes the "Stalled" label meaningful rather than a dead end.
 
 **Supersedes:** None
 
+## D-026: A path that is absent is not a path that is dangerous
+
+**Status:** Settled
+
+**Context:** `ensure_contained` reported every `canonicalize` failure as
+`UnsafePath`, which `is_hard_halt` treats as a safety violation. Unplugging an
+external drive without ejecting it makes `canonicalize` return `NotFound`, so an
+ordinary disconnection ended a two-day scan of Drive 10 with "Stopped for
+safety" and an error about canonicalization. The owner was told their archive
+might be at risk; what had actually happened was a cable.
+
+**Decision:** The two conditions are separated. A path that escapes the approved
+root, or contains `..`, stays `UnsafePath` and stays a hard halt. A path that is
+merely missing is `NotFound` for one original, or `DriveDisconnected` (exit 13)
+when the scan root itself has gone. A disconnection ends the run as an
+interruption: the leased item is *released* rather than failed, so it keeps its
+attempts, the queue is untouched, and reconnecting carries on where it stopped.
+Preflight reports the same condition the same way.
+
+**Consequences:** The safety halt now means what it says, which is what makes it
+worth obeying. Unplugging a drive costs nothing and blames no photograph. Exit
+13 is new; `docs/12` allows the list to expand and no existing code changed
+meaning.
+
+**Supersedes:** None
+
 ## New decision template
 
 ```markdown
