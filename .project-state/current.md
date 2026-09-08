@@ -2,12 +2,13 @@
 
 - Product name: **AtlasDrive** (settled, D-020)
 - Branch: claude/mr-repo-addition-pxgpfk
-- Commit: see `git log` (latest: the decision log is numbered once and tested)
+- Commit: see `git log` (latest: letting go of the Vision worker is bounded)
 - Current completion score: **100/100** under `docs/15_DEFINITION_OF_DONE.md`
 - Critical gates passing: **10/10**
-- Latest test result: 323 core + 2 CLI integration + 74 UI passing (1 core test
+- Latest test result: 341 core + 2 CLI integration + 74 UI passing (1 core test
   ignored: the network-guard test, behind `--features network-guard-tests`);
-  clippy clean across the workspace, including test targets
+  clippy clean across the workspace, including test targets. The Vision worker's
+  16 tests are in that count on every platform now, not only on a Mac (D-084).
 - Current files being changed: none (clean checkpoint)
 - Runtime safety status: all safety boundaries implemented and tested; the
   original-integrity halt was demonstrated on macOS with a real exit code 10

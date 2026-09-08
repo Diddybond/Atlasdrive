@@ -260,3 +260,54 @@ Command: cd ui && npm test
 Exit code: 0
 Result: pass (74 tests, 3 files)
 ```
+
+---
+
+## 2026-09-08 (Linux session): bounded worker shutdown
+
+### The retirement test fails against the code it was written for
+
+```text
+Old code: `let _ = old.child.wait();` at the 400-photograph retirement
+Command: cargo test -p family-archive-core a_worker_that_ignores_its_stdin_close
+Result: FAILED after 121.20s — blocked for the stub worker's whole lifetime
+```
+
+```text
+Fixed code: `proc::shutdown_within(&mut old.child, Self::shutdown_grace())`
+Command: cargo test -p family-archive-core vision
+Exit code: 0
+Result: pass (16 tests, 6.01s) — retirement of a wedged worker returns at the grace
+```
+
+### The grandchild case, found by that test and fixed in `proc`
+
+```text
+Command: cargo test -p family-archive-core proc::
+Exit code: 0
+Result: pass (8 tests), including
+  a_grandchild_holding_the_pipe_cannot_extend_the_budget
+  a_wedged_worker_is_killed_at_the_grace_rather_than_waited_on
+  a_worker_that_stops_when_asked_is_reaped_promptly
+```
+
+Before the drain deadline, a 300ms budget on `sh -c "sleep 120 & sleep 120"`
+returned after 120s: killed on time, then blocked joining a reader whose pipe
+the grandchild still held.
+
+### Vision tests now run off macOS
+
+```text
+Command: cargo test --workspace
+Exit code: 0
+Result: 341 core (was 323) + 2 CLI integration passed, 0 failed, 1 ignored
+        The 18 new tests are 16 Vision-worker tests that previously compiled
+        only on macOS, plus 2 in `proc`.
+
+Command: cargo clippy --workspace --all-targets
+Exit code: 0
+Result: pass (0 warnings)
+```
+
+Not verified here: the real Swift worker, which needs macOS. What is verified
+everywhere is the protocol, the lifetime and every wait around it.

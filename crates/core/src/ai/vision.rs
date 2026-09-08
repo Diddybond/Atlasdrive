@@ -27,7 +27,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 
 use serde::Deserialize;
@@ -123,6 +123,24 @@ struct Worker {
 /// under a third of a percent.
 const MAX_PHOTOGRAPHS_PER_WORKER: u32 = 400;
 
+/// How long a worker is given to leave politely once its stdin is closed.
+///
+/// Closing stdin is a request, not a guarantee: a worker wedged inside an
+/// analysis never reaches its read loop to notice. Ten seconds is far more than
+/// a healthy worker needs to see EOF and exit, and it bounds the one case that
+/// matters — retirement at the 400-photograph mark, which exists precisely
+/// because this worker gets into states it does not come out of.
+const SHUTDOWN_GRACE_SECS: u64 = 10;
+
+/// How long `--selftest` may take before the worker is treated as absent.
+///
+/// This runs before the scan does, on a binary that has just been unpacked or
+/// rebuilt, so macOS may be assessing its signature; a minute is generous for
+/// what is otherwise an instant answer. Exceeding it is not a failure: `detect`
+/// returns `None` and indexing uses the heuristic engine, which is a supported
+/// state. What must not happen is a scan that never starts and never says why.
+const SELFTEST_BUDGET_SECS: u64 = 60;
+
 pub struct VisionEngine {
     helper: PathBuf,
     caps: Vec<Capability>,
@@ -143,13 +161,18 @@ impl VisionEngine {
 
     /// Build an engine around a specific worker binary.
     pub fn new(helper: PathBuf) -> Result<Self> {
-        // Confirm this is really our worker before trusting it.
-        let out = Command::new(&helper)
-            .arg("--selftest")
-            .output()
-            .map_err(|e| Error::ModelMissing(format!("vision worker not runnable: {e}")))?;
+        // Confirm this is really our worker before trusting it. Under a budget:
+        // a binary that starts and then never answers would otherwise hold the
+        // scan before it had read a single photograph.
+        let mut cmd = Command::new(&helper);
+        cmd.arg("--selftest");
+        let out = crate::proc::output_within(
+            &mut cmd,
+            crate::proc::budget_from_env("ATLASDRIVE_VISION_SELFTEST_SECS", SELFTEST_BUDGET_SECS),
+        )
+        .map_err(|e| Error::ModelMissing(format!("vision worker not runnable: {e}")))?;
         let banner = String::from_utf8_lossy(&out.stdout);
-        if !out.status.success() || !banner.starts_with(HELPER_BINARY) {
+        if !out.success() || !banner.starts_with(HELPER_BINARY) {
             return Err(Error::ModelMissing(format!(
                 "unexpected vision worker at {}: {banner:?}",
                 helper.display()
@@ -219,9 +242,12 @@ impl VisionEngine {
         if guard.as_ref().is_some_and(|w| w.served >= MAX_PHOTOGRAPHS_PER_WORKER) {
             if let Some(mut old) = guard.take() {
                 // Closing stdin ends the worker's read loop, so it exits of its
-                // own accord rather than being killed mid-analysis.
+                // own accord rather than being killed mid-analysis — but only if
+                // it is in that loop. One that is not gets ten seconds and then
+                // the axe: retiring a worker must not be able to wedge the scan
+                // that is retiring it.
                 drop(old.stdin);
-                let _ = old.child.wait();
+                crate::proc::shutdown_within(&mut old.child, Self::shutdown_grace());
             }
         }
 
@@ -309,6 +335,13 @@ impl VisionEngine {
     /// drive — a 1.2GB sixteen-bit TIFF — analysed in a few minutes. Ten is
     /// comfortably past honest work and far short of the two days a wedged
     /// worker actually cost. Overridable for tests.
+    /// How long a worker asked to leave is given before it is killed.
+    ///
+    /// Overridable so tests can ask for the answer in a second rather than ten.
+    fn shutdown_grace() -> std::time::Duration {
+        crate::proc::budget_from_env("ATLASDRIVE_VISION_SHUTDOWN_SECS", SHUTDOWN_GRACE_SECS)
+    }
+
     fn exchange_timeout() -> std::time::Duration {
         std::env::var("ATLASDRIVE_VISION_TIMEOUT_SECS")
             .ok()
@@ -331,9 +364,11 @@ impl VisionEngine {
 impl Drop for VisionEngine {
     fn drop(&mut self) {
         if let Some(mut worker) = self.worker.lock().unwrap().take() {
-            // Closing stdin ends the worker's read loop; then reap it.
+            // Closing stdin ends the worker's read loop; then reap it, under the
+            // same grace. A scan must be able to finish even if the worker
+            // cannot.
             drop(worker.stdin);
-            let _ = worker.child.wait();
+            crate::proc::shutdown_within(&mut worker.child, VisionEngine::shutdown_grace());
         }
     }
 }
@@ -644,7 +679,6 @@ mod tests {
 #[cfg(test)]
 mod worker_lifetime_tests {
     use super::*;
-    use std::io::Write as _;
 
     /// A stand-in worker that answers the selftest and then reports its own
     /// process id for every request, so a restart is directly observable.
@@ -707,7 +741,6 @@ done
 #[cfg(test)]
 mod wedge_tests {
     use super::*;
-    use std::io::Write as _;
 
     fn stub(dir: &std::path::Path, body: &str) -> PathBuf {
         let path = dir.join("atlasdrive-vision");
@@ -791,5 +824,80 @@ mod wedge_tests {
         );
         let msg = out.unwrap_err().to_string();
         assert!(msg.contains("did not answer"), "the error must say what happened: {msg}");
+    }
+
+    /// Retirement is where a wedged worker used to become the scan's problem.
+    ///
+    /// Every 400 photographs the engine closes the worker's stdin and waits for
+    /// it to leave. A worker in its read loop leaves at once; one wedged inside
+    /// an analysis never notices, and the bare `wait()` this replaced would have
+    /// blocked the pipeline thread on it — the 400-photograph mark turning into
+    /// the freeze that retirement exists to prevent.
+    #[test]
+    fn a_worker_that_ignores_its_stdin_close_does_not_hold_up_retirement() {
+        std::env::set_var("ATLASDRIVE_VISION_SHUTDOWN_SECS", "1");
+        let dir = tempfile::tempdir().unwrap();
+        // Answers every request, then ignores EOF and sits there.
+        let engine = VisionEngine::new(stub(
+            dir.path(),
+            &format!("while IFS= read -r _l; do\n{REPLY}\ndone\nsleep 120"),
+        ))
+        .unwrap();
+        let file = dir.path().join("photo.jpg");
+        std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
+
+        for _ in 0..MAX_PHOTOGRAPHS_PER_WORKER {
+            engine.exchange(&file).unwrap();
+        }
+
+        // This one crosses the limit, so it retires the wedged worker first.
+        let started = std::time::Instant::now();
+        let result = engine.exchange(&file);
+        let took = started.elapsed();
+
+        assert!(result.is_ok(), "the photograph that triggers retirement is still analysed");
+        assert!(
+            took < std::time::Duration::from_secs(30),
+            "retiring a worker that will not leave took {took:?}; it is killed at the grace"
+        );
+    }
+
+    /// A worker that hangs on `--selftest` must not hang the scan's start.
+    ///
+    /// `detect` runs before any photograph is read, so there is no per-file
+    /// error to fall back on and nothing on screen yet to show a stall. The
+    /// answer is the one that already exists for a missing worker: treat it as
+    /// absent and index with the heuristic engine.
+    #[test]
+    fn a_selftest_that_never_answers_is_treated_as_no_worker_at_all() {
+        std::env::set_var("ATLASDRIVE_VISION_SELFTEST_SECS", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(HELPER_BINARY);
+        std::fs::write(&path, "#!/bin/sh\nsleep 120\n").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let started = std::time::Instant::now();
+        let engine = VisionEngine::new(path);
+        let took = started.elapsed();
+
+        assert!(engine.is_err(), "a worker that will not answer its selftest is not usable");
+        assert!(
+            took < std::time::Duration::from_secs(30),
+            "the selftest must be bounded; took {took:?}"
+        );
+        let err = match engine {
+            Err(e) => e,
+            // `unwrap_err` would need Debug on the engine, which owns a child
+            // process; the test wants the error, not a printable engine.
+            Ok(_) => unreachable!("checked above"),
+        };
+        assert_eq!(
+            err.exit_code(),
+            crate::error::exit::MODEL_MISSING,
+            "it should read as a missing model, not a mystery: {err}"
+        );
+        assert!(err.to_string().contains("not runnable"), "{err}");
     }
 }

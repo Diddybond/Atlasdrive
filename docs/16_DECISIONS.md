@@ -2207,3 +2207,57 @@ marked superseded, keeping the reason it once existed. The test file compiles
 only under `cfg(test)`; nothing about it ships.
 
 **Supersedes:** None
+
+## D-084 — Letting go of a worker is bounded too, and the worker code is tested everywhere
+
+**Status:** settled.
+
+**Context.** D-081 put every external command the scan *runs* under a time
+budget. Three waits on the Vision worker were not commands and were missed:
+
+- `--selftest`, run by `detect` before the scan starts. A worker binary that
+  starts and never answers held the scan before it had read one photograph, with
+  nothing on screen yet to show a stall.
+- Retirement at 400 photographs, which closes the worker's stdin and waits for
+  it to leave. A worker in its read loop leaves at once; one wedged inside an
+  analysis never notices. Retirement exists *because* this worker gets into
+  states it does not come out of, so the wedged case is the expected one — and
+  the bare `wait()` blocked the pipeline thread on it. The 400-photograph mark
+  could become the freeze that retirement was added to prevent.
+- `Drop`, the same wait at the end of a run: a scan that could not finish
+  because the worker would not.
+
+A fourth was found by the test written for the first. `output_within` killed the
+child on time and then joined its pipe readers — and a child that forked leaves
+a grandchild holding the write end, so `read_to_end` waited on *that*. A budget
+of one second, honoured exactly, followed by a two-minute block.
+
+**Decision.** `proc::shutdown_within` waits for a child that has been asked to
+stop and kills it at a grace of ten seconds
+(`ATLASDRIVE_VISION_SHUTDOWN_SECS`), reaping either way. Retirement and `Drop`
+both use it. `--selftest` goes through `proc::output_within` with a 60-second
+budget (`ATLASDRIVE_VISION_SELFTEST_SECS`); exceeding it returns
+`ModelMissing`, which `detect` already treats as "no worker", so indexing falls
+back to the heuristic engine rather than waiting. In `output_within`, the pipe
+readers are collected over a channel against one five-second deadline instead of
+being joined, so a grandchild cannot extend a budget that has already expired.
+
+**Also settled: the Vision engine compiles and is tested on every platform.**
+The module was `cfg(target_os = "macos")`, so its worker-lifetime and wedge
+tests — the ones covering exactly these waits — ran nowhere but a Mac, and the
+last three fixes here could only be compile-checked by temporarily flipping the
+gate. Nothing in the module is an Apple API: it is a line-oriented pipe to a
+subprocess, and its tests drive a shell stub. It is now built and tested
+everywhere. What stays macOS-only is *registering* it in `local_with_vision`,
+because the worker it talks to is an Apple Vision helper. On other platforms the
+code is exercised, not enrolled.
+
+**Consequences:** 16 tests that only ran on macOS now run in every build,
+including two new ones: a worker that ignores its stdin close does not hold up
+retirement (against the old code that test blocks for the worker's full
+lifetime), and a selftest that never answers is treated as no worker at all.
+A grandchild holding a pipe is covered in `proc`. Budgets are generous and
+overridable; none of them can turn a slow photograph into a failure, and none of
+them can turn a wedge into a stall.
+
+**Supersedes:** None. Extends D-081 to the waits that are not commands.

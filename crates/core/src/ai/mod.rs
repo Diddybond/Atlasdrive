@@ -24,7 +24,6 @@ pub mod brands;
 pub mod names;
 pub mod local;
 pub mod text;
-#[cfg(target_os = "macos")]
 pub mod vision;
 pub mod types;
 

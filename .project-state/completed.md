@@ -42,3 +42,25 @@
 - Evidence: three of the four fail against the pre-fix file and all four pass
   after. Full suite 323 core + 2 CLI + 74 UI, clippy clean.
 - Decision recorded: D-083
+
+## 2026-09-08: Letting go of the Vision worker is bounded too
+
+- Roadmap item: follow-through on D-081 (every external command under a budget)
+- Symptom: three waits on the Vision worker had no bound — `--selftest` before
+  the scan starts, retirement at 400 photographs, and `Drop` at the end of a
+  run. Retirement exists because the worker wedges, so a wedged worker at the
+  400 mark would block the pipeline thread on a bare `wait()`: the freeze that
+  retirement was added to prevent.
+- Found while testing the fix: `output_within` killed on time and then joined
+  its pipe readers, so a forking child's grandchild could hold the pipe and
+  extend an expired budget by minutes.
+- Fix: `proc::shutdown_within` (kill at a grace, always reap) for retirement and
+  Drop; `proc::output_within` with a 60s budget for the selftest; pipe readers
+  collected against one 5s deadline instead of joined.
+- Also: the Vision module is no longer `cfg(macos)`. It is a pipe to a
+  subprocess, not an Apple API, and its 16 tests now run in every build.
+  Registration in `local_with_vision` stays macOS-only.
+- Evidence: the retirement test blocks 121s and fails against the old code, and
+  passes in ~1s after. Full suite 341 core (was 323) + 2 CLI + 74 UI, clippy
+  clean.
+- Decision recorded: D-084

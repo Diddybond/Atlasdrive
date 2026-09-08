@@ -26,6 +26,34 @@ use crate::error::{Error, Result};
 /// that a ten-minute wait is not a spin loop.
 const POLL: Duration = Duration::from_millis(50);
 
+/// How long a pipe reader is given once the child itself has gone.
+///
+/// Only reached when something other than the child still holds the write end,
+/// which means the output is not coming. Long enough that a slow flush is not
+/// truncated, short enough that it cannot become the stall it is guarding.
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
+
+/// Read a pipe to the end on its own thread, handing the bytes back over a
+/// channel so the reader can be abandoned if it will not finish.
+fn drain_in_background<R: Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+/// Whatever a reader produced, or nothing if it is still waiting.
+fn collect(rx: &std::sync::mpsc::Receiver<Vec<u8>>, grace: Duration) -> Vec<u8> {
+    rx.recv_timeout(grace).unwrap_or_default()
+}
+
 /// What a finished child produced.
 #[derive(Debug)]
 pub struct Finished {
@@ -58,22 +86,8 @@ pub fn output_within(cmd: &mut Command, budget: Duration) -> Result<Finished> {
 
     // Drain both pipes concurrently; see the module note on why this cannot
     // wait until after the child has exited.
-    let mut out_pipe = child.stdout.take();
-    let mut err_pipe = child.stderr.take();
-    let out_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = out_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let err_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = err_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
+    let out_rx = drain_in_background(child.stdout.take());
+    let err_rx = drain_in_background(child.stderr.take());
 
     let started = Instant::now();
     let status = loop {
@@ -92,9 +106,17 @@ pub fn output_within(cmd: &mut Command, budget: Duration) -> Result<Finished> {
         std::thread::sleep(POLL);
     };
 
-    // Killing closes the pipes, so both readers finish either way.
-    let stdout = out_reader.join().unwrap_or_default();
-    let stderr = err_reader.join().unwrap_or_default();
+    // Killing the child closes *its* ends of the pipes, but a child that forked
+    // — a shell that spawned the real work, a worker with a helper of its own —
+    // leaves a grandchild holding the write end open, and `read_to_end` waits on
+    // whoever still has it. Joining those readers unconditionally would put the
+    // wait straight back: a budget of one second, killed on time, and then a
+    // two-minute block on the grandchild. So the readers are collected with a
+    // deadline of their own and the caller gets whatever arrived.
+    // One deadline covers both, so two stuck pipes cost one grace, not two.
+    let drain_by = Instant::now() + DRAIN_GRACE;
+    let stdout = collect(&out_rx, drain_by.saturating_duration_since(Instant::now()));
+    let stderr = collect(&err_rx, drain_by.saturating_duration_since(Instant::now()));
 
     match status {
         Some(status) => Ok(Finished { status, stdout, stderr }),
@@ -103,6 +125,38 @@ pub fn output_within(cmd: &mut Command, budget: Duration) -> Result<Finished> {
             cmd.get_program(),
             budget.as_secs()
         ))),
+    }
+}
+
+/// Wait for a child that has been asked to stop, and kill it if it will not.
+///
+/// Returns `true` if it exited on its own within `grace`, `false` if it had to
+/// be killed. Either way the child is reaped before this returns, so it never
+/// becomes a zombie.
+///
+/// This is the other half of the wedged-worker problem. `output_within` bounds a
+/// command that is *running*; this bounds one that has been *told to finish*.
+/// Closing a long-lived worker's stdin ends its read loop and it exits of its own
+/// accord — but only if it is in that loop. A worker wedged inside an analysis
+/// never sees the close, and a bare `child.wait()` then blocks for ever on the
+/// thread doing the closing. The Vision worker is retired every 400 photographs
+/// for exactly the reasons that make it wedge, so "wedged at retirement" is the
+/// expected case, not a remote one.
+pub fn shutdown_within(child: &mut std::process::Child, grace: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            // Already reaped or unwaitable: nothing left to kill.
+            Err(_) => return true,
+            Ok(None) => {}
+        }
+        if started.elapsed() >= grace {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(POLL);
     }
 }
 
@@ -170,6 +224,69 @@ mod tests {
         let done = output_within(&mut cmd, Duration::from_secs(30)).unwrap();
         assert!(done.success());
         assert!(done.stdout.len() > 1_000_000, "got {} bytes", done.stdout.len());
+    }
+
+    #[test]
+    fn a_worker_that_stops_when_asked_is_reaped_promptly() {
+        // `cat` ends its read loop at EOF, which is how the Vision worker is
+        // meant to retire: close its stdin and it leaves of its own accord.
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take());
+
+        let started = Instant::now();
+        assert!(shutdown_within(&mut child, Duration::from_secs(10)));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a cooperative worker should not be waited on for its whole grace"
+        );
+    }
+
+    /// The case that matters: a worker wedged inside an analysis never notices
+    /// its stdin close, and a bare `wait()` would block the scan for ever.
+    #[test]
+    fn a_wedged_worker_is_killed_at_the_grace_rather_than_waited_on() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("120")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdin.take());
+
+        let started = Instant::now();
+        let left_on_its_own = shutdown_within(&mut child, Duration::from_millis(300));
+        let took = started.elapsed();
+
+        assert!(!left_on_its_own, "sleep ignores EOF, so it had to be killed");
+        assert!(
+            took < Duration::from_secs(10),
+            "should return at the grace, not at the worker's own pace; took {took:?}"
+        );
+        // Reaped, not left a zombie: a second wait finds nothing to wait for.
+        assert!(shutdown_within(&mut child, Duration::from_millis(1)));
+    }
+
+    /// A shell that forks leaves its child holding the pipe after the shell is
+    /// killed. Reading to the end then means reading until the *grandchild*
+    /// finishes, which is the wait the budget was meant to end.
+    #[test]
+    fn a_grandchild_holding_the_pipe_cannot_extend_the_budget() {
+        let mut cmd = Command::new("/bin/sh");
+        // `&` guarantees a background child; the trailing wait-free exit means
+        // the shell goes but the sleep, holding stdout, does not.
+        cmd.args(["-c", "sleep 120 & sleep 120"]);
+        let started = Instant::now();
+        let err = output_within(&mut cmd, Duration::from_millis(300)).unwrap_err();
+        let took = started.elapsed();
+
+        assert!(format!("{err}").contains("did not finish"), "{err}");
+        assert!(
+            took < Duration::from_secs(10),
+            "the drain grace bounds this too; took {took:?}"
+        );
     }
 
     #[test]
