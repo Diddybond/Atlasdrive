@@ -161,16 +161,26 @@ impl VisionEngine {
 
     /// Build an engine around a specific worker binary.
     pub fn new(helper: PathBuf) -> Result<Self> {
+        let budget =
+            crate::proc::budget_from_env("ATLASDRIVE_VISION_SELFTEST_SECS", SELFTEST_BUDGET_SECS);
+        Self::with_selftest_budget(helper, budget)
+    }
+
+    /// As [`Self::new`], with the selftest budget given rather than read from
+    /// the environment.
+    ///
+    /// Tests use this instead of setting the variable: the suite runs in one
+    /// process, so a test that lowered the budget globally would also lower it
+    /// under every other test constructing a worker at that moment, and fail
+    /// one of them for being ordinarily slow.
+    fn with_selftest_budget(helper: PathBuf, budget: std::time::Duration) -> Result<Self> {
         // Confirm this is really our worker before trusting it. Under a budget:
         // a binary that starts and then never answers would otherwise hold the
         // scan before it had read a single photograph.
         let mut cmd = Command::new(&helper);
         cmd.arg("--selftest");
-        let out = crate::proc::output_within(
-            &mut cmd,
-            crate::proc::budget_from_env("ATLASDRIVE_VISION_SELFTEST_SECS", SELFTEST_BUDGET_SECS),
-        )
-        .map_err(|e| Error::ModelMissing(format!("vision worker not runnable: {e}")))?;
+        let out = crate::proc::output_within(&mut cmd, budget)
+            .map_err(|e| Error::ModelMissing(format!("vision worker not runnable: {e}")))?;
         let banner = String::from_utf8_lossy(&out.stdout);
         if !out.success() || !banner.starts_with(HELPER_BINARY) {
             return Err(Error::ModelMissing(format!(
@@ -676,6 +686,30 @@ mod tests {
     }
 }
 
+/// Start an engine on a stub worker the test has just written.
+///
+/// Retries on `ETXTBSY`, which is a property of the test setup rather than of
+/// anything being tested: on Linux, exec of a file fails while any process
+/// holds it open for writing, and a sibling test that forks between this test
+/// writing the stub and closing it inherits that descriptor. The real worker is
+/// shipped inside the bundle and never written at run time, so this belongs
+/// here and not in `new`.
+#[cfg(test)]
+fn engine_on_stub(path: PathBuf) -> VisionEngine {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match VisionEngine::new(path.clone()) {
+            Ok(engine) => return engine,
+            Err(e) if format!("{e}").contains("Text file busy")
+                && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("stub worker at {} would not start: {e}", path.display()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod worker_lifetime_tests {
     use super::*;
@@ -703,7 +737,7 @@ done
     #[test]
     fn the_worker_is_reused_and_then_retired() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = VisionEngine::new(stub_worker(dir.path())).unwrap();
+        let engine = engine_on_stub(stub_worker(dir.path()));
         let file = dir.path().join("photo.jpg");
         std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
 
@@ -726,7 +760,7 @@ done
     #[test]
     fn the_photograph_that_triggers_a_restart_is_still_analysed() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = VisionEngine::new(stub_worker(dir.path())).unwrap();
+        let engine = engine_on_stub(stub_worker(dir.path()));
         let file = dir.path().join("photo.jpg");
         std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
 
@@ -764,7 +798,7 @@ mod wedge_tests {
     fn a_wedged_worker_is_killed_and_the_next_exchange_recovers() {
         std::env::set_var("ATLASDRIVE_VISION_TIMEOUT_SECS", "2");
         let dir = tempfile::tempdir().unwrap();
-        let engine = VisionEngine::new(stub(
+        let engine = engine_on_stub(stub(
             dir.path(),
             // Three properties, each earned by a wrong version of this stub:
             // `|| exit 0` makes it exit at stdin EOF like the real worker, so
@@ -775,8 +809,7 @@ mod wedge_tests {
             // short so a killed worker's orphan outlives the test by minutes,
             // not an hour.
             &format!("IFS= read -r _a || exit 0\n{REPLY}\nIFS= read -r _b || exit 0\nsleep 120"),
-        ))
-        .unwrap();
+        ));
         let file = dir.path().join("photo.jpg");
         std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
 
@@ -806,11 +839,10 @@ mod wedge_tests {
     fn a_worker_that_never_answers_fails_the_photograph_in_bounded_time() {
         std::env::set_var("ATLASDRIVE_VISION_TIMEOUT_SECS", "2");
         let dir = tempfile::tempdir().unwrap();
-        let engine = VisionEngine::new(stub(
+        let engine = engine_on_stub(stub(
             dir.path(),
             "IFS= read -r _a || exit 0\nsleep 120",
-        ))
-        .unwrap();
+        ));
         let file = dir.path().join("photo.jpg");
         std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
 
@@ -838,11 +870,10 @@ mod wedge_tests {
         std::env::set_var("ATLASDRIVE_VISION_SHUTDOWN_SECS", "1");
         let dir = tempfile::tempdir().unwrap();
         // Answers every request, then ignores EOF and sits there.
-        let engine = VisionEngine::new(stub(
+        let engine = engine_on_stub(stub(
             dir.path(),
             &format!("while IFS= read -r _l; do\n{REPLY}\ndone\nsleep 120"),
-        ))
-        .unwrap();
+        ));
         let file = dir.path().join("photo.jpg");
         std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
 
@@ -870,7 +901,6 @@ mod wedge_tests {
     /// absent and index with the heuristic engine.
     #[test]
     fn a_selftest_that_never_answers_is_treated_as_no_worker_at_all() {
-        std::env::set_var("ATLASDRIVE_VISION_SELFTEST_SECS", "1");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(HELPER_BINARY);
         std::fs::write(&path, "#!/bin/sh\nsleep 120\n").unwrap();
@@ -879,7 +909,8 @@ mod wedge_tests {
         std::fs::set_permissions(&path, perms).unwrap();
 
         let started = std::time::Instant::now();
-        let engine = VisionEngine::new(path);
+        let engine =
+            VisionEngine::with_selftest_budget(path, std::time::Duration::from_millis(300));
         let took = started.elapsed();
 
         assert!(engine.is_err(), "a worker that will not answer its selftest is not usable");

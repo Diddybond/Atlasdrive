@@ -933,20 +933,13 @@ fn get_progress(state: State<AppState>) -> Result<Option<Progress>, String> {
     // dashboard that reports the world and one that reports a stale file: the
     // owner would otherwise open the app to a live pulse, a read speed and
     // "Reading photographs from this drive" with nothing running at all.
+    //
+    // The rule itself lives in the core `Progress`, tested there, because the
+    // verifier and the command line have to reach the same verdict about the
+    // same file — this app used to be the only thing that knew (D-085).
     if let Some(p) = progress.as_mut() {
         let in_flight = state.running.lock().unwrap().is_some();
-        if p.status == "running" && !in_flight {
-            p.status = "interrupted".to_string();
-        } else if p.status == "running" {
-            // Progress is written after every photograph, so half an hour of
-            // silence from a "running" scan means it is stuck, whatever the
-            // thread believes. A real scan showed "running" for two days
-            // without moving; the label is the only thing the owner can see.
-            let stale = chrono_free_age_minutes(&p.updated_at).map_or(false, |m| m >= 30);
-            if stale {
-                p.status = "stalled".to_string();
-            }
-        }
+        p.status = p.reconciled_status(Some(in_flight));
     }
     Ok(progress)
 }
@@ -1207,32 +1200,6 @@ fn find_names(
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
     family_archive_core::inventory::scan_for_names(&archive, drive_number).map_err(map_err)
-}
-
-/// Minutes since an ISO-8601 UTC timestamp, without pulling in a time crate.
-fn chrono_free_age_minutes(iso: &str) -> Option<i64> {
-    // "2026-07-31T19:23:38Z" — parsed as days-since-epoch arithmetic.
-    let (date, time) = iso.split_once('T')?;
-    let mut d = date.split('-');
-    let (y, mo, day): (i64, i64, i64) =
-        (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
-    let mut t = time.trim_end_matches('Z').split(':');
-    let (h, mi): (i64, i64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?);
-    // Days since civil epoch (Howard Hinnant's algorithm, i64 throughout).
-    let y_adj = if mo <= 2 { y - 1 } else { y };
-    let era = y_adj.div_euclid(400);
-    let yoe = y_adj - era * 400;
-    let mp = (mo + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
-    let then_minutes = days * 1440 + h * 60 + mi;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs() as i64
-        / 60;
-    Some(now - then_minutes)
 }
 
 /// Ask whichever process is scanning to stop at the next batch boundary.

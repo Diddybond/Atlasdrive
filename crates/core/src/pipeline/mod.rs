@@ -97,6 +97,38 @@ pub struct IndexSummary {
     pub files_missing: u64,
 }
 
+/// Write the run's counters to `progress.json`, and stamp the time.
+///
+/// Called after every photograph, whether it was catalogued or failed. Two
+/// things depend on that:
+///
+/// * **The display.** A batch is 64 files, which on a slow drive is five
+///   minutes — long enough that a progress display sits perfectly still and the
+///   whole run looks stuck.
+/// * **The heartbeat.** `updated_at` is how anyone else decides whether the
+///   scan is alive (see [`crate::progress::STALL_AFTER_MINUTES`]). Publishing
+///   only on success means a stretch of slow failures reads as a stall.
+///
+/// The write is a few hundred bytes against seconds of analysis per file, so
+/// the cost is nothing next to being able to see the run working. Failure to
+/// write is ignored on purpose: losing a progress update must never fail a
+/// photograph that was catalogued correctly.
+fn publish(
+    progress: &mut crate::progress::Progress,
+    summary: &IndexSummary,
+    batch_no: u64,
+    paths: &AppPaths,
+    dry_run: bool,
+) {
+    progress.files_done = summary.files_done;
+    progress.files_failed = summary.files_failed;
+    progress.current_batch = batch_no;
+    progress.touch();
+    if !dry_run {
+        let _ = progress.write(paths);
+    }
+}
+
 /// Crop a detected face out of the decoded original and encode a small JPEG.
 ///
 /// Returns `None` when the crop would be too small to recognise anyone from,
@@ -407,20 +439,7 @@ impl<'a> Pipeline<'a> {
                         if !dry_run {
                             q.complete(&item.id)?;
                         }
-                        // Publish after every photograph, not only at the end of
-                        // a batch. A batch is 64 files, which on a slow drive is
-                        // five minutes — long enough that a progress display
-                        // sits perfectly still and the whole run looks stuck.
-                        // The write is a few hundred bytes against roughly three
-                        // seconds of Vision analysis per file, so the cost is
-                        // nothing next to being able to see it working.
-                        progress.files_done = summary.files_done;
-                        progress.files_failed = summary.files_failed;
-                        progress.current_batch = batch_no;
-                        progress.touch();
-                        if !dry_run {
-                            let _ = progress.write(self.paths);
-                        }
+                        publish(&mut progress, &summary, batch_no, self.paths, dry_run);
                     }
                     Err(e) if e.is_hard_halt() => {
                         // Immediate hard halt (integrity, unsafe path, network...).
@@ -430,6 +449,8 @@ impl<'a> Pipeline<'a> {
                             .code(format!("{}", e.exit_code()))
                             .field("error", format!("{e}"))
                             .emit_best_effort();
+                        progress.files_done = summary.files_done;
+                        progress.files_failed = summary.files_failed;
                         progress.status = "halted".into();
                         progress.touch();
                         if !dry_run {
@@ -476,6 +497,13 @@ impl<'a> Pipeline<'a> {
                         if !dry_run {
                             q.fail(&item.id, "PROCESS", &format!("{e}"), retryable)?;
                         }
+                        // A failure is news too. Without this the heartbeat only
+                        // beats on success, so a run of files that each take
+                        // minutes to fail — a wedged decoder times out at ten —
+                        // writes nothing for long enough to be called stalled
+                        // while it is working exactly as designed, and the
+                        // failure count on screen lags behind the truth.
+                        publish(&mut progress, &summary, batch_no, self.paths, dry_run);
                     }
                 }
             }
@@ -572,6 +600,11 @@ impl<'a> Pipeline<'a> {
             let _ = crate::stop::clear(self.paths);
 
             // Leave the run resumable: record interrupted state, do not complete.
+            // The counters come from the summary rather than from whatever the
+            // last batch boundary happened to publish, because an interruption
+            // lands mid-batch far more often than not.
+            progress.files_done = summary.files_done;
+            progress.files_failed = summary.files_failed;
             progress.status = "interrupted".into();
             progress.touch();
             if !dry_run {

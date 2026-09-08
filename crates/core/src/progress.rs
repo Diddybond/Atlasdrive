@@ -82,7 +82,66 @@ impl Progress {
     pub fn touch(&mut self) {
         self.updated_at = now_iso8601();
     }
+
+    /// Minutes since this was last written, or `None` if the timestamp is
+    /// unreadable.
+    ///
+    /// Unreadable is deliberately not "old": a timestamp that cannot be parsed
+    /// says nothing about whether the scan is alive, and treating it as stale
+    /// would put a scary label on a working run.
+    pub fn age_minutes(&self) -> Option<i64> {
+        let then = chrono::DateTime::parse_from_rfc3339(&self.updated_at).ok()?;
+        Some((chrono::Utc::now() - then.with_timezone(&chrono::Utc)).num_minutes())
+    }
+
+    /// The status to *show*, which is not always the status on disk.
+    ///
+    /// `progress.json` is written by the run itself, so it can only ever record
+    /// what the run knew before it stopped knowing anything. Two states are
+    /// therefore never written and have to be worked out by whoever reads the
+    /// file:
+    ///
+    /// * **interrupted** — the file says "running" and the caller can see that
+    ///   no run is in flight. A run that was killed rather than cancelled never
+    ///   got to write anything else.
+    /// * **stalled** — the file says "running", something may well be in
+    ///   flight, but nothing has been written for [`STALL_AFTER_MINUTES`].
+    ///
+    /// `in_flight` is what the caller knows about a run in this process:
+    /// `Some(false)` means "certainly nothing running", `None` means "cannot
+    /// tell" — which is the honest answer from the command line, where the scan
+    /// may belong to another process entirely.
+    ///
+    /// This lives here rather than in the app because both need it and they
+    /// must not disagree (D-049). The desktop app had the rule; the CLI and the
+    /// verifier did not, so the one route the owner is told to use for recovery
+    /// was also the one that would repeat "running" about a scan that died two
+    /// days ago.
+    pub fn reconciled_status(&self, in_flight: Option<bool>) -> String {
+        // Anything the run itself wrote is the truth and is passed through
+        // unchanged — including a status this code has never heard of.
+        if self.status != "running" {
+            return self.status.clone();
+        }
+        if in_flight == Some(false) {
+            return "interrupted".to_string();
+        }
+        match self.age_minutes() {
+            Some(m) if m >= STALL_AFTER_MINUTES => "stalled".to_string(),
+            _ => "running".to_string(),
+        }
+    }
 }
+
+/// How long a "running" scan may go without writing before it is called
+/// stalled.
+///
+/// Progress is written after every photograph — successes and failures alike —
+/// so silence is not slowness. The slowest single photograph is bounded by the
+/// decode and Vision budgets at ten minutes each, so half an hour is past any
+/// honest file and well short of the two days a real scan sat frozen while the
+/// screen said it was running.
+pub const STALL_AFTER_MINUTES: i64 = 30;
 
 #[cfg(test)]
 mod tests {
@@ -106,5 +165,61 @@ mod tests {
         let text = std::fs::read_to_string(paths.progress_json()).unwrap();
         assert!(text.contains("\"filesDiscovered\""));
         assert!(text.contains("\"driveNumber\""));
+    }
+
+    /// Backdate the last write by `minutes`, as a scan that has gone quiet does.
+    fn quiet_for(minutes: i64) -> Progress {
+        let mut p = Progress::new("run1", 5, "drv", "/Volumes/Drive 5");
+        p.updated_at = (chrono::Utc::now() - chrono::Duration::minutes(minutes))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        p
+    }
+
+    #[test]
+    fn a_scan_writing_regularly_is_running() {
+        let p = quiet_for(1);
+        assert_eq!(p.reconciled_status(Some(true)), "running");
+        assert_eq!(p.reconciled_status(None), "running");
+    }
+
+    /// The two days a real scan spent saying "running" with nothing being read.
+    #[test]
+    fn a_scan_silent_for_half_an_hour_is_stalled() {
+        let p = quiet_for(STALL_AFTER_MINUTES + 1);
+        assert_eq!(p.reconciled_status(Some(true)), "stalled");
+        assert_eq!(
+            p.reconciled_status(None),
+            "stalled",
+            "the command line cannot see a run in flight, and must still say so"
+        );
+    }
+
+    /// A run that was killed never got to write anything but "running".
+    #[test]
+    fn a_run_that_is_not_in_flight_was_interrupted_however_recent_it_looks() {
+        let p = quiet_for(0);
+        assert_eq!(p.reconciled_status(Some(false)), "interrupted");
+    }
+
+    /// What the run wrote for itself is the truth, and is never overruled.
+    #[test]
+    fn a_finished_run_is_left_alone() {
+        for status in ["complete", "halted", "interrupted"] {
+            let mut p = quiet_for(60 * 24);
+            p.status = status.to_string();
+            assert_eq!(p.reconciled_status(Some(false)), status);
+            assert_eq!(p.reconciled_status(None), status);
+        }
+    }
+
+    /// An unreadable timestamp says nothing about liveness, so it must not be
+    /// read as "old" — that would label a working scan stalled.
+    #[test]
+    fn an_unreadable_timestamp_is_not_evidence_of_a_stall() {
+        let mut p = Progress::new("run1", 5, "drv", "/Volumes/Drive 5");
+        p.updated_at = "not a timestamp".to_string();
+        assert_eq!(p.age_minutes(), None);
+        assert_eq!(p.reconciled_status(None), "running");
     }
 }

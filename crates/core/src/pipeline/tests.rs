@@ -314,6 +314,57 @@ fn three_consecutive_verifier_failures_halt_and_report() {
     assert!(done < 3 + 6, "run should have halted before finishing the queue, got {done}");
 }
 
+/// A failure is published when it happens, not at the end of the batch that
+/// contains it.
+///
+/// Progress was written after every *success* only. That left two marks. The
+/// count of failures on screen lagged behind the truth, and — worse — a stretch
+/// of files that each take minutes to fail wrote nothing at all, so a run that
+/// was working exactly as designed went silent for long enough to be called
+/// stalled. A wedged decoder is given ten minutes (D-081), so three such files
+/// in a row is half an hour of silence.
+///
+/// A run that ends inside a batch is where the difference is visible: the
+/// end-of-batch write never happens, so whatever was published per photograph
+/// is all that survives. Here the run halts on repeated verifier failures with
+/// a failed photograph in the final batch.
+#[test]
+fn a_failure_reaches_progress_before_the_batch_ends() {
+    let (h, opts) = setup(no_disk_floor());
+    let p = pipeline(&h);
+    p.run(&opts).unwrap();
+
+    // A catalogue defect that makes every later batch fail verification.
+    h.archive
+        .execute(
+            "UPDATE files SET perceptual_hash = NULL
+             WHERE id = (SELECT id FROM files WHERE status='complete' LIMIT 1)",
+            [],
+        )
+        .unwrap();
+
+    // Three more items, one per batch, with the unreadable one last: batches one
+    // and two fail verification, and batch three both fails a photograph and
+    // trips the third consecutive verifier failure, halting mid-batch.
+    write_photo(&h.drive_dir.join("later/new_a.png"), [10, 90, 140], 40, 30);
+    write_photo(&h.drive_dir.join("later/new_b.png"), [20, 90, 140], 40, 30);
+    std::fs::write(h.drive_dir.join("later/s_broken.png"), b"not a png at all").unwrap();
+
+    let mut opts2 = opts.clone();
+    opts2.config = Config { batch_size: 1, ..no_disk_floor() };
+    let err = p.run(&opts2).expect_err("three verifier failures must halt the run");
+    assert_eq!(err.exit_code(), crate::error::exit::REPEATED_VERIFIER_FAILURE);
+
+    let progress = crate::progress::Progress::load(&h.paths).unwrap().unwrap();
+    assert_eq!(progress.status, "halted");
+    assert_eq!(
+        progress.files_failed, 1,
+        "the photograph that failed in the halting batch must be counted; \
+         publishing only on success reports 0 here"
+    );
+    assert_eq!(progress.files_done, 2, "both readable photographs were catalogued");
+}
+
 /// Incremental rescan: a file edited since indexing is re-analysed, and a file
 /// that has gone away is marked missing rather than silently left as complete.
 #[test]

@@ -1424,6 +1424,25 @@ fn doctor_cmd(ctx: &Ctx) -> Result<()> {
         Ok(_) => println!("  key:       available"),
         Err(e) => println!("  key:       ERROR {e}"),
     }
+    // What the last scan is doing, in the same words the app uses. A run that
+    // was killed leaves "running" on disk for ever, and half an hour of silence
+    // from a scan that claims to be reading is a stuck one — the command line is
+    // where recovery happens, so it has to say so too.
+    match family_archive_core::progress::Progress::load(&ctx.paths) {
+        Ok(Some(p)) => {
+            // Another process may well be scanning; from here that is unknowable.
+            println!(
+                "  last scan: drive {} — {} ({} done, {} failed, updated {})",
+                p.drive_number,
+                p.reconciled_status(None),
+                p.files_done,
+                p.files_failed,
+                p.updated_at
+            );
+        }
+        Ok(None) => println!("  last scan: none recorded"),
+        Err(e) => println!("  last scan: progress.json unreadable ({e})"),
+    }
     let archive = ctx.open_archive()?;
     let sv = db::schema_version(&archive)?;
     println!("  archive schema version: {sv}");

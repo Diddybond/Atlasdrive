@@ -139,6 +139,7 @@ pub fn run(ctx: &VerifyContext) -> Result<VerifierReport> {
     checks.push(check_network_isolation(ctx.network_blocked_attempts));
     checks.push(check_disk_floor(ctx.paths, ctx.config));
     checks.push(check_throughput(ctx));
+    checks.push(check_heartbeat(ctx.paths));
     if let Some(q) = ctx.queue {
         checks.push(check_queue_consistency(q));
     }
@@ -437,6 +438,36 @@ fn check_throughput(ctx: &VerifyContext) -> Check {
     }
 }
 
+/// `docs/13` requires the verifier to confirm the worker's heartbeat is current.
+///
+/// `progress.json` is that heartbeat: it is rewritten after every photograph,
+/// success or failure. A run that says it is still going and has written
+/// nothing for half an hour is not going. This is a warning rather than a
+/// failure because the catalogue is not wrong — the scan is stuck, which is a
+/// thing to be told, not a corruption to halt over.
+fn check_heartbeat(paths: &AppPaths) -> Check {
+    let progress = match crate::progress::Progress::load(paths) {
+        Ok(Some(p)) => p,
+        // No scan has ever run here, or the file is unreadable. Neither is
+        // evidence of a stall.
+        Ok(None) => return Check::pass("heartbeat", "no scan in progress"),
+        Err(e) => return Check::warn("heartbeat", format!("progress.json unreadable: {e}")),
+    };
+    // The verifier is a separate process from any running scan, so it cannot
+    // see whether one is in flight — `None` says exactly that.
+    match progress.reconciled_status(None).as_str() {
+        "stalled" => Check::warn(
+            "heartbeat",
+            format!(
+                "drive {} reports a running scan but has written nothing for {} minutes",
+                progress.drive_number,
+                progress.age_minutes().unwrap_or(-1)
+            ),
+        ),
+        other => Check::pass("heartbeat", format!("last scan {other}")),
+    }
+}
+
 fn check_queue_consistency(queue: &Connection) -> Check {
     // No complete item may remain leased; no item both complete and queued.
     let leased_complete: i64 = queue
@@ -519,6 +550,32 @@ mod tests {
         let report = run(&ctx).unwrap();
         assert!(report.ok(), "report should pass: {}", report.summary());
         assert_eq!(report.exit_code(), 0);
+    }
+
+    /// `docs/13`: the worker heartbeat must be checked, and the check has to be
+    /// available where recovery actually happens — the command line — not only
+    /// in the desktop app.
+    #[test]
+    fn a_scan_that_claims_to_be_running_but_has_gone_quiet_is_reported() {
+        let (_d, paths, _config) = ctx_paths();
+        let mut p = crate::progress::Progress::new("run1", 5, "drv", "/Volumes/Drive 5");
+        p.updated_at =
+            (chrono::Utc::now() - chrono::Duration::minutes(crate::progress::STALL_AFTER_MINUTES + 5))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string();
+        p.write(&paths).unwrap();
+
+        let check = check_heartbeat(&paths);
+        assert!(matches!(check.status, CheckStatus::Warn), "{check:?}");
+        assert!(check.detail.contains("Drive 5") || check.detail.contains("drive 5"), "{check:?}");
+
+        // A scan writing normally passes, and so does a machine that has never
+        // scanned at all.
+        p.touch();
+        p.write(&paths).unwrap();
+        assert!(matches!(check_heartbeat(&paths).status, CheckStatus::Pass));
+        let (_d2, empty, _c) = ctx_paths();
+        assert!(matches!(check_heartbeat(&empty).status, CheckStatus::Pass));
     }
 
     #[test]

@@ -2261,3 +2261,59 @@ overridable; none of them can turn a slow photograph into a failure, and none of
 them can turn a wedge into a stall.
 
 **Supersedes:** None. Extends D-081 to the waits that are not commands.
+
+## D-085 — Whether a scan is alive is one rule, and a failure is news
+
+**Status:** settled.
+
+**Context.** `progress.json` records what a run knew before it stopped knowing
+anything, so two states are never written and have to be worked out by whoever
+reads the file: a run killed rather than cancelled still says "running", and a
+run that has written nothing for half an hour is stuck whatever it says.
+
+That reasoning existed, correctly, in exactly one place: the desktop app's
+`get_progress`. The command line — which is what the app itself recommends for
+recovery — had no such rule, and `docs/13` asks the verifier for a check the
+verifier did not have ("worker heartbeat remains current"). So the one route
+available when the app is the thing behaving badly was also the one that would
+repeat "running" about a scan that died two days ago.
+
+Underneath it, a second problem made the rule wrong even where it existed.
+Progress was published after every *success* and not after a failure. A stretch
+of files that each take minutes to fail — a wedged decoder is given ten (D-081)
+— therefore wrote nothing at all, and three of them in a row is half an hour of
+silence: the app would call a run stalled while it was working exactly as
+designed. The same gap made a run that ended inside a batch report fewer
+failures than it had, because the end-of-batch write never happened.
+
+**Decision.** `Progress::reconciled_status(in_flight)` in core is the single
+rule, with `STALL_AFTER_MINUTES = 30` beside it. `in_flight` is what the caller
+knows: `Some(false)` means "certainly nothing running" (the app, which owns the
+thread), `None` means "cannot tell" (the command line and the verifier, where
+the scan may belong to another process). A status the run wrote for itself is
+passed through untouched, and an unparseable timestamp is not treated as old —
+that would put a scary label on a working run. The app now calls it; the
+verifier gained a `heartbeat` check that warns; `atlasdrive doctor` prints the
+reconciled status of the last scan.
+
+And progress is published after every photograph, failed or catalogued, through
+one `publish` helper. The interrupted and halted paths take their counters from
+the run summary rather than from whatever the last batch boundary left behind.
+
+**Consequences:** A stalled scan reads the same in the app, at the command line
+and in the verifier's report, because it is the same code. The heartbeat now
+beats on failures, so "no progress" means no progress rather than "no
+successes". A halting run reports the photograph that failed in its final batch:
+a test asserts 1 where the old code wrote 0.
+
+**Also:** the Vision engine's stub-worker tests now retry `ETXTBSY` when
+starting a stub. That is a Linux property of writing and executing a file in the
+same process (a sibling test forking between the write and its close inherits
+the descriptor), it appeared only once these tests started running off macOS
+under D-084, and it belongs in the test helper rather than in `new` — the real
+worker ships inside the bundle and is never written at run time. The selftest
+budget is passed in by those tests instead of set in the environment, because
+the suite is one process and a global budget change lands on whatever else is
+constructing a worker at that moment.
+
+**Supersedes:** None

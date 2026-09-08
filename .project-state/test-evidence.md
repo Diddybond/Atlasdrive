@@ -311,3 +311,56 @@ Result: pass (0 warnings)
 
 Not verified here: the real Swift worker, which needs macOS. What is verified
 everywhere is the protocol, the lifetime and every wait around it.
+
+---
+
+## 2026-09-08 (Linux session): the heartbeat, and failures that count
+
+### The failure-publish test fails against the code it was written for
+
+```text
+Old code: no publish in the recoverable-failure branch
+Command: cargo test -p family-archive-core a_failure_reaches_progress
+Result: FAILED — "the photograph that failed in the halting batch must be
+        counted; publishing only on success reports 0 here"
+          left: 0
+         right: 1
+```
+
+```text
+Fixed code: publish(&mut progress, &summary, batch_no, self.paths, dry_run)
+Exit code: 0
+Result: pass
+```
+
+### The rule itself
+
+```text
+Command: cargo test -p family-archive-core progress::
+Exit code: 0
+Result: pass (6 tests) — running, stalled at 30 minutes, interrupted when
+        nothing is in flight, a finished run left alone, and an unreadable
+        timestamp that is not evidence of a stall
+
+Command: cargo test -p family-archive-core verifier::
+Exit code: 0
+Result: pass (8 tests) — including a_scan_that_claims_to_be_running_but_has_
+        gone_quiet_is_reported, the docs/13 heartbeat check
+```
+
+### Stability after making the Vision stub tests run on Linux
+
+```text
+Command: cargo test --workspace   (five consecutive runs)
+Exit code: 0 each time
+Result: 348 core + 2 CLI integration, 0 failed, 1 ignored
+
+Before the ETXTBSY retry, three runs in a row failed a different wedge test
+each time: "could not start .../atlasdrive-vision: Text file busy (os error 26)".
+
+Command: cargo clippy --workspace --all-targets     exit 0, 0 warnings
+Command: cd ui && npm test                          exit 0, 74 tests
+```
+
+Not verified here: `src-tauri` (needs macOS + webkit). Its only change is
+deleting the duplicated staleness rule and calling the core one.

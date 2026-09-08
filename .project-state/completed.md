@@ -64,3 +64,25 @@
   passes in ~1s after. Full suite 341 core (was 323) + 2 CLI + 74 UI, clippy
   clean.
 - Decision recorded: D-084
+
+## 2026-09-08: Whether a scan is alive is one rule, and a failure is news
+
+- Roadmap item: docs/13 required verifier check ("worker heartbeat remains
+  current"), plus D-049 (a rule lives in one place)
+- Symptom: the "killed run still says running" / "silent for 30 minutes means
+  stalled" rule existed only in the desktop app. The CLI — the recommended
+  recovery route — and the verifier had no such rule, so both would repeat
+  "running" about a scan that died two days ago.
+- Underneath it: progress was published on success only, so a run of slow
+  failures wrote nothing and read as stalled while working correctly, and a run
+  ending inside a batch under-reported its failures.
+- Fix: `Progress::reconciled_status(in_flight)` + `STALL_AFTER_MINUTES` in core,
+  used by the app, a new verifier `heartbeat` check, and `atlasdrive doctor`.
+  Progress published after every photograph through one `publish` helper;
+  interrupted and halted paths take counters from the run summary.
+- Evidence: `a_failure_reaches_progress_before_the_batch_ends` asserts 1 failure
+  where the old code wrote 0 (verified by reverting the publish call). Five
+  consecutive full-suite runs green: 348 core + 2 CLI + 74 UI, clippy clean.
+- Not compiled here: `src-tauri` needs macOS/webkit. Its change is the removal
+  of the duplicated rule and one call to the core one.
+- Decision recorded: D-085
