@@ -542,59 +542,6 @@ filesystem or shell access; originals stay read-only; indexing makes no network
 call; face embeddings and face crops are encrypted at rest; the verifier still
 exits non-zero.
 
-## D-025: Every external command the scan depends on runs under a time budget
-
-**Status:** Settled
-
-**Context:** A scan is a long unattended job. `Command::output()` waits for
-ever, and the pipeline checks for cancellation *between* photographs, so a run
-wedged inside one external call cannot be stopped, cannot report and cannot be
-resumed. The Vision worker already had a 10-minute budget for this reason; the
-decode path did not, which left `/usr/bin/sips` able to hold a whole scan on one
-malformed photograph. A real drive sat at "Stalled", nothing being read, for
-close to two days.
-
-**Decision:** External commands go through `crate::proc::output_within`, which
-kills and reaps the child at a budget and returns a timeout error. The decode
-budget is 10 minutes (`ATLASDRIVE_DECODE_TIMEOUT_SECS`), matching Vision's and
-chosen the same way: far past the slowest honest photograph observed, far short
-of the stall it prevents. Output is drained on separate threads, so a chatty
-child cannot deadlock the parent instead.
-
-**Consequences:** A wedged decoder becomes one photograph's failure, which the
-pipeline already isolates and requeues, rather than the run's. This satisfies
-`docs/13`'s requirement that single slow files are timed out and isolated. A
-stall lasting longer than the budget now means something other than a hung
-decoder, which makes the "Stalled" label meaningful rather than a dead end.
-
-**Supersedes:** None
-
-## D-026: A path that is absent is not a path that is dangerous
-
-**Status:** Settled
-
-**Context:** `ensure_contained` reported every `canonicalize` failure as
-`UnsafePath`, which `is_hard_halt` treats as a safety violation. Unplugging an
-external drive without ejecting it makes `canonicalize` return `NotFound`, so an
-ordinary disconnection ended a two-day scan of Drive 10 with "Stopped for
-safety" and an error about canonicalization. The owner was told their archive
-might be at risk; what had actually happened was a cable.
-
-**Decision:** The two conditions are separated. A path that escapes the approved
-root, or contains `..`, stays `UnsafePath` and stays a hard halt. A path that is
-merely missing is `NotFound` for one original, or `DriveDisconnected` (exit 13)
-when the scan root itself has gone. A disconnection ends the run as an
-interruption: the leased item is *released* rather than failed, so it keeps its
-attempts, the queue is untouched, and reconnecting carries on where it stopped.
-Preflight reports the same condition the same way.
-
-**Consequences:** The safety halt now means what it says, which is what makes it
-worth obeying. Unplugging a drive costs nothing and blames no photograph. Exit
-13 is new; `docs/12` allows the list to expand and no existing code changed
-meaning.
-
-**Supersedes:** None
-
 ## New decision template
 
 ```markdown
@@ -2171,3 +2118,92 @@ on screen now.
 results, where an exact total is not cheap and would be a guess dressed as a
 fact. `total_matches` is `None` there, and the screen simply reports how many
 it found.
+
+## D-081: Every external command the scan depends on runs under a time budget
+
+**Status:** Settled
+
+**Context:** A scan is a long unattended job. `Command::output()` waits for
+ever, and the pipeline checks for cancellation *between* photographs, so a run
+wedged inside one external call cannot be stopped, cannot report and cannot be
+resumed. The Vision worker already had a 10-minute budget for this reason; the
+decode path did not, which left `/usr/bin/sips` able to hold a whole scan on one
+malformed photograph. A real drive sat at "Stalled", nothing being read, for
+close to two days.
+
+**Decision:** External commands go through `crate::proc::output_within`, which
+kills and reaps the child at a budget and returns a timeout error. The decode
+budget is 10 minutes (`ATLASDRIVE_DECODE_TIMEOUT_SECS`), matching Vision's and
+chosen the same way: far past the slowest honest photograph observed, far short
+of the stall it prevents. Output is drained on separate threads, so a chatty
+child cannot deadlock the parent instead.
+
+**Consequences:** A wedged decoder becomes one photograph's failure, which the
+pipeline already isolates and requeues, rather than the run's. This satisfies
+`docs/13`'s requirement that single slow files are timed out and isolated. A
+stall lasting longer than the budget now means something other than a hung
+decoder, which makes the "Stalled" label meaningful rather than a dead end.
+
+**Supersedes:** None
+
+## D-082: A path that is absent is not a path that is dangerous
+
+**Status:** Settled
+
+**Context:** `ensure_contained` reported every `canonicalize` failure as
+`UnsafePath`, which `is_hard_halt` treats as a safety violation. Unplugging an
+external drive without ejecting it makes `canonicalize` return `NotFound`, so an
+ordinary disconnection ended a two-day scan of Drive 10 with "Stopped for
+safety" and an error about canonicalization. The owner was told their archive
+might be at risk; what had actually happened was a cable.
+
+**Decision:** The two conditions are separated. A path that escapes the approved
+root, or contains `..`, stays `UnsafePath` and stays a hard halt. A path that is
+merely missing is `NotFound` for one original, or `DriveDisconnected` (exit 13)
+when the scan root itself has gone. A disconnection ends the run as an
+interruption: the leased item is *released* rather than failed, so it keeps its
+attempts, the queue is untouched, and reconnecting carries on where it stopped.
+Preflight reports the same condition the same way.
+
+**Consequences:** The safety halt now means what it says, which is what makes it
+worth obeying. Unplugging a drive costs nothing and blames no photograph. Exit
+13 is new; `docs/12` allows the list to expand and no existing code changed
+meaning.
+
+**Supersedes:** None
+
+## D-083 — A decision number is claimed once, and the log is tested like code
+
+**Status:** settled.
+
+**Context.** Two sessions filed decisions as D-025 and D-026. Both numbers were
+already taken — D-025 is how the catalogue answers "what is on this drive?",
+D-026 is the Vision face model — and both new entries were inserted above the
+template in the middle of the file rather than after the last entry. The log had
+83 headings for 80 decisions and read out of order from D-030 onwards.
+
+This is not cosmetic. `faces.rs` sends a reader to D-026 for the face model; on
+the broken file that citation could just as easily land on a paragraph about
+unplugged drives. A record whose numbers do not resolve is worse than no record,
+because it is still trusted.
+
+**Decision.** The two intruders are renumbered D-081 and D-082 and moved to the
+end; the original D-025 and D-026 keep their numbers, so every existing citation
+in code and in other decisions still resolves. Four tests in
+`crates/core/src/decisions_log.rs` read the real file and assert that each
+number is used once, that numbers run 1..N with no gaps, that each heading comes
+after the one before it, and that the `D-XXX` template stays unnumbered.
+
+**Why tests rather than a convention.** The convention already existed and was
+broken twice, by sessions that were each working carefully on something else.
+The failure is silent — nothing rejects a duplicate heading, and the next reader
+finds it, not the writer. A test moves the discovery to the session that made
+the mistake, which is the only session that knows what the entry was meant to
+say. The check costs a file read and runs with the rest of the suite.
+
+**Consequences:** A new entry goes at the foot of the file with the next number.
+Deleting an entry now fails the gap test: a decision that no longer holds is
+marked superseded, keeping the reason it once existed. The test file compiles
+only under `cfg(test)`; nothing about it ships.
+
+**Supersedes:** None

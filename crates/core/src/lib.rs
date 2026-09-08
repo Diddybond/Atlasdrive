@@ -20,6 +20,9 @@ pub mod compare;
 pub mod config;
 pub mod crypto;
 pub mod dates;
+/// Tests only: the decision log is documentation, and nothing ships from here.
+#[cfg(test)]
+mod decisions_log;
 pub mod diagnostics;
 pub mod db;
 pub mod drive;

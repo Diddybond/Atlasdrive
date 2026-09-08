@@ -218,3 +218,45 @@ on a macOS Keychain authorisation dialog, raised because the test binaries are
 unsigned and are rebuilt on every change. Once authorised the tests themselves
 run in ~2s. Code signing removes the wait.
 ```
+
+---
+
+## 2026-09-08 (Linux session): decision-log integrity
+
+Host: Linux (container). macOS-only paths are unchanged and untouched.
+
+### The guard fails against the defect it was written for
+
+```text
+Command: git show HEAD:docs/16_DECISIONS.md > docs/16_DECISIONS.md   # pre-fix file
+         cargo test -p family-archive-core decisions_log
+Result: 1 passed, 3 failed
+  every_decision_number_is_used_once      FAILED  "D-025 is used twice"
+  a_new_decision_is_appended_after_...    FAILED  "D-025 (line 545) appears after D-030 (line 512)"
+  decisions_are_numbered_from_one_...     FAILED
+```
+
+### And passes against the fix
+
+```text
+Command: cargo test -p family-archive-core decisions_log
+Exit code: 0
+Result: pass (4 tests)
+```
+
+### Full suite at this commit
+
+```text
+Command: cargo test --workspace
+Exit code: 0
+Result: 323 core + 2 CLI integration passed, 0 failed, 1 ignored
+        (the ignored one is the network-guard test, behind --features network-guard-tests)
+
+Command: cargo clippy --workspace --all-targets
+Exit code: 0
+Result: pass (0 warnings)
+
+Command: cd ui && npm test
+Exit code: 0
+Result: pass (74 tests, 3 files)
+```

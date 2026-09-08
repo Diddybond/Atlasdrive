@@ -2,12 +2,12 @@
 
 - Product name: **AtlasDrive** (settled, D-020)
 - Branch: claude/mr-repo-addition-pxgpfk
-- Commit: see `git log` (rubric completion: rescan, HEIC, Reveal, diagnostics,
-  drive details, date override)
+- Commit: see `git log` (latest: the decision log is numbered once and tested)
 - Current completion score: **100/100** under `docs/15_DEFINITION_OF_DONE.md`
 - Critical gates passing: **10/10**
-- Latest test result: 115 core + 11 UI passing;
-  clippy clean across the workspace and `src-tauri`, including test targets
+- Latest test result: 323 core + 2 CLI integration + 74 UI passing (1 core test
+  ignored: the network-guard test, behind `--features network-guard-tests`);
+  clippy clean across the workspace, including test targets
 - Current files being changed: none (clean checkpoint)
 - Runtime safety status: all safety boundaries implemented and tested; the
   original-integrity halt was demonstrated on macOS with a real exit code 10
@@ -37,6 +37,25 @@ Both from `archive.db` alone, with every drive unplugged (D-025):
   (Drawer 2) to open the originals."
 
 Proven end to end by deleting a drive's volume from disk and querying it anyway.
+
+## What the owner's real drives have found since
+
+The rubric was met on fixtures. Scanning the actual archive found four defects
+that fixtures could not, each now fixed with a test that fails against the old
+code (D-077 to D-082):
+
+- **Drive 5 crashed on a real photograph** — an OCR mask one byte out of step
+  with its text. Also: gigapixel composites are now decoded small.
+- **Drive 9 could not be restarted** — a stop request is a file, and a run was
+  obeying yesterday's. A stop is now compared against the moment the run began.
+- **Drive 9 sat "Stalled" for two days** — `/usr/bin/sips` was invoked with no
+  timeout. Every external command the scan depends on now runs under a budget.
+- **Drive 10 stopped "for safety" because a cable came out** — an absent path
+  was reported as a dangerous one. Absence and danger are now separate, and a
+  disconnection ends the run as an interruption (exit 13).
+
+The pattern is worth keeping in mind when choosing work: the remaining risk is
+in what a real 200,000-file archive does over days, not in the rubric.
 
 ## The one thing that is not done
 
