@@ -35,6 +35,17 @@ The indexing path must make no network calls.
 
 Model installation is a separate explicit setup action. Indexing must fail clearly when required local models are absent.
 
+### The one command that could reach a network, and where it is not
+
+`spctl --assess` asks Gatekeeper whether the bundle is accepted, and on a
+Developer ID build Gatekeeper may consult Apple to check notarisation. It is
+reached only from the signing report, only on the Developer ID branch — so today
+it never runs at all, there being no Developer ID — and never from the indexing
+path, which is what the network guard covers and what the verifier asserts. It
+runs under a 30-second budget, so it cannot hold a diagnostics report open
+waiting on a network the owner did not ask for. Nothing about the archive is
+sent: the question is about this application's own signature.
+
 ## Encryption
 
 ### Face embeddings

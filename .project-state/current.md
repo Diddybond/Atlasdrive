@@ -2,10 +2,10 @@
 
 - Product name: **AtlasDrive** (settled, D-020)
 - Branch: claude/mr-repo-addition-pxgpfk
-- Commit: see `git log` (latest: the catalogue carries the scan's pulse)
+- Commit: see `git log` (latest: two things the specification asked for)
 - Current completion score: **100/100** under `docs/15_DEFINITION_OF_DONE.md`
 - Critical gates passing: **10/10**
-- Latest test result: 353 core + 2 CLI integration + 74 UI passing (1 core test
+- Latest test result: 354 core + 2 CLI integration + 74 UI passing (1 core test
   ignored: the network-guard test, behind `--features network-guard-tests`);
   clippy clean across the workspace, including test targets. The Vision worker's
   16 tests are in that count on every platform now, not only on a Mac (D-084).

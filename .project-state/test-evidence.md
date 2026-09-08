@@ -395,3 +395,23 @@ Result: 353 core + 2 CLI integration passed, 0 failed, 1 ignored
 
 Command: cargo clippy --workspace --all-targets     exit 0, 0 warnings
 ```
+
+---
+
+## 2026-09-08 (Linux session): queue reasons and bounded signing tools
+
+```text
+Command: cargo test -p family-archive-core verifier::
+Exit code: 0
+Result: pass (9) — including a_failed_item_with_no_recorded_reason_fails_the_
+        queue_check, which passes on a queue whose failures carry a code and
+        fails when one does not
+
+Command: cargo check -p family-archive-core   (signing.rs cfgs flipped to build
+                                               the macOS branch on Linux)
+Exit code: 0
+Result: pass, no warnings — the bounded codesign/spctl calls compile
+
+Command: cargo test --workspace                exit 0, 354 core + 2 CLI
+Command: cargo clippy --workspace --all-targets exit 0, 0 warnings
+```

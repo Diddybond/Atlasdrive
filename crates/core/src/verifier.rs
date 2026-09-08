@@ -510,6 +510,43 @@ fn check_queue_consistency(queue: &Connection) -> Check {
             format!("{leased_complete} complete items still hold a lease"),
         );
     }
+
+    // `docs/13`: failed items include reason and retry count. This is not
+    // bookkeeping. A photograph given up on can be put back in the queue by its
+    // failure code (D-060) — 232 large TIFFs on a real drive came back that way
+    // once the decoder could read them. An item marked failed with no recorded
+    // reason can never be revived by code, and never appears in the list of what
+    // went wrong, so it is simply absent from the archive with nothing to say so.
+    let unexplained: i64 = queue
+        .query_row(
+            "SELECT count(*) FROM queue_items qi
+              WHERE qi.state='failed'
+                AND NOT EXISTS (SELECT 1 FROM queue_failures f WHERE f.item_id = qi.id)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(-1);
+    if unexplained != 0 {
+        return Check::fail(
+            "queue_consistency",
+            format!("{unexplained} failed items have no recorded reason, so nothing can revive them"),
+        );
+    }
+
+    let untried: i64 = queue
+        .query_row(
+            "SELECT count(*) FROM queue_items WHERE state='failed' AND attempts < 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(-1);
+    if untried != 0 {
+        return Check::fail(
+            "queue_consistency",
+            format!("{untried} failed items were never attempted"),
+        );
+    }
+
     Check::pass("queue_consistency", "queue states consistent")
 }
 
@@ -602,6 +639,43 @@ mod tests {
         assert!(matches!(check_heartbeat(&paths, &archive).status, CheckStatus::Pass));
         let (_d2, empty, _c) = ctx_paths();
         assert!(matches!(check_heartbeat(&empty, &archive).status, CheckStatus::Pass));
+    }
+
+    /// `docs/13`: failed items include reason and retry count — because a
+    /// failure that recorded neither cannot be revived and cannot be listed.
+    #[test]
+    fn a_failed_item_with_no_recorded_reason_fails_the_queue_check() {
+        let queue = open_in_memory(SchemaKind::Queue).unwrap();
+        let insert = |id: &str, state: &str, attempts: i64| {
+            queue
+                .execute(
+                    "INSERT INTO queue_items
+                       (id, run_id, drive_id, drive_number, root_id, relative_path, abs_path,
+                        size_bytes, source_mtime_ns, state, attempts, enqueued_at, queue_key)
+                     VALUES (?1,'run','drv',5,'root',?1,?1,1,1,?2,?3,'now',?1)",
+                    rusqlite::params![id, state, attempts],
+                )
+                .unwrap();
+        };
+
+        // A healthy queue: one done, one properly failed with its reason.
+        insert("ok", "complete", 1);
+        insert("bad", "failed", 3);
+        queue
+            .execute(
+                "INSERT INTO queue_failures (id, item_id, code, message, retryable, created_at)
+                 VALUES ('f1','bad','DECODE','memory limit exceeded',0,'now')",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(check_queue_consistency(&queue).status, CheckStatus::Pass));
+
+        // A failure nothing explains: invisible in the failure list, and
+        // `retry_failed --code` can never bring it back.
+        insert("orphan", "failed", 2);
+        let check = check_queue_consistency(&queue);
+        assert!(matches!(check.status, CheckStatus::Fail), "{check:?}");
+        assert!(check.detail.contains("no recorded reason"), "{check:?}");
     }
 
     #[test]

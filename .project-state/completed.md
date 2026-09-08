@@ -103,3 +103,19 @@
   batch after a halt), plus three `running_scan_tests`. 353 core + 2 CLI + 74 UI,
   clippy clean.
 - Decision recorded: D-086
+
+## 2026-09-08: Two things docs/13 asked for, and the last unbudgeted commands
+
+- Queue consistency: the verifier now checks what `docs/13` requires of failed
+  items — a recorded reason and a retry count. A failure with no reason cannot
+  be revived by `retry_failed --code` (D-060) and never appears in the failure
+  list, so the photograph is simply absent with nothing to say why.
+- `codesign` and `spctl` run under a 30-second budget like every other external
+  command (D-081). They are called while writing a diagnostics bundle, which is
+  what someone reaches for when things are already going wrong.
+- `spctl --assess` can consult Apple on a Developer ID build. It is never on the
+  indexing path and today is never reached at all; `docs/10` now says so
+  explicitly rather than leaving the promise to be inferred.
+- Evidence: `a_failed_item_with_no_recorded_reason_fails_the_queue_check`; the
+  macOS-only signing branch compile-checked by flipping its cfg. 354 core + 2
+  CLI + 74 UI, clippy clean.

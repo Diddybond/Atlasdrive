@@ -23,6 +23,17 @@ use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
+/// How long the signing tools are given before their answer is "unknown".
+///
+/// Generous for a local query, and short enough that a diagnostics report is
+/// still produced when one of them will not return. `spctl --assess` is the
+/// reason this is not optional: on a Developer ID build Gatekeeper may consult
+/// Apple, so it is the one command in this codebase that can wait on a network
+/// it did not ask for. It is never on the indexing path, and today it is never
+/// reached at all — there is no Developer ID to assess.
+#[cfg(target_os = "macos")]
+const TOOL_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// What kind of signature the running binary carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signature {
@@ -77,11 +88,15 @@ pub fn current() -> Signature {
 #[cfg(target_os = "macos")]
 pub fn of_path(path: &std::path::Path) -> Signature {
     // `codesign -dvvv` writes its report to stderr, not stdout.
-    let output = match Command::new("/usr/bin/codesign")
-        .arg("-dvvv")
-        .arg(path)
-        .output()
-    {
+    //
+    // Under a budget, like every other command this app runs (D-081): this is
+    // called while writing a diagnostics bundle, which is what someone reaches
+    // for when things are already going wrong. A tool that never returns must
+    // not be the reason the report never appears. Not knowing is an answer this
+    // type already has.
+    let mut cmd = Command::new("/usr/bin/codesign");
+    cmd.arg("-dvvv").arg(path);
+    let output = match crate::proc::output_within(&mut cmd, TOOL_BUDGET) {
         Ok(o) => o,
         Err(_) => return Signature::Unknown,
     };
@@ -123,11 +138,10 @@ pub fn of_path(_path: &std::path::Path) -> Signature {
 /// equivalent to asking whether notarisation has been stapled.
 #[cfg(target_os = "macos")]
 fn is_notarised(path: &std::path::Path) -> bool {
-    Command::new("/usr/sbin/spctl")
-        .args(["--assess", "--type", "execute"])
-        .arg(path)
-        .output()
-        .map(|o| o.status.success())
+    let mut cmd = Command::new("/usr/sbin/spctl");
+    cmd.args(["--assess", "--type", "execute"]).arg(path);
+    crate::proc::output_within(&mut cmd, TOOL_BUDGET)
+        .map(|o| o.success())
         .unwrap_or(false)
 }
 
