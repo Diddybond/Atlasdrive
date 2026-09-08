@@ -86,3 +86,20 @@
 - Not compiled here: `src-tauri` needs macOS/webkit. Its change is the removal
   of the duplicated rule and one call to the core one.
 - Decision recorded: D-085
+
+## 2026-09-08: The catalogue carries the pulse
+
+- Roadmap item: docs/06 stage 3 ("record batch start and heartbeat"), unbuilt
+- Symptom: `scan_runs.outcome` stays 'running' for ever after a kill, a
+  `scan_batches` row appeared only once its batch had finished, and the only
+  liveness signal was a single global `progress.json` — while a scan belongs to
+  a drive (D-058) and two drives can be scanned at once.
+- Fix: migration 6 adds `scan_runs.heartbeat_at`, stamped per photograph;
+  batches are recorded when claimed and closed when they end;
+  `inventory::running_scans` marks stale runs by the same STALL_AFTER_MINUTES;
+  the verifier's heartbeat check asks the catalogue first.
+- Evidence: `a_batch_is_recorded_when_it_starts_and_the_run_beats_while_it_works`
+  and `a_halting_run_leaves_the_batch_it_stopped_inside_open` (exactly one open
+  batch after a halt), plus three `running_scan_tests`. 353 core + 2 CLI + 74 UI,
+  clippy clean.
+- Decision recorded: D-086

@@ -2317,3 +2317,46 @@ the suite is one process and a global budget change lands on whatever else is
 constructing a worker at that moment.
 
 **Supersedes:** None
+
+## D-086 — The catalogue carries the pulse, because a scan belongs to a drive
+
+**Status:** settled.
+
+**Context.** D-085 gave one rule for deciding whether a scan is alive, but only
+one thing to apply it to: `progress.json`. There is a single progress file and a
+scan belongs to a drive, so scanning Drive 5 in the app while Drive 9 runs from
+the command line leaves that file describing whichever wrote last — and D-058
+already settled that scan progress is reported for the drive, not for the
+process. Meanwhile `scan_runs.outcome` is set to `'running'` by the run and can
+only be cleared by the run, so a killed process leaves the row saying "running"
+for ever with nothing to weigh it against.
+
+`docs/06` stage 3 asks for exactly what was missing: "record batch start and
+heartbeat". Neither existed. A `scan_batches` row was written only once its
+batch had finished, so the batch a run died inside left no trace at all, and
+there was no heartbeat anywhere in the database.
+
+**Decision.** Migration 6 adds `scan_runs.heartbeat_at`, stamped for every
+photograph the run handles — catalogued or failed, the same rule as
+`progress.json`, so "no heartbeat" means no work rather than no successes. A
+batch row is inserted when the batch is claimed and closed when it ends, so a
+batch in flight has `ended_at` NULL. `inventory::running_scans` lists every run
+the catalogue still calls running and marks each stale by the same
+`STALL_AFTER_MINUTES` used everywhere else; the verifier's heartbeat check asks
+it first and falls back to `progress.json`.
+
+A row written before this column existed falls back to `started_at`, which is a
+weaker but honest lower bound on its last sign of life.
+
+**Consequences:** Two drives can be scanned at once and each run can be judged
+on its own. The batch a halted run stopped inside is identifiable, which a test
+asserts by halting a run and finding exactly one open batch. Cost is one indexed
+`UPDATE` per photograph against seconds of analysis, and a failure to write it
+is ignored — losing a heartbeat must never fail a photograph.
+
+**Not built:** refusing to start a second scan of the same drive. That guard now
+has something reliable to ask, but nothing in the field has yet shown two runs
+on one drive, and a guard that gets liveness wrong locks the owner out of their
+own archive. Recorded in `.project-state/next.md` rather than guessed at.
+
+**Supersedes:** None. Extends D-085 from the progress file to the catalogue.

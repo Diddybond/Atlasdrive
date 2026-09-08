@@ -364,3 +364,34 @@ Command: cd ui && npm test                          exit 0, 74 tests
 
 Not verified here: `src-tauri` (needs macOS + webkit). Its only change is
 deleting the duplicated staleness rule and calling the core one.
+
+---
+
+## 2026-09-08 (Linux session): batch start and heartbeat
+
+```text
+Command: cargo test -p family-archive-core running_scan
+Exit code: 0
+Result: pass (3) — a run that stopped beating is stale, a pre-heartbeat row
+        falls back to its start time, finished runs are not listed
+
+Command: cargo test -p family-archive-core a_batch_is_recorded
+Exit code: 0
+Result: pass — batches recorded, none left open, run beat, outcome success
+
+Command: cargo test -p family-archive-core a_halting_run_leaves
+Exit code: 0
+Result: pass — exactly one open batch after a halt, which is the batch the run
+        stopped inside
+
+Command: cargo test -p family-archive-core migrations
+Exit code: 0
+Result: pass (4) — including upgrading a populated old database, now across
+        migration 6
+
+Command: cargo test --workspace
+Exit code: 0
+Result: 353 core + 2 CLI integration passed, 0 failed, 1 ignored
+
+Command: cargo clippy --workspace --all-targets     exit 0, 0 warnings
+```

@@ -396,6 +396,14 @@ impl<'a> Pipeline<'a> {
             summary.batches += 1;
             let batch_no = summary.batches;
             let batch_started = std::time::Instant::now();
+            // The batch is on record from the moment it is claimed, not only
+            // once it finishes, so a run that dies inside one leaves a row that
+            // says which batch it was in.
+            let batch_id = if dry_run {
+                String::new()
+            } else {
+                self.begin_batch(&run_id, batch_no, batch.len())
+            };
             let mut batch_success = 0u64;
             let mut batch_failure = 0u64;
 
@@ -440,6 +448,9 @@ impl<'a> Pipeline<'a> {
                             q.complete(&item.id)?;
                         }
                         publish(&mut progress, &summary, batch_no, self.paths, dry_run);
+                        if !dry_run {
+                            self.beat(&run_id);
+                        }
                     }
                     Err(e) if e.is_hard_halt() => {
                         // Immediate hard halt (integrity, unsafe path, network...).
@@ -504,6 +515,9 @@ impl<'a> Pipeline<'a> {
                         // while it is working exactly as designed, and the
                         // failure count on screen lags behind the truth.
                         publish(&mut progress, &summary, batch_no, self.paths, dry_run);
+                        if !dry_run {
+                            self.beat(&run_id);
+                        }
                     }
                 }
             }
@@ -570,7 +584,9 @@ impl<'a> Pipeline<'a> {
             if !dry_run {
                 progress.write(self.paths)?;
             }
-            self.record_batch(&run_id, batch_no, batch.len(), batch_success, batch_failure, throughput)?;
+            if !dry_run {
+                self.record_batch(&batch_id, batch_success, batch_failure, throughput)?;
+            }
             logger
                 .event(Level::Info, "batch_complete")
                 .batch(batch_no)
@@ -1366,26 +1382,49 @@ impl<'a> Pipeline<'a> {
         Ok(())
     }
 
+    /// Record that a batch has been claimed and is being worked on.
+    ///
+    /// `docs/06` stage 3 asks for the batch *start* to be recorded, and it was
+    /// not: a row appeared only once the batch had finished, so a batch in
+    /// flight — including the one a run died inside — left no trace at all.
+    /// Returns the row's id, which [`Self::record_batch`] closes.
+    fn begin_batch(&self, run_id: &str, batch_no: u64, file_count: usize) -> String {
+        let id = new_uuid();
+        let _ = self.archive.execute(
+            "INSERT INTO scan_batches (id, run_id, batch_number, started_at, file_count)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![id, run_id, batch_no as i64, now_iso8601(), file_count as i64],
+        );
+        id
+    }
+
     fn record_batch(
         &self,
-        run_id: &str,
-        batch_no: u64,
-        file_count: usize,
+        batch_id: &str,
         success: u64,
         failure: u64,
         throughput: f64,
     ) -> Result<()> {
         let _ = self.archive.execute(
-            "INSERT INTO scan_batches
-               (id, run_id, batch_number, started_at, ended_at, file_count, success_count,
-                failure_count, throughput_fps)
-             VALUES (?1,?2,?3,?4,?4,?5,?6,?7,?8)",
-            params![
-                new_uuid(), run_id, batch_no as i64, now_iso8601(), file_count as i64,
-                success as i64, failure as i64, throughput
-            ],
+            "UPDATE scan_batches
+                SET ended_at=?2, success_count=?3, failure_count=?4, throughput_fps=?5
+              WHERE id=?1",
+            params![batch_id, now_iso8601(), success as i64, failure as i64, throughput],
         );
         Ok(())
+    }
+
+    /// Stamp the run as still alive.
+    ///
+    /// Called for every photograph, so "no heartbeat" means no work at all
+    /// rather than no *successful* work. One indexed update against seconds of
+    /// analysis per file; a failure to write must never fail a photograph, so
+    /// the result is dropped.
+    fn beat(&self, run_id: &str) {
+        let _ = self.archive.execute(
+            "UPDATE scan_runs SET heartbeat_at=?2 WHERE id=?1",
+            params![run_id, now_iso8601()],
+        );
     }
 
     fn write_report(&self, run_id: &str, report: &crate::verifier::VerifierReport) -> Result<()> {

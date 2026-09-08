@@ -90,8 +90,7 @@ impl Progress {
     /// says nothing about whether the scan is alive, and treating it as stale
     /// would put a scary label on a working run.
     pub fn age_minutes(&self) -> Option<i64> {
-        let then = chrono::DateTime::parse_from_rfc3339(&self.updated_at).ok()?;
-        Some((chrono::Utc::now() - then.with_timezone(&chrono::Utc)).num_minutes())
+        crate::util::age_minutes(&self.updated_at)
     }
 
     /// The status to *show*, which is not always the status on disk.

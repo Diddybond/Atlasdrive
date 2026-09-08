@@ -139,7 +139,7 @@ pub fn run(ctx: &VerifyContext) -> Result<VerifierReport> {
     checks.push(check_network_isolation(ctx.network_blocked_attempts));
     checks.push(check_disk_floor(ctx.paths, ctx.config));
     checks.push(check_throughput(ctx));
-    checks.push(check_heartbeat(ctx.paths));
+    checks.push(check_heartbeat(ctx.paths, ctx.archive));
     if let Some(q) = ctx.queue {
         checks.push(check_queue_consistency(q));
     }
@@ -445,7 +445,32 @@ fn check_throughput(ctx: &VerifyContext) -> Check {
 /// nothing for half an hour is not going. This is a warning rather than a
 /// failure because the catalogue is not wrong — the scan is stuck, which is a
 /// thing to be told, not a corruption to halt over.
-fn check_heartbeat(paths: &AppPaths) -> Check {
+fn check_heartbeat(paths: &AppPaths, archive: &Connection) -> Check {
+    // The catalogue knows which drive each run belongs to, so it is asked
+    // first: `progress.json` describes only whichever run wrote it last.
+    match crate::inventory::running_scans(archive) {
+        Ok(runs) => {
+            let quiet: Vec<&crate::inventory::RunningScan> =
+                runs.iter().filter(|r| r.stale).collect();
+            if let Some(worst) = quiet.iter().max_by_key(|r| r.silent_for_minutes.unwrap_or(0)) {
+                return Check::warn(
+                    "heartbeat",
+                    format!(
+                        "{} scan(s) recorded as running have gone quiet; the longest is drive {} \
+                         at {} minutes. Either the run was killed or it is stuck.",
+                        quiet.len(),
+                        worst.drive_number,
+                        worst.silent_for_minutes.unwrap_or(-1)
+                    ),
+                );
+            }
+            if !runs.is_empty() {
+                return Check::pass("heartbeat", format!("{} scan(s) running and current", runs.len()));
+            }
+        }
+        Err(e) => return Check::warn("heartbeat", format!("could not read scan runs: {e}")),
+    }
+
     let progress = match crate::progress::Progress::load(paths) {
         Ok(Some(p)) => p,
         // No scan has ever run here, or the file is unreadable. Neither is
@@ -558,6 +583,7 @@ mod tests {
     #[test]
     fn a_scan_that_claims_to_be_running_but_has_gone_quiet_is_reported() {
         let (_d, paths, _config) = ctx_paths();
+        let archive = open_in_memory(SchemaKind::Archive).unwrap();
         let mut p = crate::progress::Progress::new("run1", 5, "drv", "/Volumes/Drive 5");
         p.updated_at =
             (chrono::Utc::now() - chrono::Duration::minutes(crate::progress::STALL_AFTER_MINUTES + 5))
@@ -565,7 +591,7 @@ mod tests {
                 .to_string();
         p.write(&paths).unwrap();
 
-        let check = check_heartbeat(&paths);
+        let check = check_heartbeat(&paths, &archive);
         assert!(matches!(check.status, CheckStatus::Warn), "{check:?}");
         assert!(check.detail.contains("Drive 5") || check.detail.contains("drive 5"), "{check:?}");
 
@@ -573,9 +599,9 @@ mod tests {
         // scanned at all.
         p.touch();
         p.write(&paths).unwrap();
-        assert!(matches!(check_heartbeat(&paths).status, CheckStatus::Pass));
+        assert!(matches!(check_heartbeat(&paths, &archive).status, CheckStatus::Pass));
         let (_d2, empty, _c) = ctx_paths();
-        assert!(matches!(check_heartbeat(&empty).status, CheckStatus::Pass));
+        assert!(matches!(check_heartbeat(&empty, &archive).status, CheckStatus::Pass));
     }
 
     #[test]

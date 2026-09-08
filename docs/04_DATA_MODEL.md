@@ -129,9 +129,16 @@ Tag link with confidence and confirmation source.
 
 One row per indexing session, including drive, arguments, start, end, outcome and verifier report.
 
+`heartbeat_at` is stamped for every photograph the run handles, catalogued or
+failed. `outcome` is written by the run and can only be cleared by the run, so a
+process that is killed leaves `'running'` behind for ever; the heartbeat is what
+lets anything else tell a live scan from an abandoned one.
+
 ### `scan_batches`
 
-Batch timing, counts, throughput and failure details.
+Batch timing, counts, throughput and failure details. The row is written when
+the batch is claimed and closed when it ends, so a batch still in flight — the
+one a run died inside — has `ended_at` NULL rather than no row at all.
 
 ### `failures`
 

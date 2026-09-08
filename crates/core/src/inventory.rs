@@ -582,6 +582,59 @@ pub fn drive_coverage(conn: &Connection) -> Result<Vec<DriveCoverage>> {
     Ok(all)
 }
 
+/// A run the catalogue still records as under way.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RunningScan {
+    pub run_id: String,
+    pub drive_number: i64,
+    pub started_at: String,
+    /// Last sign of life. `None` on rows written before the heartbeat existed.
+    pub heartbeat_at: Option<String>,
+    /// Minutes since that sign of life, when the timestamp can be read.
+    pub silent_for_minutes: Option<i64>,
+    /// Nothing heard for [`crate::progress::STALL_AFTER_MINUTES`]. Either the
+    /// process died without saying so, or it is stuck.
+    pub stale: bool,
+}
+
+/// Every scan the catalogue believes is still running, most recent first.
+///
+/// `outcome` is set to `'running'` by the run itself and can only be changed by
+/// the run itself, so a process that is killed leaves the row saying "running"
+/// for ever. Whether that is true is decided the same way it is decided for
+/// `progress.json` (D-085): by how long ago the last sign of life was.
+///
+/// This reads the catalogue rather than `progress.json` because a scan belongs
+/// to a drive and there is only one progress file — scanning one drive in the
+/// app while another runs from the command line leaves that file describing
+/// whichever wrote last.
+pub fn running_scans(conn: &Connection) -> Result<Vec<RunningScan>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, drive_number, started_at, heartbeat_at
+           FROM scan_runs
+          WHERE outcome = 'running' AND mode <> 'dry-run'
+          ORDER BY started_at DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let started_at: String = r.get(2)?;
+        let heartbeat_at: Option<String> = r.get(3)?;
+        // A run from before the heartbeat column existed still has a start time,
+        // which is a weaker but honest lower bound on its last sign of life.
+        let silent_for_minutes =
+            crate::util::age_minutes(heartbeat_at.as_deref().unwrap_or(&started_at));
+        Ok(RunningScan {
+            run_id: r.get(0)?,
+            drive_number: r.get(1)?,
+            started_at,
+            heartbeat_at,
+            silent_for_minutes,
+            stale: silent_for_minutes
+                .is_some_and(|m| m >= crate::progress::STALL_AFTER_MINUTES),
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// How long indexing a folder will take, so the time can be planned for.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IndexEstimate {
@@ -1306,5 +1359,77 @@ mod compact_tests {
         let conn = catalogue_with_metadata(&[500_000]);
         assert_eq!(compact_catalogue(&conn).unwrap().rows_pruned, 1);
         assert_eq!(compact_catalogue(&conn).unwrap().rows_pruned, 0);
+    }
+}
+
+#[cfg(test)]
+mod running_scan_tests {
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
+
+    fn minutes_ago(m: i64) -> String {
+        (chrono::Utc::now() - chrono::Duration::minutes(m))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    }
+
+    fn run(conn: &Connection, id: &str, number: i64, started: &str, heartbeat: Option<&str>) {
+        conn.execute(
+            "INSERT OR IGNORE INTO drives (id, drive_number, friendly_name, status, first_seen_at)
+             VALUES (?1, ?2, ?3, 'offline', 'now')",
+            rusqlite::params![format!("drv-{number}"), number, format!("Drive {number}")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO scan_runs (id, drive_id, drive_number, mode, scan_root, started_at,
+                                    outcome, heartbeat_at)
+             VALUES (?1, ?2, ?3, 'initial', '/Volumes/x', ?4, 'running', ?5)",
+            rusqlite::params![id, format!("drv-{number}"), number, started, heartbeat],
+        )
+        .unwrap();
+    }
+
+    /// The catalogue's own version of the two-day lie: `outcome` is written by
+    /// the run and can only be cleared by the run, so a killed process leaves
+    /// "running" behind for ever. The heartbeat is what makes it answerable.
+    #[test]
+    fn a_run_that_stopped_beating_is_reported_stale() {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        run(&conn, "dead", 9, &minutes_ago(600), Some(&minutes_ago(240)));
+        run(&conn, "alive", 5, &minutes_ago(90), Some(&minutes_ago(1)));
+
+        let scans = running_scans(&conn).unwrap();
+        assert_eq!(scans.len(), 2);
+        let dead = scans.iter().find(|s| s.run_id == "dead").unwrap();
+        let alive = scans.iter().find(|s| s.run_id == "alive").unwrap();
+        assert!(dead.stale, "four hours of silence is not a working scan");
+        assert_eq!(dead.drive_number, 9);
+        assert!(dead.silent_for_minutes.unwrap() >= 240);
+        assert!(!alive.stale, "a scan that beat a minute ago is alive: {alive:?}");
+    }
+
+    /// Rows written before the heartbeat column existed still have a start time.
+    #[test]
+    fn a_run_from_before_the_heartbeat_falls_back_to_when_it_started() {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        run(&conn, "old", 3, &minutes_ago(120), None);
+        run(&conn, "recent", 4, &minutes_ago(2), None);
+
+        let scans = running_scans(&conn).unwrap();
+        assert!(scans.iter().find(|s| s.run_id == "old").unwrap().stale);
+        assert!(!scans.iter().find(|s| s.run_id == "recent").unwrap().stale);
+    }
+
+    /// A finished run is not a running one, whatever its age.
+    #[test]
+    fn only_runs_still_marked_running_are_listed() {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        run(&conn, "done", 7, &minutes_ago(600), Some(&minutes_ago(590)));
+        conn.execute(
+            "UPDATE scan_runs SET outcome='success', ended_at=?2 WHERE id=?1",
+            rusqlite::params!["done", minutes_ago(589)],
+        )
+        .unwrap();
+        assert!(running_scans(&conn).unwrap().is_empty());
     }
 }

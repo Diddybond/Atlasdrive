@@ -107,7 +107,29 @@ const ARCHIVE_MIGRATIONS: &[Migration] = &[
         name: "registered_root",
         sql: ARCHIVE_V5,
     },
+    Migration {
+        version: 6,
+        name: "scan_run_heartbeat",
+        sql: ARCHIVE_V6,
+    },
 ];
+
+/// A pulse on the run itself, so the catalogue can say whether a scan is alive.
+///
+/// `docs/06` asks stage 3 to "record batch start and heartbeat", and `docs/13`
+/// asks the verifier to confirm the heartbeat is current. Neither was possible:
+/// a batch row appeared only once the batch had finished, and `outcome` stayed
+/// `'running'` for ever once a run was killed, because the only thing that could
+/// have changed it was the process that died.
+///
+/// `progress.json` is not a substitute. There is one of it, and a scan is per
+/// drive, so scanning Drive 5 in the app while Drive 9 runs from the command
+/// line leaves a single file describing whichever wrote last (D-058 says scan
+/// progress belongs to the drive). The heartbeat lives on the run, where the
+/// drive is.
+const ARCHIVE_V6: &str = r#"
+ALTER TABLE scan_runs ADD COLUMN heartbeat_at TEXT;
+"#;
 
 /// The folder chosen when a drive was registered.
 ///

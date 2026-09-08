@@ -9,6 +9,17 @@ pub fn now_iso8601() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+/// Minutes since an ISO-8601 timestamp, or `None` if it cannot be read.
+///
+/// Unreadable is deliberately not "long ago": a timestamp nothing can parse
+/// says nothing about how old it is, and every caller here is deciding whether
+/// something has gone quiet. Guessing "old" would put a scary label on work
+/// that is going perfectly well.
+pub fn age_minutes(iso: &str) -> Option<i64> {
+    let then = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
+    Some((chrono::Utc::now() - then.with_timezone(&chrono::Utc)).num_minutes())
+}
+
 /// Current time as integer epoch nanoseconds (used for lease math and stats).
 pub fn now_epoch_ns() -> i64 {
     chrono::Utc::now()

@@ -365,6 +365,74 @@ fn a_failure_reaches_progress_before_the_batch_ends() {
     assert_eq!(progress.files_done, 2, "both readable photographs were catalogued");
 }
 
+/// `docs/06` stage 3: a batch is on record from the moment it is claimed, and
+/// the run beats while it works.
+///
+/// Both are how anything other than the running process can tell whether a scan
+/// is alive. Before this, a batch row appeared only once the batch had
+/// finished, so the batch a run died inside left no trace, and `outcome` stayed
+/// 'running' for ever with nothing to weigh it against.
+#[test]
+fn a_batch_is_recorded_when_it_starts_and_the_run_beats_while_it_works() {
+    let (h, opts) = setup(no_disk_floor());
+    let summary = pipeline(&h).run(&opts).unwrap();
+
+    // Every batch that ran is closed, because this run finished.
+    let (batches, open): (i64, i64) = h
+        .archive
+        .query_row(
+            "SELECT count(*), sum(ended_at IS NULL) FROM scan_batches WHERE run_id=?1",
+            [&summary.run_id],
+            |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+        )
+        .unwrap();
+    assert!(batches >= 1, "the run's batches must be recorded");
+    assert_eq!(open, 0, "a finished run leaves no batch open");
+
+    let (heartbeat, outcome): (Option<String>, String) = h
+        .archive
+        .query_row(
+            "SELECT heartbeat_at, outcome FROM scan_runs WHERE id=?1",
+            [&summary.run_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(heartbeat.is_some(), "a run that indexed photographs must have beaten");
+    assert_eq!(outcome, "success");
+    assert!(
+        crate::inventory::running_scans(&h.archive).unwrap().is_empty(),
+        "a finished run is not a running one"
+    );
+}
+
+/// The batch a run dies inside stays open, which is what says where it was.
+#[test]
+fn a_halting_run_leaves_the_batch_it_stopped_inside_open() {
+    let (h, opts) = setup(no_disk_floor());
+    let p = pipeline(&h);
+    p.run(&opts).unwrap();
+    h.archive
+        .execute(
+            "UPDATE files SET perceptual_hash = NULL
+             WHERE id = (SELECT id FROM files WHERE status='complete' LIMIT 1)",
+            [],
+        )
+        .unwrap();
+    for i in 0..3 {
+        write_photo(&h.drive_dir.join(format!("later/n{i}.png")), [10 * i as u8, 90, 140], 40, 30);
+    }
+    let mut opts2 = opts.clone();
+    opts2.config = Config { batch_size: 1, ..no_disk_floor() };
+    let err = p.run(&opts2).expect_err("three verifier failures must halt the run");
+    assert_eq!(err.exit_code(), crate::error::exit::REPEATED_VERIFIER_FAILURE);
+
+    let open: i64 = h
+        .archive
+        .query_row("SELECT count(*) FROM scan_batches WHERE ended_at IS NULL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(open, 1, "the batch the run halted inside is still open");
+}
+
 /// Incremental rescan: a file edited since indexing is re-analysed, and a file
 /// that has gone away is marked missing rather than silently left as complete.
 #[test]
