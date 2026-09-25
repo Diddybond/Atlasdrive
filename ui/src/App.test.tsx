@@ -1079,3 +1079,30 @@ describe("Scan progress dashboard", () => {
   });
 });
 
+
+describe("Faces nobody has named", () => {
+  /// The heading counted the first 200 faces and the drive chips counted within
+  /// a sample of 1,000, on an archive with tens of thousands. Both are counts
+  /// from the catalogue now.
+  it("counts every unnamed face, not a sample", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/27,535 faces nobody has named/)).toBeDefined();
+    });
+    expect(screen.getByText(/In 9,633 groups of look-alikes/)).toBeDefined();
+    const chip = screen.getByRole("button", { name: /Drive 14/ });
+    expect(chip.textContent).toContain("25,695");
+  });
+
+  /// An archive indexed before scans grouped their own faces can be grouped
+  /// in one go.
+  it("groups look-alike faces on request and says what it did", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Group look-alike faces" }));
+    await waitFor(() => {
+      expect(screen.getByText(/Put 17,400 faces into 3,100 groups/)).toBeDefined();
+    });
+  });
+});

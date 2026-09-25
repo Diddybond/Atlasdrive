@@ -27,6 +27,22 @@ pub struct ImageMetadata {
     pub raw: std::collections::BTreeMap<String, String>,
 }
 
+impl ImageMetadata {
+    /// Whether a camera recorded an exposure for this photograph: a shutter
+    /// speed, and an aperture or focal length.
+    ///
+    /// Flatbed and film scanners record neither, so this settles what pixel
+    /// statistics can only guess at. A white-backdrop portrait or a
+    /// black-and-white wedding edit has exactly the bright, desaturated border
+    /// the scanned-print heuristic looks for — and on a working
+    /// photographer's archive that heuristic flagged 39,923 photographs,
+    /// camera originals among them (D-088).
+    pub fn camera_exposure(&self) -> bool {
+        self.raw.contains_key("ExposureTime")
+            && (self.raw.contains_key("FNumber") || self.raw.contains_key("FocalLength"))
+    }
+}
+
 /// Longest EXIF value kept verbatim.
 ///
 /// Any genuine, readable EXIF value — a camera model, an exposure, a date — is
@@ -159,6 +175,23 @@ mod tests {
             Some("2008-06-14".into())
         );
         assert_eq!(normalize_exif_date("garbage"), None);
+    }
+
+    /// The keys `camera_exposure` asks for are the names the EXIF reader
+    /// actually records — the migration that repairs old rows (D-088) looks
+    /// for the same strings in `raw_json`.
+    #[test]
+    fn camera_exposure_uses_the_names_the_exif_reader_records() {
+        assert_eq!(exif::Tag::ExposureTime.to_string(), "ExposureTime");
+        assert_eq!(exif::Tag::FNumber.to_string(), "FNumber");
+        assert_eq!(exif::Tag::FocalLength.to_string(), "FocalLength");
+
+        let mut md = ImageMetadata::default();
+        assert!(!md.camera_exposure(), "no EXIF is no evidence either way");
+        md.raw.insert("ExposureTime".into(), "1/200 s".into());
+        assert!(!md.camera_exposure(), "a shutter speed alone is not enough");
+        md.raw.insert("FNumber".into(), "f/2.8".into());
+        assert!(md.camera_exposure());
     }
 
     #[test]

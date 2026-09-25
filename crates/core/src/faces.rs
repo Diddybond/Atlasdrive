@@ -12,6 +12,10 @@ use crate::error::{Error, Result};
 use crate::util::{cosine_similarity, new_uuid, now_iso8601};
 
 pub const CLUSTER_ALGO_VERSION: &str = "greedy-cosine-0.1.0";
+
+/// Recorded on groups made by [`FaceRepo::group_ungrouped`], so they can be
+/// told apart from a full rebuild's.
+pub const UNGROUPED_ALGO_VERSION: &str = "ungrouped-greedy-0.1.0";
 /// Cosine similarity at or above which two faces join the same cluster,
 /// for the original 32-dimension heuristic face embedding.
 pub const DEFAULT_CLUSTER_THRESHOLD: f32 = 0.92;
@@ -183,6 +187,106 @@ pub const PERSON_MATCH_THRESHOLD: f32 = 0.88;
 /// Big enough to recognise someone at a glance in a gallery, small enough that
 /// thousands of them stay a sensible size on disk.
 pub const FACE_THUMBNAIL_EDGE: u32 = 200;
+
+/// Greedy grouping of unit vectors: each joins the most similar group at or
+/// above `threshold`, or starts its own. Returns the members of each group, as
+/// indices into `vectors`, in the order the groups were started.
+///
+/// Every vector is compared with every group so far, which is quadratic in the
+/// worst case — a drive where no two faces match — and measured at 197 seconds
+/// for 20,000 faces done one comparison at a time. So vectors are taken in
+/// blocks: the comparisons against the groups that existed when a block began
+/// are spread across the cores, and only the handful of groups started within
+/// the block are checked in order. A group that grows during a block is
+/// compared at its centroid from the start of the block, a drift of at most a
+/// few members that the greedy method's own order-dependence dwarfs.
+fn greedy_groups(vectors: &[&[f32]], threshold: f32) -> Vec<Vec<usize>> {
+    const BLOCK: usize = 512;
+    let Some(dim) = vectors.first().map(|v| v.len()) else { return Vec::new() };
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let dot = |a: &[f32], b: &[f32]| -> f32 { a.iter().zip(b).map(|(x, y)| x * y).sum() };
+
+    let mut sums: Vec<f32> = Vec::new(); // member sums, flat
+    let mut units: Vec<f32> = Vec::new(); // normalised centroids, flat
+    let mut members: Vec<Vec<usize>> = Vec::new();
+
+    for (b, block) in vectors.chunks(BLOCK).enumerate() {
+        let known = members.len();
+        let frozen = &units[..known * dim];
+        let best_known: Vec<Option<(usize, f32)>> = if known == 0 {
+            vec![None; block.len()]
+        } else {
+            let per = block.len().div_ceil(threads).max(1);
+            std::thread::scope(|s| {
+                let handles: Vec<_> = block
+                    .chunks(per)
+                    .map(|part| {
+                        s.spawn(move || {
+                            part.iter()
+                                .map(|v| {
+                                    let mut best: Option<(usize, f32)> = None;
+                                    for (g, c) in frozen.chunks_exact(dim).enumerate() {
+                                        let cos = dot(c, v);
+                                        if cos >= threshold && best.is_none_or(|(_, bc)| cos > bc) {
+                                            best = Some((g, cos));
+                                        }
+                                    }
+                                    best
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+            })
+        };
+
+        for (j, v) in block.iter().enumerate() {
+            let i = b * BLOCK + j;
+            let mut best = best_known[j];
+            for g in known..members.len() {
+                let cos = dot(&units[g * dim..(g + 1) * dim], v);
+                if cos >= threshold && best.is_none_or(|(_, bc)| cos > bc) {
+                    best = Some((g, cos));
+                }
+            }
+            match best {
+                Some((g, _)) => {
+                    let sum = &mut sums[g * dim..(g + 1) * dim];
+                    sum.iter_mut().zip(v.iter()).for_each(|(a, x)| *a += x);
+                    let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::MIN_POSITIVE);
+                    let unit = &mut units[g * dim..(g + 1) * dim];
+                    unit.iter_mut().zip(sum.iter()).for_each(|(u, x)| *u = x / norm);
+                    members[g].push(i);
+                }
+                None => {
+                    sums.extend_from_slice(v);
+                    units.extend_from_slice(v);
+                    members.push(vec![i]);
+                }
+            }
+        }
+    }
+    members
+}
+
+/// What [`FaceRepo::group_ungrouped`] did.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupingReport {
+    pub faces_considered: usize,
+    pub groups_created: usize,
+    pub faces_grouped: usize,
+}
+
+/// Unnamed faces on one drive; see [`FaceRepo::unnamed_counts`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnnamedOnDrive {
+    pub drive_number: i64,
+    pub drive_name: Option<String>,
+    pub faces: i64,
+    /// Tiles to name: groups, plus faces with no group.
+    pub groups: i64,
+}
 
 /// One face as shown in the gallery — a picture first, a name only if known.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -390,27 +494,40 @@ impl<'a> FaceRepo<'a> {
         limit: usize,
         drive_number: Option<i64>,
     ) -> Result<Vec<GalleryFace>> {
-        let mut sql = String::from(
-            "SELECT f.id, f.cluster_id, f.quality, f.file_id,
-                    p.display_name, c.status,
-                    (SELECT count(*) FROM faces sib WHERE sib.cluster_id = f.cluster_id),
-                    d.drive_number, d.friendly_name
-               FROM faces f
-               JOIN face_thumbnails ft ON ft.face_id = f.id
-               JOIN files fi ON fi.id = f.file_id
-               JOIN drives d ON d.id = fi.drive_id
-               LEFT JOIN face_clusters c ON c.id = f.cluster_id
+        // One tile per group — its clearest face — and one per face that has
+        // no group yet. Listing every face put the same person in five tiles of
+        // the first two rows, each to be named separately, while naming any one
+        // of a group already names all of it. Biggest groups first: naming
+        // those covers the most photographs per answer.
+        let on_drive = match drive_number {
+            Some(n) => format!(" AND d.drive_number = {n}"),
+            None => String::new(),
+        };
+        let sql = format!(
+            "SELECT x.id, x.cluster_id, x.quality, x.file_id, p.display_name, c.status,
+                    CASE WHEN x.cluster_id IS NULL THEN 1
+                         ELSE (SELECT count(*) FROM faces sib WHERE sib.cluster_id = x.cluster_id) END
+                      AS group_size,
+                    x.drive_number, x.friendly_name
+               FROM (SELECT f.id, f.cluster_id, f.quality, f.file_id, d.drive_number, d.friendly_name,
+                            ROW_NUMBER() OVER (PARTITION BY coalesce(f.cluster_id, f.id)
+                                               ORDER BY f.quality DESC, f.id) AS rn
+                       FROM faces f
+                       JOIN face_thumbnails ft ON ft.face_id = f.id
+                       JOIN files fi ON fi.id = f.file_id
+                       JOIN drives d ON d.id = fi.drive_id
+                       LEFT JOIN face_clusters c ON c.id = f.cluster_id
+                      WHERE f.is_false_detection = 0 AND f.is_ignored = 0
+                        AND (c.status IS NULL OR c.status <> 'rejected')
+                        -- Proposals live in the review queue, not the gallery: a
+                        -- guess must never look like a name the user gave.
+                        AND (c.person_id IS NULL OR c.status = 'confirmed'){on_drive}) x
+               LEFT JOIN face_clusters c ON c.id = x.cluster_id
                LEFT JOIN people p       ON p.id = c.person_id
-              WHERE f.is_false_detection = 0 AND f.is_ignored = 0
-                AND (c.status IS NULL OR c.status <> 'rejected')
-                -- Proposals live in the review queue, not the gallery: a guess
-                -- must never look like a name the user gave.
-                AND (c.person_id IS NULL OR c.status = 'confirmed')",
+              WHERE x.rn = 1
+              ORDER BY group_size DESC, x.quality DESC
+              LIMIT ?1"
         );
-        if let Some(n) = drive_number {
-            sql.push_str(&format!(" AND d.drive_number = {n}"));
-        }
-        sql.push_str(" ORDER BY f.quality DESC LIMIT ?1");
         let mut stmt = self.conn.prepare(&sql)?;
         let out = stmt
             .query_map([limit as i64], |r| {
@@ -567,6 +684,132 @@ impl<'a> FaceRepo<'a> {
             let v = crypto::open_vector(key, &sealed)?;
             out.push((id, v));
         }
+        Ok(out)
+    }
+
+    /// Put faces that belong to no group into groups of look-alikes.
+    ///
+    /// A scan stores each face on its own; grouping happened only when someone
+    /// ran `index --rebuild-faces` by hand, so after a scan the People screen
+    /// offered every face as a stranger to be named one at a time. This runs at
+    /// the end of every scan for that drive, and on demand for an archive
+    /// indexed before it existed (D-089).
+    ///
+    /// It only ever *adds*: faces already in a group, named or not, are left
+    /// exactly where they are, and a face with no look-alike stays ungrouped
+    /// rather than becoming a group of one. Clearest faces go first, so each
+    /// group is seeded by a good example. Each model partition is grouped on
+    /// its own, at its own threshold ([`cluster_threshold_for`]).
+    ///
+    /// Greedy against running centroids, like [`Self::rebuild_clusters`], but
+    /// over one drive's ungrouped faces rather than the whole archive, so it
+    /// stays proportionate on a catalogue with a hundred thousand faces.
+    pub fn group_ungrouped(&self, drive_id: Option<&str>, key: &MasterKey) -> Result<GroupingReport> {
+        let (filter, param) = match drive_id {
+            Some(id) => ("AND fi.drive_id = ?1", Some(id.to_string())),
+            None => ("", None),
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT f.id, fe.model_id, fe.model_version,
+                    fe.ciphertext, fe.nonce, fe.enc_version, fe.key_version
+               FROM faces f
+               JOIN face_embeddings fe ON fe.face_id = f.id
+               JOIN files fi ON fi.id = f.file_id
+              WHERE f.cluster_id IS NULL
+                AND f.is_false_detection = 0 AND f.is_ignored = 0 {filter}
+              ORDER BY fe.model_id, fe.model_version, f.quality DESC, f.id"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(param.iter()), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+                Sealed {
+                    ciphertext: r.get::<_, Vec<u8>>(3)?,
+                    nonce: r.get::<_, Vec<u8>>(4)?,
+                    enc_version: r.get::<_, i64>(5)?,
+                    key_version: r.get::<_, i64>(6)?,
+                },
+            ))
+        })?;
+
+        let mut report = GroupingReport::default();
+        // (model, [(face_id, unit vector)]) in query order.
+        type Partition = ((String, String), Vec<(String, Vec<f32>)>);
+        let mut partitions: Vec<Partition> = Vec::new();
+        for row in rows {
+            let (face_id, model, sealed) = row?;
+            let Ok(mut v) = crypto::open_vector(key, &sealed) else { continue };
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if !norm.is_finite() || norm == 0.0 {
+                continue;
+            }
+            v.iter_mut().for_each(|x| *x /= norm);
+            report.faces_considered += 1;
+            match partitions.last_mut() {
+                Some((m, faces)) if *m == model => faces.push((face_id, v)),
+                _ => partitions.push((model, vec![(face_id, v)])),
+            }
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        let now = now_iso8601();
+        for ((model_id, _), faces) in &partitions {
+            let dim = faces[0].1.len();
+            let usable: Vec<usize> = (0..faces.len()).filter(|&i| faces[i].1.len() == dim).collect();
+            let vectors: Vec<&[f32]> = usable.iter().map(|&i| faces[i].1.as_slice()).collect();
+            let members: Vec<Vec<usize>> = greedy_groups(&vectors, cluster_threshold_for(model_id))
+                .into_iter()
+                .map(|g| g.into_iter().map(|j| usable[j]).collect())
+                .collect();
+            for group in members.iter().filter(|m| m.len() >= 2) {
+                let cid = new_uuid();
+                tx.execute(
+                    "INSERT INTO face_clusters (id, status, algorithm_version, created_at, updated_at)
+                     VALUES (?1,'unnamed',?2,?3,?3)",
+                    params![cid, UNGROUPED_ALGO_VERSION, now],
+                )?;
+                for &i in group {
+                    tx.execute(
+                        "UPDATE faces SET cluster_id = ?2 WHERE id = ?1 AND cluster_id IS NULL",
+                        params![faces[i].0, cid],
+                    )?;
+                }
+                report.groups_created += 1;
+                report.faces_grouped += group.len();
+            }
+        }
+        tx.commit()?;
+        Ok(report)
+    }
+
+    /// Faces nobody has named, per drive: how many faces, and how many tiles
+    /// that is once grouped. Counted in the catalogue, not from a sample —
+    /// the People screen used to count within its first thousand faces.
+    pub fn unnamed_counts(&self) -> Result<Vec<UnnamedOnDrive>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.drive_number, d.friendly_name, count(*),
+                    count(DISTINCT coalesce(f.cluster_id, f.id))
+               FROM faces f
+               JOIN face_thumbnails ft ON ft.face_id = f.id
+               JOIN files fi ON fi.id = f.file_id
+               JOIN drives d ON d.id = fi.drive_id
+               LEFT JOIN face_clusters c ON c.id = f.cluster_id
+              WHERE f.is_false_detection = 0 AND f.is_ignored = 0
+                AND (c.status IS NULL OR c.status <> 'rejected')
+                AND c.person_id IS NULL
+              GROUP BY d.drive_number, d.friendly_name
+              ORDER BY d.drive_number",
+        )?;
+        let out = stmt
+            .query_map([], |r| {
+                Ok(UnnamedOnDrive {
+                    drive_number: r.get(0)?,
+                    drive_name: r.get(1)?,
+                    faces: r.get(2)?,
+                    groups: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(out)
     }
 
@@ -1632,5 +1875,142 @@ mod recognition_tests {
         )
         .unwrap();
         assert!(repo.tag_cluster_with_name("c1", "   ").is_err());
+    }
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
+
+    /// Two drives, one root each.
+    fn archive() -> (Connection, MasterKey) {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute_batch(
+            "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES ('d1',1,'online','now'), ('d2',2,'online','now');
+             INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r1','d1','','now'), ('r2','d2','','now');",
+        )
+        .unwrap();
+        (conn, MasterKey::generate(1))
+    }
+
+    /// A face on `drive` pointing along `axis`, slightly perturbed: faces with
+    /// the same axis are the same person.
+    fn face(conn: &Connection, key: &MasterKey, drive: &str, axis: usize, jitter: f32, quality: f32) -> String {
+        let file = new_uuid();
+        let root = if drive == "d1" { "r1" } else { "r2" };
+        conn.execute(
+            "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                source_mtime_ns, status, created_at, updated_at)
+             VALUES (?1,?2,?3,?1,?1,10,1,'complete','now','now')",
+            params![file, drive, root],
+        )
+        .unwrap();
+        let mut v = vec![0.05f32; 24];
+        v[axis] = 1.0;
+        v[(axis + 1) % 24] = jitter;
+        let repo = FaceRepo::new(conn);
+        let id = repo
+            .insert_face(&file, (0.1, 0.1, 0.2, 0.2), quality, "apple-vision", "1.0.0", &v, key)
+            .unwrap();
+        repo.store_thumbnail(&id, b"jpeg", 8, 8, key).unwrap();
+        id
+    }
+
+    fn cluster_of(conn: &Connection, face: &str) -> Option<String> {
+        conn.query_row("SELECT cluster_id FROM faces WHERE id=?1", [face], |r| r.get(0)).unwrap()
+    }
+
+    /// D-089: look-alikes are grouped, a face with no look-alike is not made
+    /// into a group of one, and nothing already grouped is moved.
+    #[test]
+    fn ungrouped_faces_are_grouped_by_likeness_and_nothing_else_moves() {
+        let (conn, key) = archive();
+        let repo = FaceRepo::new(&conn);
+        let a: Vec<String> = (0..4).map(|i| face(&conn, &key, "d1", 0, 0.05 * i as f32, 0.9)).collect();
+        let b: Vec<String> = (0..3).map(|i| face(&conn, &key, "d1", 6, 0.05 * i as f32, 0.8)).collect();
+        let loner = face(&conn, &key, "d1", 12, 0.0, 0.7);
+
+        // A face the owner already grouped (and named) is left alone, even
+        // though it looks just like group A.
+        let named = face(&conn, &key, "d1", 0, 0.02, 0.95);
+        let person = repo.tag_face_with_name(&named, "Aimee").unwrap();
+        let named_cluster = cluster_of(&conn, &named).unwrap();
+
+        let report = repo.group_ungrouped(Some("d1"), &key).unwrap();
+        assert_eq!(report.faces_considered, 8);
+        assert_eq!(report.groups_created, 2);
+        assert_eq!(report.faces_grouped, 7);
+
+        let ga = cluster_of(&conn, &a[0]).expect("group A");
+        assert!(a.iter().all(|f| cluster_of(&conn, f).as_ref() == Some(&ga)));
+        let gb = cluster_of(&conn, &b[0]).expect("group B");
+        assert!(b.iter().all(|f| cluster_of(&conn, f).as_ref() == Some(&gb)));
+        assert_ne!(ga, gb, "two people are two groups");
+        assert_eq!(cluster_of(&conn, &loner), None, "no group of one");
+        assert_eq!(cluster_of(&conn, &named), Some(named_cluster), "a named face stays put");
+        assert_eq!(repo.get_person(&person.id).unwrap().unwrap().display_name, "Aimee");
+
+        // Running again finds nothing new to do.
+        let again = repo.group_ungrouped(Some("d1"), &key).unwrap();
+        assert_eq!(again.groups_created, 0);
+    }
+
+    /// Grouping one drive does not reach into another.
+    #[test]
+    fn grouping_a_drive_leaves_other_drives_alone() {
+        let (conn, key) = archive();
+        let repo = FaceRepo::new(&conn);
+        let other: Vec<String> = (0..3).map(|i| face(&conn, &key, "d2", 0, 0.05 * i as f32, 0.9)).collect();
+        repo.group_ungrouped(Some("d1"), &key).unwrap();
+        assert!(other.iter().all(|f| cluster_of(&conn, f).is_none()));
+        repo.group_ungrouped(None, &key).unwrap();
+        assert!(other.iter().all(|f| cluster_of(&conn, f).is_some()));
+    }
+
+    /// D-089: the gallery shows a group once, by its clearest face, with the
+    /// group's size — biggest groups first.
+    #[test]
+    fn the_gallery_shows_each_group_once_biggest_first() {
+        let (conn, key) = archive();
+        let repo = FaceRepo::new(&conn);
+        let a: Vec<String> = (0..4).map(|i| face(&conn, &key, "d1", 0, 0.05 * i as f32, 0.5 + 0.1 * i as f32)).collect();
+        (0..2).for_each(|i| {
+            face(&conn, &key, "d1", 6, 0.05 * i as f32, 0.99);
+        });
+        let loner = face(&conn, &key, "d2", 12, 0.0, 0.7);
+        repo.group_ungrouped(None, &key).unwrap();
+
+        let tiles = repo.gallery(200).unwrap();
+        assert_eq!(tiles.len(), 3, "{tiles:?}");
+        assert_eq!(tiles[0].group_size, 4, "biggest group first");
+        assert_eq!(tiles[0].face_id, a[3], "shown by its clearest face");
+        assert_eq!(tiles[1].group_size, 2);
+        assert_eq!(tiles[2].face_id, loner);
+        assert_eq!(tiles[2].group_size, 1);
+
+        let on_d2 = repo.gallery_on_drive(200, Some(2)).unwrap();
+        assert_eq!(on_d2.len(), 1);
+        assert_eq!(on_d2[0].face_id, loner);
+    }
+
+    /// The per-drive counts come from the catalogue, not from a sample.
+    #[test]
+    fn unnamed_counts_are_real_counts() {
+        let (conn, key) = archive();
+        let repo = FaceRepo::new(&conn);
+        for i in 0..5 {
+            face(&conn, &key, "d1", 0, 0.05 * i as f32, 0.9);
+        }
+        face(&conn, &key, "d1", 12, 0.0, 0.9);
+        let named = face(&conn, &key, "d2", 6, 0.0, 0.9);
+        repo.tag_face_with_name(&named, "Kent").unwrap();
+        repo.group_ungrouped(None, &key).unwrap();
+
+        let counts = repo.unnamed_counts().unwrap();
+        assert_eq!(counts.len(), 1, "a drive whose faces are all named has none left: {counts:?}");
+        assert_eq!(counts[0].drive_number, 1);
+        assert_eq!(counts[0].faces, 6);
+        assert_eq!(counts[0].groups, 2, "one group of five and one loner");
     }
 }

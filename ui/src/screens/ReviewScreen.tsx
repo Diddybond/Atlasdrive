@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, ExportSummary, GalleryFace, NamedPerson, PersonFolder, SuggestedFace } from "../api";
+import { api, ExportSummary, GalleryFace, NamedPerson, PersonFolder, SuggestedFace, UnnamedOnDrive } from "../api";
 
 /// People, in three clearly separate parts.
 ///
@@ -79,19 +79,49 @@ export function ReviewScreen() {
     setPeople(await api.listPeople());
     setThumbs(await loadThumbs(gallery.map((f) => f.face_id), {}));
   }
-  // The drives that actually have faces, counted from an unfiltered read so the
-  // list does not shrink to whatever is currently selected.
+  // Faces nobody has named, per drive, counted in the catalogue. These used to
+  // be counted within a sample of the first thousand faces, so the chips added
+  // up to exactly 1,000 and the heading said 197 on an archive with tens of
+  // thousands.
+  const [unnamedCounts, setUnnamedCounts] = useState<UnnamedOnDrive[]>([]);
+  async function refreshCounts() {
+    const counts = await api.unnamedFaceCounts();
+    setUnnamedCounts(counts);
+    setDrives(
+      counts.map((c) => ({
+        number: c.drive_number,
+        name: c.drive_name ?? `Drive ${c.drive_number}`,
+        faces: c.faces,
+      })),
+    );
+  }
   useEffect(() => {
-    void api.faceGallery(1000).then((all) => {
-      const counts = new Map<number, { name: string; faces: number }>();
-      for (const f of all) {
-        const e = counts.get(f.drive_number) ?? { name: f.drive_name ?? `Drive ${f.drive_number}`, faces: 0 };
-        e.faces += 1;
-        counts.set(f.drive_number, e);
-      }
-      setDrives([...counts.entries()].map(([number, v]) => ({ number, ...v })).sort((a, b) => a.number - b.number));
-    });
+    void refreshCounts();
   }, []);
+
+  const [grouping, setGrouping] = useState(false);
+  const [groupNote, setGroupNote] = useState<string | null>(null);
+  async function groupLookAlikes() {
+    setGrouping(true);
+    setGroupNote(null);
+    try {
+      const r = await api.groupFaces();
+      setGroupNote(
+        r.groups_created === 0
+          ? "No new groups — every face that looks like another is already grouped."
+          : `Put ${r.faces_grouped.toLocaleString()} faces into ${r.groups_created.toLocaleString()} groups. Name one face and its whole group is named.`,
+      );
+      await refreshCounts();
+      await load(driveFilter ?? undefined);
+    } catch (err) {
+      setGroupNote(String(err));
+    } finally {
+      setGrouping(false);
+    }
+  }
+  const shownCounts = unnamedCounts.filter((c) => shownDrive === null || c.drive_number === shownDrive);
+  const totalUnnamed = shownCounts.reduce((n, c) => n + c.faces, 0);
+  const totalTiles = shownCounts.reduce((n, c) => n + c.groups, 0);
 
   useEffect(() => {
     // Clicking through drives faster than they load must not leave an earlier
@@ -455,7 +485,7 @@ export function ReviewScreen() {
               onClick={() => setDriveFilter(d.number)}
               title={d.name}
             >
-              Drive {d.number} <span className="chip-count">{d.faces}</span>
+              Drive {d.number} <span className="chip-count">{d.faces.toLocaleString()}</span>
             </button>
           ))}
         </div>
@@ -472,11 +502,27 @@ export function ReviewScreen() {
           <>Loading faces{driveFilter !== null && ` from Drive ${driveFilter}`}…</>
         ) : (
           <>
-            {unnamed.length} face{unnamed.length === 1 ? "" : "s"} nobody has named
+            {(totalUnnamed || unnamed.length).toLocaleString()} face
+            {(totalUnnamed || unnamed.length) === 1 ? "" : "s"} nobody has named
             {shownDrive !== null && ` on Drive ${shownDrive}`}
           </>
         )}
       </h2>
+      <div className="row-between">
+        <p className="panel-note">
+          {totalTiles > unnamed.length
+            ? `In ${totalTiles.toLocaleString()} groups of look-alikes and single faces. Showing the ${unnamed.length} biggest first — naming one face names its whole group.`
+            : "Naming one face names its whole group."}
+        </p>
+        <button onClick={() => void groupLookAlikes()} disabled={grouping}>
+          {grouping ? "Grouping…" : "Group look-alike faces"}
+        </button>
+      </div>
+      {groupNote && (
+        <p className="search-note" role="status">
+          {groupNote}
+        </p>
+      )}
       {unnamed.length === 0 ? (
         <p className="empty">No faces yet. Scan a drive and any faces found will appear here.</p>
       ) : (

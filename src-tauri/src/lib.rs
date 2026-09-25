@@ -202,18 +202,65 @@ fn tag_face_cluster(
         .map_err(map_err)
 }
 
-/// Faces to browse, newest and clearest first. No names required.
+/// Faces to browse: one per group, biggest groups first. No names required.
+///
+/// Off the main thread: on an archive with a hundred thousand faces the query
+/// is long enough to be felt, and a synchronous command freezes the window.
 #[tauri::command]
-fn face_gallery(
-    state: State<AppState>,
+async fn face_gallery(
+    state: State<'_, AppState>,
     limit: Option<usize>,
     drive_number: Option<i64>,
 ) -> Result<Vec<faces::GalleryFace>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive)
-        .gallery_on_drive(limit.unwrap_or(200), drive_number)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive)
+            .gallery_on_drive(limit.unwrap_or(200), drive_number)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// How many faces nobody has named, per drive — counted, not sampled.
+#[tauri::command]
+async fn unnamed_face_counts(
+    state: State<'_, AppState>,
+) -> Result<Vec<faces::UnnamedOnDrive>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive).unnamed_counts().map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Group every drive's ungrouped faces with their look-alikes (D-089).
+///
+/// For an archive indexed before scans did this themselves. Drive by drive, so
+/// the work stays proportionate; nothing already grouped or named moves.
+#[tauri::command]
+async fn group_faces(state: State<'_, AppState>) -> Result<faces::GroupingReport, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive = open_archive(&paths)?;
+        let key = keystore::default_keystore(paths.keys_dir())
+            .get_or_create()
+            .map_err(map_err)?;
+        let repo = faces::FaceRepo::new(&archive);
+        let mut total = faces::GroupingReport::default();
+        for drive in DriveRepo::new(&archive).list().map_err(map_err)? {
+            let r = repo.group_ungrouped(Some(&drive.id), &key).map_err(map_err)?;
+            total.faces_considered += r.faces_considered;
+            total.groups_created += r.groups_created;
+            total.faces_grouped += r.faces_grouped;
+        }
+        Ok(total)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// One face crop, as a data URL the webview can render directly.
@@ -1683,6 +1730,8 @@ pub fn run() {
             is_indexing,
             get_progress,
             run_verifier,
+            unnamed_face_counts,
+            group_faces,
             prepare_review,
             doctor,
             export_diagnostics,

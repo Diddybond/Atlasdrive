@@ -1737,3 +1737,34 @@ fn in_parallel_stops_when_the_handler_says_so() {
     assert!(unstarted <= 4, "at most one more per thread after the halt, got {unstarted}");
     assert_eq!(handled, unstarted);
 }
+
+/// D-089: a scan groups its drive's faces when it finishes, so there is
+/// nothing left for grouping by hand to do afterwards.
+#[test]
+fn a_finished_scan_has_already_grouped_its_faces() {
+    let (h, mut opts) = setup(no_disk_floor());
+    for i in 0..12 {
+        write_distinct_photo(&h.drive_dir.join(format!("many/p{i:02}.png")), i);
+    }
+    opts.config.batch_size = 4;
+    pipeline(&h).run(&opts).unwrap();
+
+    let faces: i64 = h.archive.query_row("SELECT count(*) FROM faces", [], |r| r.get(0)).unwrap();
+    assert!(faces > 0, "the fixture must produce faces for this test to mean anything");
+    let log = std::fs::read_to_string(h.paths.index_log()).unwrap();
+    assert!(log.contains("\"faces_grouped\""), "the scan must report its grouping");
+
+    let drive_id: String = h
+        .archive
+        .query_row("SELECT id FROM drives WHERE drive_number = 14", [], |r| r.get(0))
+        .unwrap();
+    let again = crate::faces::FaceRepo::new(&h.archive)
+        .group_ungrouped(Some(&drive_id), &h.key)
+        .unwrap();
+    assert_eq!(again.groups_created, 0, "the scan should have left nothing to group");
+    let grouped: i64 = h
+        .archive
+        .query_row("SELECT count(*) FROM faces WHERE cluster_id IS NOT NULL", [], |r| r.get(0))
+        .unwrap();
+    assert!(grouped > 0, "the fixture's look-alike faces were grouped by the scan");
+}

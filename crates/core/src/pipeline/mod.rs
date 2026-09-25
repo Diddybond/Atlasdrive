@@ -336,10 +336,15 @@ impl Analyst<'_> {
             .engines
             .engine_for(Capability::Color)
             .color(&rgb, cancel)?;
-        let scan_art = self
+        let mut scan_art = self
             .engines
             .engine_for(Capability::ScanArtifact)
             .scan_artifact(&rgb, cancel)?;
+        // A camera exposure is not a flatbed scan, whatever the border looks
+        // like (D-088).
+        if md.camera_exposure() {
+            scan_art.value.likely_scanned_print = false;
+        }
 
         let analyser = self.engines.file_analyser();
         // A real model failing on one photograph must not fail the run; fall
@@ -1035,6 +1040,24 @@ impl<'a> Pipeline<'a> {
                     &report, opts, &run_id, summary.batches, &logger,
                     &mut consecutive_verifier_failures, &mut progress, &mut summary,
                 )?;
+            }
+            // Group this drive's new faces with their look-alikes, so the
+            // People screen offers groups to name rather than every face one by
+            // one (D-089). A convenience: failing here must not fail a scan
+            // whose photographs are all safely catalogued.
+            if !dry_run {
+                match FaceRepo::new(self.archive).group_ungrouped(Some(&drive.id), self.key) {
+                    Ok(r) => logger
+                        .info("faces_grouped")
+                        .field("faces", r.faces_considered as i64)
+                        .field("groups", r.groups_created as i64)
+                        .field("grouped", r.faces_grouped as i64)
+                        .emit_best_effort(),
+                    Err(e) => logger
+                        .warn("faces_grouping_failed")
+                        .field("error", format!("{e}"))
+                        .emit_best_effort(),
+                }
             }
             progress.status = "complete".into();
             progress.touch();

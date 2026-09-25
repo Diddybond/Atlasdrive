@@ -2437,9 +2437,18 @@ failure. Moved-file adoption (D-073) is decided from the drive's `missing`
 hashes, read once per run; a second copy of the same moved photograph finds
 the row already claimed and is analysed as new, as it was before.
 
-**Consequences.** Measured on this Linux container (4 cores, heuristic engine,
-3,000 photographs at 1600x1200): see `.project-state/test-evidence.md`. The
-Vision speed-up cannot be measured off a Mac. How well Apple Vision scales
+**Consequences.** Measured on a Linux container (4 cores, heuristic engine,
+3,000 synthetic 1600x1200 photographs, release build):
+
+| Build | Time | Batch time, first → last |
+|---|---|---|
+| Before | 663s | 12s → 17s (verification growing) |
+| After, `--workers 1` | 558s | ~12s, flat |
+| After, 2 workers (the default on 4 cores) | 298s | ~6s, flat |
+
+The parallel run's catalogue passes the full standalone verifier (13/13) with
+the same 8,272 face embeddings as the serial one. The Vision speed-up cannot be
+measured off a Mac. How well Apple Vision scales
 across several processes, and so what `analysis_workers` should default to on
 the owner's machine, is the first thing to measure on the next real drive:
 `index.log`'s `throughput_fps` with `--workers 1` against the default.
@@ -2455,3 +2464,80 @@ one-slot pool: all four photographs served by one PID),
 for delivery, stop and halt.
 
 **Supersedes:** the parallelism paragraph of D-045. Extends D-044 and D-064.
+
+## D-088 — A camera exposure is not a flatbed scan
+
+**Status:** settled.
+
+**Context.** `likely_scanned_print` was decided from pixels alone: more than
+60% of a 3% border band bright, and saturation under 0.5. That describes a
+print on a scanner bed — and equally a white-backdrop portrait or a
+black-and-white wedding edit. On the owner's archive, a working
+photographer's, 39,923 photographs carried `likely-scan`; the live scan feed
+showed it on `_DSC8424`, a camera original. The flag also feeds date estimation.
+
+**Decision.** When EXIF records a camera exposure — `ExposureTime` together
+with `FNumber` or `FocalLength` — the photograph is not a scanned print,
+whatever its border looks like. Flatbed and film scanners record neither.
+Archive migration 7 applies the same rule to rows already written, from the
+EXIF the catalogue holds (`metadata.raw_json`), so no drive has to be
+reconnected: the flag and its stored JSON are corrected, the `likely-scan`
+system tag is removed, and the search text is rebuilt from the tags that remain.
+
+**Consequences.** A print photographed on a copy stand (a camera exposure of a
+print) is no longer tagged as a scan. That is the trade taken: tens of
+thousands of false tags on camera originals against the rarer copy-stand
+digitisation. User tags are never touched.
+
+**Evidence:** `camera_exposures_stop_being_called_scans` (migration, including
+a scanner's output keeping its tag) and
+`camera_exposure_uses_the_names_the_exif_reader_records`.
+
+**Supersedes:** None.
+
+## D-089 — Faces are grouped after every scan, and the gallery shows groups
+
+**Status:** settled.
+
+**Context.** A scan stored each face on its own. Grouping ran only when
+someone typed `index --rebuild-faces`, and a full rebuild over the whole
+archive is not proportionate at a hundred thousand faces. The People screen
+listed faces one by one, clearest first, capped at 200, so the owner saw the
+same person in five tiles of the first two rows, each to be named separately.
+Its counts were drawn from a sample: the drive chips counted within the first
+1,000 faces and summed to exactly 1,000, and the heading read "197 faces nobody
+has named" on an archive with tens of thousands.
+
+**Decision.**
+
+- `FaceRepo::group_ungrouped` groups faces that are in no group with their
+  look-alikes, per drive and per model partition, at that model's threshold.
+  It only adds: grouped and named faces never move, and a face with no
+  look-alike stays ungrouped rather than becoming a group of one.
+- Every scan runs it for its drive when it finishes. For drives indexed
+  before this existed, there is a "Group look-alike faces" button on the People
+  screen and `atlasdrive faces group [--drive N]`.
+- The gallery shows one tile per group (its clearest face) plus faces with no
+  group, biggest groups first, because naming any face of a group already
+  names all of it.
+- Counts come from the catalogue (`FaceRepo::unnamed_counts`), not a sample.
+
+**Cost.** Greedy against running centroids is quadratic when nothing matches.
+It is blocked and spread across the cores: 20,000 faces with no two alike took
+197s one comparison at a time and 52s on 4 cores; 20,000 faces of 300 people
+took 2.2s and recovered exactly the 300.
+
+**What this does not fix.** The identity embedding is still Vision's general
+image feature print of the face crop, so one person can still split across
+groups (see `VISION_CLUSTER_THRESHOLD`). A face-recognition model is the fix
+for that, and it reopens D-024's "no download" choice, so it is left as a
+recorded follow-up rather than done here.
+
+**Evidence:** `ungrouped_faces_are_grouped_by_likeness_and_nothing_else_moves`,
+`grouping_a_drive_leaves_other_drives_alone`,
+`the_gallery_shows_each_group_once_biggest_first`,
+`unnamed_counts_are_real_counts`, `a_finished_scan_has_already_grouped_its_faces`,
+and two UI tests for real counts and the grouping button.
+
+**Supersedes:** None. Extends D-007 (grouping stays a suggestion; naming stays
+a human act).

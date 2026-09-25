@@ -371,6 +371,13 @@ enum FaceAction {
         #[arg(long)]
         threshold: Option<f32>,
     },
+    /// Group faces that are in no group yet with their look-alikes, drive by
+    /// drive. Only adds groups; nothing already grouped or named moves.
+    Group {
+        /// Only this drive. Default: every drive, one at a time.
+        #[arg(long)]
+        drive: Option<i64>,
+    },
     /// Remove a person added by mistake. Faces are kept and return to unnamed.
     Forget {
         #[arg(long)]
@@ -913,6 +920,18 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
         FaceAction::Rename { person, name } => {
             let updated = repo.rename_person(&person, &name)?;
             println!("Now called {}.", updated.display_name);
+            Ok(())
+        }
+        FaceAction::Group { drive } => {
+            let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create()?;
+            let drives = DriveRepo::new(&archive).list()?;
+            for d in drives.iter().filter(|d| drive.is_none_or(|n| n == d.drive_number)) {
+                let r = repo.group_ungrouped(Some(&d.id), &key)?;
+                println!(
+                    "Drive {}: {} ungrouped face(s) looked at, {} put into {} new group(s).",
+                    d.drive_number, r.faces_considered, r.faces_grouped, r.groups_created
+                );
+            }
             Ok(())
         }
         FaceAction::Rebuild { threshold } => {

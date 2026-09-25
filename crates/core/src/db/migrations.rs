@@ -112,7 +112,54 @@ const ARCHIVE_MIGRATIONS: &[Migration] = &[
         name: "scan_run_heartbeat",
         sql: ARCHIVE_V6,
     },
+    Migration {
+        version: 7,
+        name: "camera_exposures_are_not_scans",
+        sql: ARCHIVE_V7,
+    },
 ];
+
+/// Take the scanned-print verdict back from photographs a camera took.
+///
+/// The verdict came from pixels alone — a bright, desaturated border — which is
+/// also what a white-backdrop portrait or a black-and-white edit looks like. On
+/// the owner's archive it tagged 39,923 photographs `likely-scan`, camera
+/// originals among them. New scans now consult EXIF (D-088); this corrects the
+/// rows already written, from the EXIF the catalogue already holds, so no
+/// drive needs reconnecting.
+///
+/// Only the machine's own guess is touched: the `likely-scan` tag is a system
+/// tag, and the search text is rebuilt from the tags that remain.
+const ARCHIVE_V7: &str = r#"
+CREATE TEMP TABLE camera_not_scan AS
+    SELECT sa.file_id
+      FROM scene_analysis sa
+      JOIN metadata m ON m.file_id = sa.file_id
+     WHERE sa.likely_scanned_print = 1
+       AND json_valid(m.raw_json)
+       AND json_extract(m.raw_json, '$.ExposureTime') IS NOT NULL
+       AND (json_extract(m.raw_json, '$.FNumber') IS NOT NULL
+            OR json_extract(m.raw_json, '$.FocalLength') IS NOT NULL);
+
+UPDATE scene_analysis
+   SET likely_scanned_print = 0,
+       border_fade_json = CASE WHEN json_valid(border_fade_json)
+                               THEN json_set(border_fade_json, '$.likely_scanned_print', json('false'))
+                               ELSE border_fade_json END
+ WHERE file_id IN (SELECT file_id FROM temp.camera_not_scan);
+
+DELETE FROM file_tags
+ WHERE file_id IN (SELECT file_id FROM temp.camera_not_scan)
+   AND tag_id IN (SELECT id FROM tags WHERE name = 'likely-scan' AND tag_type = 'system');
+
+UPDATE files_fts
+   SET tags = (SELECT coalesce(group_concat(name, ' '), '')
+                 FROM (SELECT t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+                        WHERE ft.file_id = files_fts.file_id ORDER BY t.name))
+ WHERE file_id IN (SELECT file_id FROM temp.camera_not_scan);
+
+DROP TABLE temp.camera_not_scan;
+"#;
 
 /// A pulse on the run itself, so the catalogue can say whether a scan is alive.
 ///
@@ -644,6 +691,76 @@ mod tests {
         // Re-running the same set is a no-op, not a duplicate-column error.
         apply(&conn, &upgrade).unwrap();
         assert_eq!(crate::db::schema_version(&conn).unwrap(), NEXT);
+    }
+
+    /// D-088: a photograph with a camera exposure loses the scanned-print
+    /// verdict — flag, stored JSON, tag and search text — and a genuine scan
+    /// (no exposure recorded) keeps all of it.
+    #[test]
+    fn camera_exposures_stop_being_called_scans() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        apply(&conn, &ARCHIVE_MIGRATIONS[..6]).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES ('d',1,'online','now');
+            INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r','d','','now');
+            INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                source_mtime_ns, status, analysis_version, created_at, updated_at)
+              VALUES ('cam','d','r','_DSC8424.jpg','_DSC8424.jpg',1,1,'complete',1,'now','now'),
+                     ('scan','d','r','nan_1962.tif','nan_1962.tif',1,1,'complete',1,'now','now');
+            INSERT INTO metadata (file_id, raw_json) VALUES
+              ('cam',  '{"ExposureTime":"1/200 s","FNumber":"f/2.8","Make":"SONY"}'),
+              ('scan', '{"Make":"EPSON","Model":"Perfection V850"}');
+            INSERT INTO scene_analysis (file_id, likely_scanned_print, border_fade_json, created_at) VALUES
+              ('cam',  1, '{"likely_scanned_print":true,"border_fraction":0.8}', 'now'),
+              ('scan', 1, '{"likely_scanned_print":true,"border_fraction":0.9}', 'now');
+            INSERT INTO tags (id, name, tag_type, created_at) VALUES
+              ('t-scan','likely-scan','system','now'), ('t-suit','suit','automatic','now');
+            INSERT INTO file_tags (file_id, tag_id, confidence, source, created_at) VALUES
+              ('cam','t-scan',0.6,'system','now'), ('cam','t-suit',0.9,'automatic','now'),
+              ('scan','t-scan',0.6,'system','now');
+            INSERT INTO files_fts (file_id, filename, relative_path, tags, ocr_text, description) VALUES
+              ('cam','_DSC8424.jpg','_DSC8424.jpg','likely-scan suit','',''),
+              ('scan','nan_1962.tif','nan_1962.tif','likely-scan','','');
+            "#,
+        )
+        .unwrap();
+
+        apply(&conn, ARCHIVE_MIGRATIONS).unwrap();
+
+        let flag = |id: &str| -> (i64, String) {
+            conn.query_row(
+                "SELECT likely_scanned_print, border_fade_json FROM scene_analysis WHERE file_id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        let fts = |id: &str| -> String {
+            conn.query_row("SELECT tags FROM files_fts WHERE file_id=?1", [id], |r| r.get(0)).unwrap()
+        };
+        let tagged = |id: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM file_tags WHERE file_id=?1 AND tag_id='t-scan'",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        let (cam_flag, cam_json) = flag("cam");
+        assert_eq!(cam_flag, 0);
+        assert!(cam_json.contains("\"likely_scanned_print\":false"), "{cam_json}");
+        assert!(cam_json.contains("border_fraction"), "the rest of the evidence is kept");
+        assert_eq!(tagged("cam"), 0);
+        assert_eq!(fts("cam"), "suit", "other tags stay searchable");
+
+        assert_eq!(flag("scan").0, 1, "a scanner's output is still a scan");
+        assert_eq!(tagged("scan"), 1);
+        assert_eq!(fts("scan"), "likely-scan");
+
+        assert!(crate::db::integrity_check(&conn).is_ok());
     }
 
     /// A failing migration must roll back atomically, leaving the old version

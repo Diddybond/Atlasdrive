@@ -229,6 +229,22 @@ export interface ClusterSummary {
   person_id?: string | null;
 }
 
+/// Faces nobody has named on one drive, counted in the catalogue.
+export interface UnnamedOnDrive {
+  drive_number: number;
+  drive_name: string | null;
+  faces: number;
+  /// Tiles to name: groups, plus faces with no group.
+  groups: number;
+}
+
+/// What grouping look-alike faces did.
+export interface GroupingReport {
+  faces_considered: number;
+  groups_created: number;
+  faces_grouped: number;
+}
+
 /// One face in the gallery — a picture first, a name only if you gave it one.
 export interface GalleryFace {
   face_id: string;
@@ -429,6 +445,8 @@ export const api = {
   personRelationships: () => call<[string, number][]>("person_relationships"),
   faceGallery: (limit?: number, driveNumber?: number) =>
     call<GalleryFace[]>("face_gallery", { limit, driveNumber }),
+  unnamedFaceCounts: () => call<UnnamedOnDrive[]>("unnamed_face_counts"),
+  groupFaces: () => call<GroupingReport>("group_faces"),
   faceThumbnail: (faceId: string) => call<string | null>("face_thumbnail", { faceId }),
   tagFace: (faceId: string, name: string) =>
     call<{ person: { id: string; display_name: string }; suggested: number }>("tag_face", {
@@ -702,6 +720,15 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         (only ? mockGallery.filter((f) => f.drive_number === only) : mockGallery) as unknown as T,
       );
     }
+    case "unnamed_face_counts":
+      // Deliberately larger than the gallery: the counts are the whole
+      // catalogue, the gallery is its first two hundred tiles.
+      return Promise.resolve([
+        { drive_number: 7, drive_name: "Holidays 2004-2011", faces: 1840, groups: 612 },
+        { drive_number: 14, drive_name: "AtlasDrive A", faces: 25695, groups: 9021 },
+      ] as unknown as T);
+    case "group_faces":
+      return Promise.resolve({ faces_considered: 25000, groups_created: 3100, faces_grouped: 17400 } as unknown as T);
     case "face_thumbnail": {
       const idx = mockGallery.findIndex((f) => f.face_id === args?.faceId);
       return Promise.resolve((idx >= 0 ? mockFaceImage(idx + 1) : null) as unknown as T);
