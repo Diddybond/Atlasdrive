@@ -1,17 +1,36 @@
 # Current State
 
 - Product name: **AtlasDrive** (settled, D-020)
-- Branch: claude/mr-repo-addition-pxgpfk
+- Branch: claude/practical-einstein-55whcv
 - Commit: see `git log` (latest: two things the specification asked for)
 - Current completion score: **100/100** under `docs/15_DEFINITION_OF_DONE.md`
 - Critical gates passing: **10/10**
-- Latest test result: 354 core + 2 CLI integration + 74 UI passing (1 core test
-  ignored: the network-guard test, behind `--features network-guard-tests`);
-  clippy clean across the workspace, including test targets. The Vision worker's
-  16 tests are in that count on every platform now, not only on a Mac (D-084).
+- Latest test result: 370 core + 2 CLI + 79 UI passing (1 core test ignored:
+  the network-guard test, behind `--features network-guard-tests`); clippy clean
+  across the workspace and `src-tauri` (now compiled on Linux too, D-087).
 - Current files being changed: none (clean checkpoint)
 - Runtime safety status: all safety boundaries implemented and tested; the
   original-integrity halt was demonstrated on macOS with a real exit code 10
+
+## 2026-09-25: faster, and fixed against the owner's live archive
+
+See D-087, D-088, D-089 and `completed.md`. In one line each: indexing is
+parallel and its verification no longer grows with the archive; Settings no
+longer freezes the app; faces are grouped after every scan and shown as groups;
+camera originals are no longer called scanned prints (migration 7 repairs the
+catalogue on first open).
+
+### Installing this build on the Mac
+
+```bash
+git fetch origin && git checkout claude/practical-einstein-55whcv
+./scripts/build-app.sh        # builds Vision helper + UI + app, signs it
+```
+
+Then replace `/Applications/AtlasDrive.app` with the new bundle. The catalogue
+in `~/Library/Application Support/AtlasDrive/` is kept; migration 7 runs once on
+first open. After that, on the People screen, press **Group look-alike faces**
+once to group the faces of drives indexed before this build.
 
 ## Image recognition is real now
 

@@ -254,7 +254,7 @@ export function ScanScreen() {
             <h3>Read speed</h3>
             <Gauge value={mbPerSec} peak={peakMb} />
             <p className="panel-note">
-              {mbPerSec === null ? "Measuring…" : running ? "Sustained" : "Stopped"}
+              {!active ? "Not reading" : mbPerSec === null ? "Measuring…" : running ? "Sustained" : "Stopped"}
             </p>
           </section>
 

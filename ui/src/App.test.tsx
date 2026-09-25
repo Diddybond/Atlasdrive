@@ -867,6 +867,9 @@ describe("Stopping a scan", () => {
     // The mock run started twenty minutes ago and finished after twelve.
     expect(screen.getByText("12m")).toBeDefined();
     expect(screen.getByText(/which ran for 12m\./)).toBeDefined();
+    // Nor is its speed gauge still waiting for a reading.
+    expect(screen.queryByText("Measuring…")).toBeNull();
+    expect(screen.getByText("Not reading")).toBeDefined();
   });
 
   /// Nothing about stopping should suggest work has been thrown away.

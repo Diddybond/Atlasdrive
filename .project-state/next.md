@@ -4,29 +4,27 @@ Everything identified in the 25 July critical review is done and committed, as
 is everything the owner's real drives have turned up since. What follows is what
 remains, with evidence rather than estimates.
 
-## The one open decision — needs the owner
+## First thing on the Mac: measure the new build
 
-**Indexing throughput.** Measured on the real wedding drive from `index.log`:
-**0.27–0.36 files/sec**, single-threaded. `pipeline/mod.rs` processes a batch
-with `for item in &batch`, one photograph at a time, and the cost is dominated
-by Vision analysis — classification, OCR, face detection, a feature print for
-the image and another for each of up to twelve face crops at full resolution.
+Parallel indexing (D-087) was built and measured off a Mac with the heuristic
+engine. How Apple Vision scales across several worker processes has not been
+measured. On the next real drive, compare `index.log`'s `throughput_fps` for
+`atlasdrive index ... --workers 1` against the default, and set the default in
+`config::default_analysis_workers` from the result. Watch memory too: each
+worker is retired after 400 photographs (D-064), but four can be alive at once.
 
-At the owner's stated scale that is:
+## Needs the owner
 
-| Files | Time |
-|-------|------|
-| 758 (one wedding) | ~40 minutes |
-| 200,000 (twenty drives) | **~7 days continuous** |
+**A face-recognition model.** Grouping now happens after every scan and the
+gallery shows groups (D-089), but the identity embedding is still Vision's
+general image feature print of the face crop, so one person still splits
+across several groups. A local recognition model would fix it and reopens
+D-024's "no model download" choice. A task prompt for this was queued in the
+session of 2026-09-25.
 
-Parallelising was raised earlier and declined, with "it's probably worth letting
-a drive run overnight". That was before the twenty-drive figure was known, and
-seven days is a different proposition from one night. The change would be
-running several Vision helper processes rather than one; the protocol is already
-one-request-one-reply per process, so it is a supervisor rather than a rewrite.
-
-Not built, because it reverses a decision the owner made and the new information
-should be theirs to weigh.
+**Back up the catalogue.** The owner's Settings screen showed "Backup folder:
+not chosen yet · Last backup: never" over ~218,000 photographs of names, events
+and faces. Nothing in code can choose the folder.
 
 ## Worth doing next, in this order
 

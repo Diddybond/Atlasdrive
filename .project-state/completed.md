@@ -119,3 +119,29 @@
 - Evidence: `a_failed_item_with_no_recorded_reason_fails_the_queue_check`; the
   macOS-only signing branch compile-checked by flipping its cfg. 354 core + 2
   CLI + 74 UI, clippy clean.
+
+## 2026-09-25: Rethink for speed and for the owner's real archive (D-087–D-089)
+
+Asked to "optimise this app and make it work better". The owner shared
+screenshots of the live app over ~218,000 photographs on ten drives.
+
+- **Indexing** runs several photographs at once (one catalogue writer), with a
+  pool of Vision workers; `--workers N`, default half the cores up to four.
+- **Batch verification** reads only what the batch wrote; SQL-level checks stay
+  catalogue-wide; the drive is verified once at the end. It was quadratic in
+  the archive: at 218,000 photographs every batch re-decoded 218,000 thumbnails.
+- **Face check** reads every model partition — it never checked a Vision face.
+- **Thumbnails** 8x faster on 24MP; named people decrypted once per batch;
+  rescan reconciliation in one transaction; full verifier decodes thumbnails
+  in parallel.
+- **Settings froze the app**: it ran the whole-archive verifier on arrival, on
+  the main thread. Now on request, and off the main thread (verifier, doctor,
+  face gallery, grouping are async commands).
+- **Faces** grouped after every scan and on request; gallery one tile per group;
+  real counts instead of a 1,000-face sample.
+- **likely-scan** no longer applied to camera exposures; migration 7 repairs
+  existing rows (39,923 tagged on the owner's archive).
+- **UI**: finished scans show how long they ran (was "Been running for 17d 8h",
+  still counting) and "Not reading" instead of "Measuring…"; subjects read as
+  words; event placeholders were real clients' names.
+- Evidence: `.project-state/test-evidence.md`, 2026-09-25.

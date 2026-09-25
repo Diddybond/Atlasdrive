@@ -415,3 +415,42 @@ Result: pass, no warnings — the bounded codesign/spctl calls compile
 Command: cargo test --workspace                exit 0, 354 core + 2 CLI
 Command: cargo clippy --workspace --all-targets exit 0, 0 warnings
 ```
+
+## 2026-09-25: Parallel indexing, scoped verification, face grouping (D-087–D-089)
+
+```text
+Command: cargo test --workspace
+Exit code: 0
+Result: 370 core + 2 CLI passing (1 core ignored: network-guard, feature-gated)
+
+Command: cargo clippy --workspace --all-targets
+Exit code: 0 (no warnings)
+
+Command: (src-tauri) cargo clippy --all-targets
+Exit code: 0 (no warnings) — first time src-tauri has been compiled off a Mac,
+  after installing libwebkit2gtk-4.1-dev/libgtk-3-dev; the Vision helper and
+  derived icons were stand-ins, not committed.
+
+Command: (ui) npx tsc --noEmit && npx vitest run
+Exit code: 0 — 79 tests
+
+Benchmark: 3,000 synthetic 1600x1200 JPEGs, release build, 4-core Linux, heuristic engine
+  before (218ed66)        663s  batch 12s -> 17s, verification growing ~1.1ms/photo/batch
+  after, --workers 1      558s  batch ~12s flat
+  after, 2 workers        298s  batch ~6s flat
+  atlasdrive-verify on the parallel catalogue: 13 pass, exit 0; 8,272 face embeddings
+  (identical count to serial)
+
+Verifier on a 3,000-photo catalogue: full 3.46s, one batch's scope 0.18s
+Thumbnail of a 24MP photograph: 632ms -> 78ms
+Face grouping, 20,000 x 768-dim: no two alike 197s -> 52s (4 cores); 300 people 2.2s,
+  exactly 300 groups recovered
+```
+
+Tests that fail against the old behaviour:
+`concurrent_photographs_are_analysed_by_separate_workers_at_once` (one-slot pool:
+all four served by one PID), `batches_verify_their_own_photographs_and_the_drive_is_checked_at_the_end`
+(no end-of-run report before), `face_embeddings_from_every_model_are_checked`,
+`camera_exposures_stop_being_called_scans`, `a_finished_scan_has_already_grouped_its_faces`,
+UI: finished-scan clock, Settings not verifying on arrival, subject labels,
+real unnamed-face counts.
