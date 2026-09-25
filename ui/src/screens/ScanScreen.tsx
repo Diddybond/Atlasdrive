@@ -158,6 +158,9 @@ export function ScanScreen() {
   // being asked is "is this drive finished", not "how has this process done".
   const running = isLive && progress.status === "running";
   const stalled = isLive && progress.status === "stalled";
+  // Only a scan that is still going has a clock that is still going. A finished
+  // one read "Been running for 17d 8h" and kept counting for ever.
+  const active = running || stalled;
   const catalogued = stats ? stats.files : 0;
   // Still queued is the durable truth about what is left: a resumed run
   // re-walks files it has already catalogued, so discovered minus done counts
@@ -286,20 +289,22 @@ export function ScanScreen() {
             <Tile
               tone="amber"
               icon="⧗"
-              label={isLive ? "Been running for" : "Last read"}
+              label={active ? "Been running for" : isLive ? "Ran for" : "Last read"}
               value={
                 isLive
-                  ? elapsed(progress.startedAt)
+                  ? elapsed(progress.startedAt, active ? undefined : progress.updatedAt)
                   : stats?.recent[0]
                     ? "—"
                     : "never"
               }
               sub={
-                isLive
+                active
                   ? rate
                     ? `${(rate * 60).toFixed(1)} photographs/min`
                     : "Elapsed"
-                  : "Not being read now"
+                  : isLive
+                    ? statusLabel(progress.status)
+                    : "Not being read now"
               }
             />
           </div>
@@ -345,8 +350,10 @@ export function ScanScreen() {
             </div>
             {isLive && (
               <p className="panel-note">
-                {progress.filesDone.toLocaleString()} of those were read in this session, which
-                began {elapsed(progress.startedAt)} ago.
+                {progress.filesDone.toLocaleString()} of those were read in this session, which{" "}
+                {active
+                  ? `began ${elapsed(progress.startedAt)} ago.`
+                  : `ran for ${elapsed(progress.startedAt, progress.updatedAt)}.`}
               </p>
             )}
           </section>
@@ -535,10 +542,12 @@ function finishTime(secondsLeft: number): string {
   return `about ${time} ${day}`;
 }
 
-function elapsed(startedAt: string): string {
+/// Time from `startedAt` to `endedAt`, or to now for a scan still going.
+function elapsed(startedAt: string, endedAt?: string): string {
   const start = new Date(startedAt).getTime();
-  if (Number.isNaN(start)) return "—";
-  return duration((Date.now() - start) / 1000);
+  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  if (Number.isNaN(start) || Number.isNaN(end)) return "—";
+  return duration(Math.max(0, end - start) / 1000);
 }
 
 function statusLabel(status: string): string {

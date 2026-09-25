@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, FolderSummary, Drive, DriveContents, DriveCoverage, Volume } from "../api";
+import { api, FolderSummary, Drive, DriveContents, DriveCoverage, subjectLabel, Volume } from "../api";
 
 export function DrivesScreen() {
   const [coverage, setCoverage] = useState<Record<number, DriveCoverage>>({});
@@ -330,7 +330,7 @@ export function DrivesScreen() {
                       Pictures of{" "}
                       {contents[d.drive_number].top_tags
                         .slice(0, 5)
-                        .map((t) => `${t.tag} (${t.count})`)
+                        .map((t) => `${subjectLabel(t.tag)} (${t.count})`)
                         .join(", ")}
                     </>
                   ) : (

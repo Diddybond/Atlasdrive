@@ -634,7 +634,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         driveNumber: 14,
         scanRoot: "/Volumes/AtlasDrive A",
         startedAt: new Date(mockRunStarted).toISOString(),
-        updatedAt: new Date().toISOString(),
+        // A finished run stopped writing when it finished; only a live one
+        // is still being updated.
+        updatedAt: new Date(mockScanRunning ? Date.now() : mockRunStarted + 12 * 60 * 1000).toISOString(),
         filesDiscovered: 8333,
         filesDone: done,
         filesFailed: 0,
@@ -724,6 +726,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         { tag: "suit", count: 411 },
         { tag: "outdoor", count: 283 },
         { tag: "wedding", count: 131 },
+        { tag: "drinking_glass", count: 57 },
         { tag: "likely-scan", count: 995 },
       ] as unknown as T);
     case "photo_thumbnail": {
@@ -1052,3 +1055,10 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
 }
 
 export const runningInTauri = hasTauri;
+
+/// A subject as a person would write it. Vision's taxonomy ids are
+/// `blue_sky`, `drinking_glass`, `consumer_electronics`; the tag itself stays
+/// as stored (it is what a search is keyed on), only its label changes.
+export function subjectLabel(tag: string): string {
+  return tag.replace(/_/g, " ");
+}

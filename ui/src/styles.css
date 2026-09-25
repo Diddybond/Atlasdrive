@@ -98,6 +98,14 @@ input[type="text"], input[type="search"], input:not([type]), select {
   width: 100%;
 }
 
+/* An example is not an answer. Placeholder text was the same weight as typed
+   text, so an empty "What was it?" field read as already filled in. */
+input::placeholder {
+  color: var(--ink-soft);
+  font-style: italic;
+  opacity: 0.7;
+}
+
 /* Selects otherwise keep the platform's own chrome and sit oddly beside the
    themed text fields they share a form with. */
 select {

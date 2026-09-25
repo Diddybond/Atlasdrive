@@ -83,6 +83,18 @@ describe("AtlasDrive UI", () => {
     ).toBe("true");
   });
 
+  /// Vision names subjects like an API (`drinking_glass`); the owner reads
+  /// them as words. The label changes, the tag searched on does not.
+  it("shows subjects as words, not taxonomy ids", async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+    });
+    const chip = screen.getByRole("button", { name: /showing drinking glass/ });
+    expect(chip.textContent).toContain("drinking glass");
+    expect(screen.queryByText(/drinking_glass/)).toBeNull();
+  });
+
   /// "No point having a search that does not bring the full results." The
   /// screen must state how many it is showing, and it must be all of them.
   it("says how many it found and shows every one", async () => {
@@ -377,9 +389,21 @@ describe("AtlasDrive UI", () => {
   it("shows safety checks on the settings screen", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Run checks" }));
     await waitFor(() => {
       expect(screen.getByText(/network isolation/i)).toBeDefined();
     });
+  });
+
+  /// Opening Settings froze the app: it ran the whole-archive verifier on the
+  /// way in. The checks run when asked, not on arrival.
+  it("does not run the whole-archive checks just because Settings was opened", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
+    await screen.findByRole("button", { name: "Run checks" });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByText(/network isolation/i)).toBeNull();
+    expect(screen.getByText(/takes a few minutes on a large one/)).toBeDefined();
   });
 });
 
@@ -828,6 +852,21 @@ describe("Stopping a scan", () => {
       (screen.getByRole("button", { name: /Stopping/ }) as HTMLButtonElement).disabled,
     ).toBe(true);
     setMockStopping(false);
+  });
+
+  /// A finished scan's clock stops when the scan did. Drive 10 read
+  /// "Finished" beside "Been running for 17d 8h", still counting.
+  it("gives a finished scan the time it took, not a clock still running", async () => {
+    setMockScanning(false);
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Scan activity/ }));
+    await waitFor(() => {
+      expect(screen.getByText("Ran for")).toBeDefined();
+    });
+    expect(screen.queryByText("Been running for")).toBeNull();
+    // The mock run started twenty minutes ago and finished after twelve.
+    expect(screen.getByText("12m")).toBeDefined();
+    expect(screen.getByText(/which ran for 12m\./)).toBeDefined();
   });
 
   /// Nothing about stopping should suggest work has been thrown away.

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, Drive, DriveMatch, SearchResult, TagCount } from "../api";
+import { api, Drive, DriveMatch, SearchResult, subjectLabel, TagCount } from "../api";
 import type { SearchContext } from "../App";
 
 export function SearchScreen({
@@ -294,11 +294,11 @@ export function SearchScreen({
                     }}
                     aria-label={
                       on
-                        ? `Stop narrowing to ${t.tag}`
-                        : `Narrow to the ${t.count} photographs showing ${t.tag}`
+                        ? `Stop narrowing to ${subjectLabel(t.tag)}`
+                        : `Narrow to the ${t.count} photographs showing ${subjectLabel(t.tag)}`
                     }
                   >
-                    {t.tag}
+                    {subjectLabel(t.tag)}
                     <span className="tag-count">{t.count.toLocaleString()}</span>
                   </button>
                 </li>
@@ -344,7 +344,7 @@ export function SearchScreen({
           {pickedTags.length > 1 && (
             <p className="panel-note">
               Showing only photographs that contain <strong>all</strong> of these:{" "}
-              {pickedTags.join(", ")}.
+              {pickedTags.map(subjectLabel).join(", ")}.
             </p>
           )}
         </div>

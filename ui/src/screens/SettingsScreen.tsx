@@ -118,13 +118,17 @@ export function SettingsScreen() {
       setRunning(false);
     }
   }
+  // Each part of the screen loads on its own, so one slow answer cannot hold up
+  // the rest. The safety checks are not run on opening: over a whole archive
+  // they read every thumbnail and every connected original, which on 218,000
+  // photographs is minutes of work — and opening Settings froze the app for
+  // all of it. They run when asked.
   useEffect(() => {
+    void (async () => setDoctor(await api.doctor()))();
     void (async () => {
-      setDoctor(await api.doctor());
       const s = await api.getSettings();
       setSettings(s);
       await refreshBackups(s.backup_destination);
-      await runChecks();
     })();
   }, []);
 
@@ -294,6 +298,13 @@ export function SettingsScreen() {
             {running ? "Checking…" : "Run checks"}
           </button>
         </div>
+        {checks.length === 0 && (
+          <p className="panel-note">
+            {running
+              ? "Reading every thumbnail and every connected original. On a large archive this takes a few minutes; the rest of AtlasDrive keeps working."
+              : "Confirms every thumbnail opens, every connected original is unchanged, the catalogue is intact and nothing reached the network. Reads the whole archive, so it takes a few minutes on a large one."}
+          </p>
+        )}
         <ul className="check-list">
           {checks.map((c) => (
             <li key={c.name} className="check-row">

@@ -340,7 +340,7 @@ export function ReviewScreen() {
                     <label>
                       Copy their photographs into
                       <input
-                        placeholder="/Users/you/Desktop/Aimee"
+                        placeholder="/Users/you/Desktop/Exports"
                         value={destination}
                         onChange={(e) => setDestination(e.target.value)}
                       />

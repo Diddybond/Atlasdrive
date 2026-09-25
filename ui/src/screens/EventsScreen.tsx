@@ -200,7 +200,7 @@ export function EventsScreen({
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="Aimee &amp; Kent wedding"
+                placeholder="e.g. Smith &amp; Jones wedding"
                 onKeyDown={(e) => e.key === "Enter" && void confirm()}
               />
             </label>
@@ -209,7 +209,7 @@ export function EventsScreen({
               <input
                 value={client}
                 onChange={(e) => setClient(e.target.value)}
-                placeholder="Aimee Kanovan"
+                placeholder="e.g. The Smiths"
                 list="known-clients"
                 onKeyDown={(e) => e.key === "Enter" && void confirm()}
               />
