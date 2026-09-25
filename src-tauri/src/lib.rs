@@ -944,9 +944,19 @@ fn get_progress(state: State<AppState>) -> Result<Option<Progress>, String> {
     Ok(progress)
 }
 
+/// Runs off the main thread. A synchronous command runs on it, and this one
+/// reads every thumbnail in the archive — on 218,000 photographs that froze the
+/// whole window for minutes, which is how opening Settings "hung" the app.
 #[tauri::command]
-fn run_verifier(state: State<AppState>) -> Result<Vec<Check>, String> {
+async fn run_verifier(state: State<'_, AppState>) -> Result<Vec<Check>, String> {
     let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || verify_catalogue(&paths))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn verify_catalogue(paths: &AppPaths) -> Result<Vec<Check>, String> {
+    let paths = paths.clone();
     let archive = open_archive(&paths)?;
     let queue = open_queue(&paths)?;
     let key = keystore::default_keystore(paths.keys_dir()).get_or_create().ok();
@@ -957,10 +967,6 @@ fn run_verifier(state: State<AppState>) -> Result<Vec<Check>, String> {
         paths: &paths,
         config: &config,
         key: key.as_ref(),
-        face_model: (
-            family_archive_core::ai::local::MODEL_ID.to_string(),
-            family_archive_core::ai::local::MODEL_VERSION.to_string(),
-        ),
         observed_throughput: None,
         network_blocked_attempts: 0,
     };
@@ -1112,9 +1118,19 @@ fn export_diagnostics(state: State<AppState>) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Off the main thread, like [`run_verifier`]: an integrity check of the whole
+/// catalogue and the Vision worker's selftest can each take many seconds.
 #[tauri::command]
-fn doctor(state: State<AppState>) -> Result<std::collections::BTreeMap<String, String>, String> {
+async fn doctor(
+    state: State<'_, AppState>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
     let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || doctor_report(paths))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn doctor_report(paths: AppPaths) -> Result<std::collections::BTreeMap<String, String>, String> {
     let mut out = std::collections::BTreeMap::new();
     let ks = keystore::default_keystore(paths.keys_dir());
     out.insert("keystore".into(), ks.backend_name().into());

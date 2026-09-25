@@ -53,6 +53,24 @@ fn encode(img: &RgbImage) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Resize to exactly `tw` x `th`.
+///
+/// A Lanczos filter over a whole 24-megapixel photograph samples a wide window
+/// around every output pixel: 630ms per photograph, measured, and the largest
+/// single cost of indexing one on the Rust side. Averaging down to twice the
+/// target first — a cheap pass that loses nothing a 512px preview can show —
+/// and letting Lanczos do the last factor of two gives the same sharpness in a
+/// fraction of the time (D-087).
+fn shrink(img: &RgbImage, tw: u32, th: u32) -> RgbImage {
+    let (w, h) = img.dimensions();
+    if w > tw.saturating_mul(4) && h > th.saturating_mul(4) {
+        let halfway = image::imageops::thumbnail(img, tw * 2, th * 2);
+        image::imageops::resize(&halfway, tw, th, image::imageops::FilterType::Lanczos3)
+    } else {
+        image::imageops::resize(img, tw, th, image::imageops::FilterType::Lanczos3)
+    }
+}
+
 /// Generate a thumbnail for `img`, write it under `thumbnails_dir`, verify it
 /// decodes, and return its recorded metadata.
 pub fn generate(
@@ -63,7 +81,7 @@ pub fn generate(
 ) -> Result<ThumbnailInfo> {
     let (w, h) = img.dimensions();
     let (tw, th) = fit_within(w, h, max_edge);
-    let thumb = image::imageops::resize(img, tw, th, image::imageops::FilterType::Lanczos3);
+    let thumb = shrink(img, tw, th);
 
     let rel = rel_path_for(file_id);
     let abs: PathBuf = thumbnails_dir.join(&rel);
@@ -72,12 +90,12 @@ pub fn generate(
     }
     std::fs::write(&abs, encode(&thumb)?)?;
 
-    // Verify by re-decoding from disk.
-    let reloaded = image::open(&abs)
+    // Verify by re-decoding what is on disk. Read once: the same bytes are
+    // decoded and checksummed, so the checksum is of what was proven to open.
+    let bytes = std::fs::read(&abs)?;
+    let reloaded = image::load_from_memory(&bytes)
         .map_err(|e| Error::Other(format!("thumbnail re-decode failed: {e}")))?;
     let decode_ok = reloaded.width() == tw && reloaded.height() == th;
-
-    let bytes = std::fs::read(&abs)?;
     let checksum = blake3::hash(&bytes).to_hex().to_string();
 
     Ok(ThumbnailInfo {
@@ -500,6 +518,30 @@ mod tests {
         assert_eq!(report.converted, 0);
         assert_eq!(report.already_jpeg, 1);
         verify(&thumbs, &info).unwrap();
+    }
+
+    /// The fast path must look like the slow one: same size, and pixel for
+    /// pixel within a small tolerance of a direct Lanczos resize, on a picture
+    /// with real detail rather than flat colour (where anything would match).
+    #[test]
+    fn the_two_step_shrink_matches_a_direct_resize() {
+        let (w, h) = (4000u32, 3000u32);
+        let img = RgbImage::from_fn(w, h, |x, y| {
+            let v = ((x as f32 / 37.0).sin() * 60.0 + (y as f32 / 23.0).cos() * 60.0 + 128.0) as u8;
+            Rgb([v, ((x * 255) / w) as u8, ((y * 255) / h) as u8])
+        });
+        let (tw, th) = fit_within(w, h, 512);
+        let fast = shrink(&img, tw, th);
+        let slow = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Lanczos3);
+        assert_eq!(fast.dimensions(), slow.dimensions());
+        let mean_abs: f64 = fast
+            .as_raw()
+            .iter()
+            .zip(slow.as_raw())
+            .map(|(a, b)| (*a as f64 - *b as f64).abs())
+            .sum::<f64>()
+            / fast.as_raw().len() as f64;
+        assert!(mean_abs < 3.0, "mean absolute difference {mean_abs:.2} of 255");
     }
 
     #[test]

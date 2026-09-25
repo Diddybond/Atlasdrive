@@ -111,6 +111,48 @@ impl VerifierReport {
     }
 }
 
+/// Which photographs the per-photograph checks read.
+///
+/// The verifier's checks come in two kinds, and they cost very different
+/// amounts. Some are one SQL query over the catalogue — every complete file has
+/// a perceptual hash, every file has a thumbnail row, the queue agrees with
+/// itself — and stay catalogue-wide in every scope, because a query over
+/// 200,000 rows is milliseconds. The others touch each photograph in turn:
+/// they read and decode its thumbnail, `stat` its original on an external
+/// drive, decrypt its face embeddings. Those are what the scope narrows.
+///
+/// Running the per-photograph checks over the whole catalogue after every
+/// 64-photograph batch made indexing quadratic: at 100,000 photographs each
+/// batch re-decoded 100,000 thumbnails it had already verified, and across a
+/// twenty-drive archive that alone was measured in days (D-087).
+#[derive(Debug, Clone, Copy)]
+pub enum Scope<'s> {
+    /// Every photograph in the catalogue: `atlasdrive verify` and verify-only.
+    Catalogue,
+    /// Every photograph on one drive, by drive id: the end of a scan.
+    Drive(&'s str),
+    /// Exactly these file ids: the batch a scan has just written.
+    Files(&'s [String]),
+}
+
+impl Scope<'_> {
+    /// A condition restricting the file-id column `col` to this scope, and the
+    /// one parameter (`?1`) it needs, if any.
+    fn filter(&self, col: &str) -> (String, Option<String>) {
+        match self {
+            Scope::Catalogue => ("1".into(), None),
+            Scope::Drive(drive_id) => (
+                format!("{col} IN (SELECT id FROM files WHERE drive_id = ?1)"),
+                Some(drive_id.to_string()),
+            ),
+            Scope::Files(ids) => (
+                format!("{col} IN (SELECT value FROM json_each(?1))"),
+                Some(serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())),
+            ),
+        }
+    }
+}
+
 /// Context needed to run the verifier.
 pub struct VerifyContext<'a> {
     pub archive: &'a Connection,
@@ -118,23 +160,29 @@ pub struct VerifyContext<'a> {
     pub paths: &'a AppPaths,
     pub config: &'a Config,
     pub key: Option<&'a MasterKey>,
-    /// AI model partition to sanity-check faces against.
-    pub face_model: (String, String),
     /// Median batch throughput observed this run (files/sec), if known.
     pub observed_throughput: Option<f64>,
     /// Whether the run's network guard recorded zero blocked attempts.
     pub network_blocked_attempts: u64,
 }
 
-/// Run the full verifier suite and return a structured report.
+/// Run the full verifier suite over the whole catalogue.
 pub fn run(ctx: &VerifyContext) -> Result<VerifierReport> {
+    run_scoped(ctx, Scope::Catalogue)
+}
+
+/// Run the verifier suite with its per-photograph checks limited to `scope`.
+///
+/// Every check still runs in every scope; see [`Scope`] for which ones the
+/// scope narrows.
+pub fn run_scoped(ctx: &VerifyContext, scope: Scope) -> Result<VerifierReport> {
     let mut checks = Vec::new();
 
     checks.push(check_db_integrity(ctx.archive));
     checks.push(check_catalogue_rows(ctx.archive));
     checks.push(check_hashes(ctx.archive));
-    checks.extend(check_thumbnails(ctx.archive, ctx.paths));
-    checks.push(check_originals_unchanged(ctx.archive));
+    checks.extend(check_thumbnails(ctx.archive, ctx.paths, scope));
+    checks.push(check_originals_unchanged(ctx.archive, scope));
     checks.push(check_output_containment(ctx.archive, ctx.paths));
     checks.push(check_network_isolation(ctx.network_blocked_attempts));
     checks.push(check_disk_floor(ctx.paths, ctx.config));
@@ -144,7 +192,7 @@ pub fn run(ctx: &VerifyContext) -> Result<VerifierReport> {
         checks.push(check_queue_consistency(q));
     }
     if let Some(key) = ctx.key {
-        checks.push(check_face_pipeline(ctx.archive, key, &ctx.face_model));
+        checks.push(check_face_pipeline(ctx.archive, key, scope));
     }
 
     Ok(VerifierReport {
@@ -242,7 +290,7 @@ fn check_hashes(conn: &Connection) -> Check {
     }
 }
 
-fn check_thumbnails(conn: &Connection, paths: &AppPaths) -> Vec<Check> {
+fn check_thumbnails(conn: &Connection, paths: &AppPaths, scope: Scope) -> Vec<Check> {
     // Every complete file has a thumbnail row.
     let missing_row: i64 = conn
         .query_row(
@@ -261,9 +309,11 @@ fn check_thumbnails(conn: &Connection, paths: &AppPaths) -> Vec<Check> {
 
     // Each thumbnail file decodes and matches its checksum/dimensions.
     let dir = paths.thumbnails_dir();
-    let mut stmt = match conn.prepare(
-        "SELECT file_id, rel_path, width, height, format, checksum, decode_ok FROM thumbnails",
-    ) {
+    let (in_scope, param) = scope.filter("file_id");
+    let mut stmt = match conn.prepare(&format!(
+        "SELECT file_id, rel_path, width, height, format, checksum, decode_ok FROM thumbnails
+          WHERE {in_scope}"
+    )) {
         Ok(s) => s,
         Err(e) => {
             checks.push(Check::fail("thumbnail_files", format!("query error: {e}")));
@@ -271,7 +321,7 @@ fn check_thumbnails(conn: &Connection, paths: &AppPaths) -> Vec<Check> {
         }
     };
     let rows = stmt
-        .query_map([], |r| {
+        .query_map(rusqlite::params_from_iter(param.iter()), |r| {
             Ok(ThumbnailInfo {
                 rel_path: r.get(1)?,
                 width: r.get(2)?,
@@ -284,15 +334,33 @@ fn check_thumbnails(conn: &Connection, paths: &AppPaths) -> Vec<Check> {
         .and_then(|m| m.collect::<std::result::Result<Vec<_>, _>>());
     match rows {
         Ok(infos) => {
-            let mut bad = 0;
+            // Each thumbnail is read, checksummed and decoded independently, so
+            // the whole-archive check spreads them across the cores. One at a
+            // time, 218,000 of them took minutes (D-087).
+            let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            let chunk = infos.len().div_ceil(threads).max(1);
+            let failures: Vec<String> = std::thread::scope(|s| {
+                let handles: Vec<_> = infos
+                    .chunks(chunk)
+                    .map(|part| {
+                        let dir = &dir;
+                        s.spawn(move || {
+                            part.iter()
+                                .filter_map(|info| thumbnail::verify(dir, info).err())
+                                .map(|e| e.to_string())
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+            });
+            let bad = failures.len();
             let mut detail = String::new();
-            for info in &infos {
-                if let Err(e) = thumbnail::verify(&dir, info) {
-                    bad += 1;
-                    if detail.len() < 200 {
-                        detail.push_str(&format!("{e}; "));
-                    }
+            for e in &failures {
+                if detail.len() >= 200 {
+                    break;
                 }
+                detail.push_str(&format!("{e}; "));
             }
             checks.push(if bad == 0 {
                 Check::pass("thumbnail_files", format!("{} thumbnails decode and match", infos.len()))
@@ -305,18 +373,19 @@ fn check_thumbnails(conn: &Connection, paths: &AppPaths) -> Vec<Check> {
     checks
 }
 
-fn check_originals_unchanged(conn: &Connection) -> Check {
+fn check_originals_unchanged(conn: &Connection, scope: Scope) -> Check {
     // For each complete file that still resolves to a present original, confirm
     // size + mtime match the recorded snapshot. A mismatch is a hard halt.
-    let mut stmt = match conn.prepare(
+    let (in_scope, param) = scope.filter("f.id");
+    let mut stmt = match conn.prepare(&format!(
         "SELECT f.size_bytes, f.source_mtime_ns, d.volume_name, f.relative_path,
                 (SELECT sr.scan_root FROM scan_runs sr
                   WHERE sr.drive_id = f.drive_id AND sr.mode <> 'dry-run'
                   ORDER BY sr.started_at DESC LIMIT 1)
          FROM files f
          JOIN drives d ON d.id=f.drive_id
-         WHERE f.status='complete'",
-    ) {
+         WHERE f.status='complete' AND {in_scope}"
+    )) {
         Ok(s) => s,
         Err(e) => return Check::fail("originals_unchanged", format!("query error: {e}")),
     };
@@ -324,7 +393,7 @@ fn check_originals_unchanged(conn: &Connection) -> Check {
     // Files whose original is genuinely absent are skipped and counted — their
     // integrity was verified at index time — but the count is reported so a
     // wholly-skipped run can never be mistaken for a verified one.
-    let rows = stmt.query_map([], |r| {
+    let rows = stmt.query_map(rusqlite::params_from_iter(param.iter()), |r| {
         Ok((
             r.get::<_, i64>(0)?,            // size
             r.get::<_, i64>(1)?,            // mtime
@@ -550,30 +619,48 @@ fn check_queue_consistency(queue: &Connection) -> Check {
     Check::pass("queue_consistency", "queue states consistent")
 }
 
-fn check_face_pipeline(conn: &Connection, key: &MasterKey, model: &(String, String)) -> Check {
+/// Face embeddings in scope are the right shape and finite, per model.
+///
+/// Checked for every model partition present, not one named in advance. The
+/// batch verifier used to be told to look at the heuristic engine's partition
+/// only, so on a Mac — where every face comes from Apple Vision — the check
+/// found nothing to look at and passed without having read a single embedding.
+fn check_face_pipeline(conn: &Connection, key: &MasterKey, scope: Scope) -> Check {
     let repo = FaceRepo::new(conn);
-    match repo.embedding_health(&model.0, &model.1, key) {
-        Ok(h) => {
-            if h.total == 0 {
+    let (in_scope, param) = scope.filter("f.file_id");
+    match repo.embedding_health_where(&in_scope, param.as_deref(), key) {
+        Ok(partitions) => {
+            if partitions.is_empty() {
                 return Check::pass("face_pipeline", "no faces to check");
             }
-            if h.non_finite > 0 {
-                return Check::fail("face_pipeline", format!("{} non-finite embeddings", h.non_finite));
+            let mut summary = Vec::new();
+            for ((model_id, model_version), h) in &partitions {
+                let model = format!("{model_id} {model_version}");
+                if h.non_finite > 0 {
+                    return Check::fail(
+                        "face_pipeline",
+                        format!("{model}: {} non-finite embeddings", h.non_finite),
+                    );
+                }
+                if h.dim_mismatches > 0 {
+                    return Check::fail(
+                        "face_pipeline",
+                        format!("{model}: {} dim mismatches", h.dim_mismatches),
+                    );
+                }
+                // Suspicious if nearly all embeddings are byte-identical.
+                if h.total >= 5 && h.max_identical as f64 / h.total as f64 > 0.9 {
+                    return Check::warn(
+                        "face_pipeline",
+                        format!(
+                            "{model}: {} of {} embeddings identical (possible detector failure)",
+                            h.max_identical, h.total
+                        ),
+                    );
+                }
+                summary.push(format!("{model}: {} embeddings, dim {}, finite", h.total, h.dim));
             }
-            if h.dim_mismatches > 0 {
-                return Check::fail("face_pipeline", format!("{} dim mismatches", h.dim_mismatches));
-            }
-            // Suspicious if nearly all embeddings are byte-identical.
-            if h.total >= 5 && h.max_identical as f64 / h.total as f64 > 0.9 {
-                return Check::warn(
-                    "face_pipeline",
-                    format!("{} of {} embeddings identical (possible detector failure)", h.max_identical, h.total),
-                );
-            }
-            Check::pass(
-                "face_pipeline",
-                format!("{} embeddings, dim {}, finite", h.total, h.dim),
-            )
+            Check::pass("face_pipeline", summary.join("; "))
         }
         Err(Error::Encryption(e)) => Check::halt("face_encryption_failure", e),
         Err(e) => Check::fail("face_pipeline", format!("{e}")),
@@ -605,7 +692,6 @@ mod tests {
             paths: &paths,
             config: &config,
             key: None,
-            face_model: ("local-heuristic".into(), "0.1.0".into()),
             observed_throughput: None,
             network_blocked_attempts: 0,
         };
@@ -688,7 +774,6 @@ mod tests {
             paths: &paths,
             config: &config,
             key: None,
-            face_model: ("m".into(), "1".into()),
             observed_throughput: None,
             network_blocked_attempts: 3,
         };
@@ -696,6 +781,42 @@ mod tests {
         assert!(!report.ok());
         assert!(report.has_halt());
         assert_eq!(report.exit_code(), crate::error::exit::SOURCE_INTEGRITY);
+    }
+
+    /// Faces from every model are checked, not only the heuristic engine's.
+    ///
+    /// The verifier was told which partition to read, and every caller named
+    /// the heuristic one — so on a Mac, where faces come from Apple Vision,
+    /// the check read nothing and passed.
+    #[test]
+    fn face_embeddings_from_every_model_are_checked() {
+        let archive = open_in_memory(SchemaKind::Archive).unwrap();
+        archive
+            .execute_batch(
+                "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES ('d',1,'online','now');
+                 INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r','d','','now');
+                 INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                    source_mtime_ns, status, analysis_version, created_at, updated_at)
+                 VALUES ('f','d','r','a.jpg','a.jpg',1,1,'queued',1,'now','now');",
+            )
+            .unwrap();
+        let key = MasterKey::generate(1);
+        let repo = FaceRepo::new(&archive);
+        repo.insert_face("f", (0.1, 0.1, 0.2, 0.2), 0.9, "local-heuristic", "0.2.0", &[0.1, 0.2, 0.3], &key)
+            .unwrap();
+        repo.insert_face("f", (0.5, 0.5, 0.2, 0.2), 0.9, "apple-vision", "1.0.0", &[0.4, f32::NAN, 0.1, 0.2], &key)
+            .unwrap();
+
+        let check = check_face_pipeline(&archive, &key, Scope::Catalogue);
+        assert_eq!(check.status, CheckStatus::Fail, "{check:?}");
+        assert!(check.detail.contains("apple-vision"), "{check:?}");
+
+        // Scoped to a file that holds it, the same face is still found; scoped
+        // to a batch that does not, it is not this batch's business.
+        let f = vec!["f".to_string()];
+        assert_eq!(check_face_pipeline(&archive, &key, Scope::Files(&f)).status, CheckStatus::Fail);
+        let other = vec!["g".to_string()];
+        assert_eq!(check_face_pipeline(&archive, &key, Scope::Files(&other)).status, CheckStatus::Pass);
     }
 
     #[test]
@@ -718,7 +839,6 @@ mod tests {
             paths: &paths,
             config: &config,
             key: None,
-            face_model: ("m".into(), "1".into()),
             observed_throughput: None,
             network_blocked_attempts: 0,
         };

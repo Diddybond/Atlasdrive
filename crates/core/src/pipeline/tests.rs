@@ -1492,3 +1492,248 @@ fn a_stop_left_over_from_a_previous_scan_does_not_block_the_next_one() {
     );
     assert!(!summary.halted);
 }
+
+/// A photograph with real structure and a size of its own, so that a result
+/// written to the wrong row cannot pass unnoticed (the same reasoning as D-044).
+fn write_distinct_photo(path: &Path, i: u32) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let (w, h) = (50 + i * 7, 30 + i * 3);
+    let img = RgbImage::from_fn(w, h, |x, y| {
+        Rgb([
+            ((x * (i + 3)) % 256) as u8,
+            ((y * (i + 5)) % 256) as u8,
+            (((x + y) * 7 + i * 31) % 256) as u8,
+        ])
+    });
+    img.save(path).unwrap();
+}
+
+/// Everything the catalogue says about each photograph, keyed by path.
+fn catalogue_by_path(conn: &rusqlite::Connection) -> std::collections::BTreeMap<String, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT f.relative_path, f.perceptual_hash, f.content_hash, m.width, m.height,
+                    t.width, t.height, t.checksum, s.description,
+                    (SELECT group_concat(name, ',') FROM
+                        (SELECT tg.name FROM file_tags ft JOIN tags tg ON tg.id = ft.tag_id
+                          WHERE ft.file_id = f.id ORDER BY tg.name)),
+                    (SELECT count(*) FROM faces fc WHERE fc.file_id = f.id)
+               FROM files f
+               JOIN metadata m ON m.file_id = f.id
+               JOIN thumbnails t ON t.file_id = f.id
+               JOIN scene_analysis s ON s.file_id = f.id",
+        )
+        .unwrap();
+    stmt.query_map([], |r| {
+        let mut row = Vec::new();
+        for i in 1..11 {
+            row.push(format!("{:?}", r.get::<_, rusqlite::types::Value>(i)?));
+        }
+        Ok((r.get::<_, String>(0)?, row.join("|")))
+    })
+    .unwrap()
+    .map(|r| r.unwrap())
+    .collect()
+}
+
+/// D-087: photographs analysed at the same time are each written to their own
+/// row. Every result is checked against its own original, read independently.
+#[test]
+fn parallel_analysis_attributes_every_result_to_its_own_photograph() {
+    let (h, mut opts) = setup(no_disk_floor());
+    for i in 0..24 {
+        write_distinct_photo(&h.drive_dir.join(format!("many/p{i:02}.png")), i);
+    }
+    opts.config.analysis_workers = 4;
+    opts.config.batch_size = 8;
+    let summary = pipeline(&h).run(&opts).unwrap();
+    assert_eq!(summary.files_done, 27);
+    assert_eq!(summary.files_failed, 0);
+
+    let mut stmt = h
+        .archive
+        .prepare(
+            "SELECT f.relative_path, f.perceptual_hash, m.width, m.height, t.width, t.height
+               FROM files f
+               JOIN metadata m ON m.file_id = f.id
+               JOIN thumbnails t ON t.file_id = f.id",
+        )
+        .unwrap();
+    let rows: Vec<(String, String, u32, u32, u32, u32)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(rows.len(), 27);
+    for (rel, phash, mw, mh, tw, th) in rows {
+        let original = image::open(h.drive_dir.join(&rel)).unwrap().to_rgb8();
+        let (w, h_) = original.dimensions();
+        assert_eq!((mw, mh), (w, h_), "{rel}: metadata describes another photograph");
+        assert_eq!((tw, th), (w, h_), "{rel}: thumbnail belongs to another photograph");
+        assert_eq!(phash, crate::pipeline::phash::dhash(&original), "{rel}: hash of another photograph");
+    }
+}
+
+/// D-087: indexing four at a time builds exactly the catalogue that indexing
+/// one at a time does — the same hashes, thumbnails, descriptions, tags and
+/// faces for every path.
+#[test]
+fn one_worker_and_four_build_the_same_catalogue() {
+    let build = |workers: usize| {
+        let (h, mut opts) = setup(no_disk_floor());
+        for i in 0..16 {
+            write_distinct_photo(&h.drive_dir.join(format!("many/p{i:02}.png")), i);
+        }
+        opts.config.analysis_workers = workers;
+        opts.config.batch_size = 5;
+        pipeline(&h).run(&opts).unwrap();
+        catalogue_by_path(&h.archive)
+    };
+    let serial = build(1);
+    let parallel = build(4);
+    assert_eq!(serial.len(), 19);
+    assert_eq!(serial, parallel);
+}
+
+/// D-087: a batch verifies the photographs it wrote, not the whole archive
+/// again; the drive as a whole is read back once, when the scan ends.
+#[test]
+fn batches_verify_their_own_photographs_and_the_drive_is_checked_at_the_end() {
+    use crate::verifier::{self, Scope, VerifyContext};
+
+    let (h, opts) = setup(no_disk_floor());
+    let p = pipeline(&h);
+    p.run(&opts).unwrap();
+
+    // Damage one thumbnail from that first run.
+    let (damaged, rel): (String, String) = h
+        .archive
+        .query_row("SELECT file_id, rel_path FROM thumbnails LIMIT 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    std::fs::write(h.paths.thumbnails_dir().join(&rel), b"not a jpeg").unwrap();
+
+    let drive_id: String = h
+        .archive
+        .query_row("SELECT id FROM drives WHERE drive_number = 14", [], |r| r.get(0))
+        .unwrap();
+    let others: Vec<String> = {
+        let mut stmt = h.archive.prepare("SELECT id FROM files WHERE id <> ?1").unwrap();
+        stmt.query_map([&damaged], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+    };
+    let config = no_disk_floor();
+    let ctx = VerifyContext {
+        archive: &h.archive,
+        queue: Some(&h.queue),
+        paths: &h.paths,
+        config: &config,
+        key: Some(&h.key),
+        observed_throughput: None,
+        network_blocked_attempts: 0,
+    };
+    // A batch that did not write it does not read it again…
+    assert!(verifier::run_scoped(&ctx, Scope::Files(&others)).unwrap().ok());
+    // …but the batch that did, the drive's check and the full verifier all do.
+    assert!(!verifier::run_scoped(&ctx, Scope::Files(&[damaged])).unwrap().ok());
+    assert!(!verifier::run_scoped(&ctx, Scope::Drive(&drive_id)).unwrap().ok());
+    assert!(!verifier::run(&ctx).unwrap().ok());
+
+    // End to end: new photographs index in batches that pass, and the check at
+    // the end of the run still finds the damage and writes it down.
+    write_photo(&h.drive_dir.join("later/new_a.png"), [10, 90, 140], 40, 30);
+    write_photo(&h.drive_dir.join("later/new_b.png"), [20, 90, 140], 40, 30);
+    let summary = p.run(&opts).unwrap();
+    assert_eq!(summary.files_done, 2);
+    assert!(
+        h.paths.reports_dir().join(format!("verifier-{}.json", summary.run_id)).exists(),
+        "a failed end-of-run check must leave a report"
+    );
+}
+
+/// Every item is handed out once and its result delivered once, whatever
+/// order the threads finish in.
+#[test]
+fn in_parallel_delivers_every_result_exactly_once() {
+    let items: Vec<u32> = (0..50).collect();
+    let mut seen = vec![0u32; items.len()];
+    let (unstarted, stopped) = super::in_parallel(
+        &items,
+        4,
+        &|| false,
+        &|n: &u32| {
+            // Uneven work, so results arrive out of order.
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(n % 5)));
+            n * 2
+        },
+        |i, r| {
+            assert_eq!(r, items[i] * 2, "result delivered against the wrong item");
+            seen[i] += 1;
+            true
+        },
+    );
+    assert_eq!(unstarted, items.len());
+    assert!(!stopped);
+    assert!(seen.iter().all(|&c| c == 1), "{seen:?}");
+}
+
+/// A stop starts nothing new, keeps what was already being worked on, and
+/// says exactly which items were never touched — the ones handed back to the
+/// queue unspent.
+#[test]
+fn in_parallel_stops_starting_work_but_keeps_work_in_flight() {
+    let items: Vec<u32> = (0..40).collect();
+    let started = std::sync::Mutex::new(Vec::new());
+    let delivered = std::sync::atomic::AtomicUsize::new(0);
+    let mut results = Vec::new();
+    let (unstarted, stopped) = super::in_parallel(
+        &items,
+        3,
+        &|| delivered.load(std::sync::atomic::Ordering::SeqCst) >= 5,
+        &|n: &u32| {
+            started.lock().unwrap().push(*n);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            *n
+        },
+        |i, _| {
+            results.push(i);
+            delivered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        },
+    );
+    assert!(stopped, "the stop must be reported");
+    let mut started = started.into_inner().unwrap();
+    started.sort();
+    results.sort();
+    assert_eq!(started, results.iter().map(|&i| i as u32).collect::<Vec<_>>(),
+        "everything started is delivered, nothing else is");
+    assert!(unstarted < items.len(), "work stopped early");
+    assert_eq!(started, (0..unstarted as u32).collect::<Vec<_>>(),
+        "exactly the items before `unstarted` were touched");
+}
+
+/// Returning `false` from the result handler — a hard halt — also stops new
+/// work from starting.
+#[test]
+fn in_parallel_stops_when_the_handler_says_so() {
+    let items: Vec<u32> = (0..40).collect();
+    let mut handled = 0;
+    let (unstarted, stopped) = super::in_parallel(
+        &items,
+        2,
+        &|| false,
+        &|n: &u32| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            *n
+        },
+        |_, _| {
+            handled += 1;
+            false
+        },
+    );
+    assert!(!stopped, "a halt is not a stop request");
+    assert!(unstarted <= 4, "at most one more per thread after the halt, got {unstarted}");
+    assert_eq!(handled, unstarted);
+}

@@ -68,6 +68,17 @@ If analysis partially fails, preserve successful safe results only if the schema
 
 Run the real verifier after every batch.
 
+The batch verifier's per-photograph checks (thumbnail decode, original stat,
+face embeddings) read the photographs that batch wrote; its catalogue-wide
+checks (database integrity, rows, hashes, queue, disk, network, heartbeat) read
+everything. When a run finishes, the verifier reads every photograph on the
+drive once more. Re-reading the whole archive after every batch made indexing
+quadratic in its size (D-087).
+
+Photographs within a batch are read and analysed several at a time
+(`Config::analysis_workers`); each is committed to the catalogue on the
+pipeline's own thread, atomically, as it becomes ready.
+
 - success: commit batch completion and progress
 - retryable failure: record cause and requeue only affected files
 - hard safety failure: halt immediately

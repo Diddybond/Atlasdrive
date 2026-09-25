@@ -105,6 +105,50 @@ pub struct PersonSuggestion {
     pub score: f32,
 }
 
+/// One confirmed face of a named person, decrypted.
+#[derive(Debug, Clone)]
+struct Exemplar {
+    person_id: String,
+    display_name: String,
+    model_id: String,
+    model_version: String,
+    vector: Vec<f32>,
+}
+
+/// The faces a new face is compared against: see [`FaceRepo::person_exemplars`].
+#[derive(Debug, Clone, Default)]
+pub struct PersonExemplars {
+    exemplars: Vec<Exemplar>,
+}
+
+impl PersonExemplars {
+    /// The closest named person at or above `threshold`, comparing only
+    /// embeddings from the same model partition.
+    pub fn best_match(
+        &self,
+        embedding: &[f32],
+        model_id: &str,
+        model_version: &str,
+        threshold: f32,
+    ) -> Option<PersonSuggestion> {
+        let mut best: Option<(&Exemplar, f32)> = None;
+        for e in &self.exemplars {
+            if e.model_id != model_id || e.model_version != model_version {
+                continue;
+            }
+            let score = cosine_similarity(embedding, &e.vector);
+            if score >= threshold && best.is_none_or(|(_, b)| score > b) {
+                best = Some((e, score));
+            }
+        }
+        best.map(|(e, score)| PersonSuggestion {
+            person_id: e.person_id.clone(),
+            display_name: e.display_name.clone(),
+            score,
+        })
+    }
+}
+
 /// A person the user has named, and how well established they are.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamedPerson {
@@ -628,39 +672,49 @@ impl<'a> FaceRepo<'a> {
         key: &MasterKey,
         threshold: f32,
     ) -> Result<Option<PersonSuggestion>> {
+        Ok(self.person_exemplars(key)?.best_match(embedding, model_id, model_version, threshold))
+    }
+
+    /// Every confirmed face of every named person, decrypted once.
+    ///
+    /// [`Self::suggest_person`] used to decrypt all of them for every new face,
+    /// so the cost of recognising one face grew with everyone the owner had
+    /// ever named — on the single thread that writes the catalogue, which
+    /// parallel analysis (D-087) made the one place a scan waits in line. The
+    /// pipeline loads these once per batch and asks them for each face.
+    pub fn person_exemplars(&self, key: &MasterKey) -> Result<PersonExemplars> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.id, p.display_name, fe.ciphertext, fe.nonce, fe.enc_version, fe.key_version
+            "SELECT p.id, p.display_name, fe.model_id, fe.model_version,
+                    fe.ciphertext, fe.nonce, fe.enc_version, fe.key_version
                FROM face_embeddings fe
                JOIN faces f            ON f.id = fe.face_id
                JOIN face_clusters c    ON c.id = f.cluster_id
                JOIN people p           ON p.id = c.person_id
-              WHERE fe.model_id = ?1 AND fe.model_version = ?2
-                AND c.status = 'confirmed'
+              WHERE c.status = 'confirmed'
                 AND f.is_false_detection = 0 AND f.is_ignored = 0",
         )?;
-        let rows = stmt.query_map(params![model_id, model_version], |r| {
+        let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, Vec<u8>>(2)?,
-                r.get::<_, Vec<u8>>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                Sealed {
+                    ciphertext: r.get::<_, Vec<u8>>(4)?,
+                    nonce: r.get::<_, Vec<u8>>(5)?,
+                    enc_version: r.get::<_, i64>(6)?,
+                    key_version: r.get::<_, i64>(7)?,
+                },
             ))
         })?;
-
-        let mut best: Option<PersonSuggestion> = None;
+        let mut exemplars = Vec::new();
         for row in rows {
-            let (person_id, display_name, ciphertext, nonce, enc_version, key_version) = row?;
-            let sealed = Sealed { ciphertext, nonce, enc_version, key_version };
+            let (person_id, display_name, model_id, model_version, sealed) = row?;
             // A single undecryptable exemplar must not abort recognition.
-            let Ok(known) = crypto::open_vector(key, &sealed) else { continue };
-            let score = crate::util::cosine_similarity(embedding, &known);
-            if score >= threshold && best.as_ref().is_none_or(|b| score > b.score) {
-                best = Some(PersonSuggestion { person_id, display_name, score });
-            }
+            let Ok(vector) = crypto::open_vector(key, &sealed) else { continue };
+            exemplars.push(Exemplar { person_id, display_name, model_id, model_version, vector });
         }
-        Ok(best)
+        Ok(PersonExemplars { exemplars })
     }
 
     /// Attach a face to a named person's cluster as an unconfirmed suggestion.
@@ -1157,32 +1211,54 @@ impl<'a> FaceRepo<'a> {
     /// Sanity stats for the verifier's face-pipeline checks.
     pub fn embedding_health(&self, model_id: &str, model_version: &str, key: &MasterKey) -> Result<FaceHealth> {
         let embeddings = self.load_embeddings(model_id, model_version, key)?;
-        let mut health = FaceHealth {
-            total: embeddings.len(),
-            ..Default::default()
-        };
-        if embeddings.is_empty() {
-            return Ok(health);
+        Ok(FaceHealth::of(embeddings.iter().map(|(_, v)| v.as_slice())))
+    }
+
+    /// [`Self::embedding_health`] for every model partition at once, over the
+    /// faces whose `f.file_id` satisfies `condition` (`f` is `faces`; `param`
+    /// binds its `?1`, if it has one).
+    ///
+    /// Each partition is judged on its own: a 768-dimension Vision print and a
+    /// 65-dimension heuristic vector are both healthy, and mixing them would
+    /// report every one of one kind as a dimension mismatch.
+    pub fn embedding_health_where(
+        &self,
+        condition: &str,
+        param: Option<&str>,
+        key: &MasterKey,
+    ) -> Result<Vec<((String, String), FaceHealth)>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT fe.model_id, fe.model_version, fe.ciphertext, fe.nonce, fe.enc_version, fe.key_version
+               FROM face_embeddings fe
+               JOIN faces f ON f.id = fe.face_id
+              WHERE f.is_false_detection=0 AND f.is_ignored=0 AND {condition}
+              ORDER BY fe.model_id, fe.model_version"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(param.iter()), |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, String>(1)?),
+                Sealed {
+                    ciphertext: r.get::<_, Vec<u8>>(2)?,
+                    nonce: r.get::<_, Vec<u8>>(3)?,
+                    enc_version: r.get::<_, i64>(4)?,
+                    key_version: r.get::<_, i64>(5)?,
+                },
+            ))
+        })?;
+        type Partition = ((String, String), Vec<Vec<f32>>);
+        let mut partitions: Vec<Partition> = Vec::new();
+        for row in rows {
+            let (model, sealed) = row?;
+            let v = crypto::open_vector(key, &sealed)?;
+            match partitions.last_mut() {
+                Some((m, vs)) if *m == model => vs.push(v),
+                _ => partitions.push((model, vec![v])),
+            }
         }
-        let dim = embeddings[0].1.len();
-        health.dim = dim;
-        let mut seen: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-        for (_, v) in &embeddings {
-            if v.len() != dim {
-                health.dim_mismatches += 1;
-            }
-            if v.iter().any(|x| !x.is_finite()) {
-                health.non_finite += 1;
-            }
-            // Quantized fingerprint to detect suspicious exact repeats.
-            let mut h = 0u64;
-            for x in v {
-                h = h.wrapping_mul(131).wrapping_add((*x * 1000.0) as i64 as u64);
-            }
-            *seen.entry(h).or_insert(0) += 1;
-        }
-        health.max_identical = seen.values().copied().max().unwrap_or(0);
-        Ok(health)
+        Ok(partitions
+            .into_iter()
+            .map(|(model, vs)| (model, FaceHealth::of(vs.iter().map(|v| v.as_slice()))))
+            .collect())
     }
 
     pub fn get_person(&self, id: &str) -> Result<Option<Person>> {
@@ -1216,6 +1292,34 @@ pub struct FaceHealth {
     pub dim_mismatches: usize,
     pub non_finite: usize,
     pub max_identical: usize,
+}
+
+impl FaceHealth {
+    /// Tally a set of embeddings from one model partition.
+    fn of<'v>(embeddings: impl Iterator<Item = &'v [f32]>) -> Self {
+        let mut health = FaceHealth::default();
+        let mut seen: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        for v in embeddings {
+            if health.total == 0 {
+                health.dim = v.len();
+            }
+            health.total += 1;
+            if v.len() != health.dim {
+                health.dim_mismatches += 1;
+            }
+            if v.iter().any(|x| !x.is_finite()) {
+                health.non_finite += 1;
+            }
+            // Quantized fingerprint to detect suspicious exact repeats.
+            let mut h = 0u64;
+            for x in v {
+                h = h.wrapping_mul(131).wrapping_add((*x * 1000.0) as i64 as u64);
+            }
+            *seen.entry(h).or_insert(0) += 1;
+        }
+        health.max_identical = seen.values().copied().max().unwrap_or(0);
+        health
+    }
 }
 
 #[cfg(test)]

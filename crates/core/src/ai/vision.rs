@@ -141,12 +141,24 @@ const SHUTDOWN_GRACE_SECS: u64 = 10;
 /// state. What must not happen is a scan that never starts and never says why.
 const SELFTEST_BUDGET_SECS: u64 = 60;
 
+/// Most worker processes one engine runs at once.
+///
+/// The pipeline analyses several photographs at a time (D-087), and one worker
+/// answers one photograph at a time, so each analysis thread needs its own
+/// process or the threads simply queue behind one pipe. Slots are filled only
+/// when used, so a pipeline running two threads starts two processes, not
+/// eight; this is the ceiling for a caller asking for more.
+const MAX_WORKERS: usize = 8;
+
 pub struct VisionEngine {
     helper: PathBuf,
     caps: Vec<Capability>,
-    /// `None` until first use, and reset to `None` if an exchange fails so the
-    /// next call gets a fresh process rather than a broken pipe.
-    worker: Mutex<Option<Worker>>,
+    /// One slot per worker process. Each is `None` until first used, and reset
+    /// to `None` if an exchange fails so the next call gets a fresh process
+    /// rather than a broken pipe.
+    workers: Vec<Mutex<Option<Worker>>>,
+    /// Spreads callers over the slots when every one of them is busy.
+    overflow: std::sync::atomic::AtomicUsize,
 }
 
 impl VisionEngine {
@@ -196,7 +208,8 @@ impl VisionEngine {
                 Capability::Ocr,
                 Capability::Scene,
             ],
-            worker: Mutex::new(None),
+            workers: (0..MAX_WORKERS).map(|_| Mutex::new(None)).collect(),
+            overflow: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -233,21 +246,40 @@ impl VisionEngine {
         candidates.into_iter().find(|p| p.is_file())
     }
 
+    /// The worker slot to use for one photograph: the first free one.
+    ///
+    /// First-free rather than round-robin, so that a lone caller always lands
+    /// on the same process — which is what lets a worker be reused for 400
+    /// photographs — and concurrent callers each get a process of their own.
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Worker>> {
+        for slot in &self.workers {
+            match slot.try_lock() {
+                Ok(guard) => return guard,
+                // A caller panicked mid-exchange. The slot is still usable:
+                // whatever state its worker is in, a failed exchange replaces it.
+                Err(std::sync::TryLockError::Poisoned(p)) => return p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+            }
+        }
+        // More callers than slots: wait for one.
+        let i = self.overflow.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.workers.len();
+        self.workers[i].lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Send one path and read its result, restarting the worker once if the pipe
     /// has died (a crashed worker must not fail the whole run).
     fn exchange(&self, abs: &Path) -> Result<WorkerAnalysis> {
-        match self.exchange_once(abs) {
+        let mut slot = self.slot();
+        match self.exchange_once(&mut slot, abs) {
             Ok(v) => Ok(v),
             Err(_first) => {
-                *self.worker.lock().unwrap() = None;
-                self.exchange_once(abs)
+                *slot = None;
+                self.exchange_once(&mut slot, abs)
             }
         }
     }
 
-    fn exchange_once(&self, abs: &Path) -> Result<WorkerAnalysis> {
-        let mut guard = self.worker.lock().unwrap();
-
+    fn exchange_once(&self, guard: &mut Option<Worker>, abs: &Path) -> Result<WorkerAnalysis> {
         // Retire a worker that has done its shift before handing it more work.
         if guard.as_ref().is_some_and(|w| w.served >= MAX_PHOTOGRAPHS_PER_WORKER) {
             if let Some(mut old) = guard.take() {
@@ -373,12 +405,15 @@ impl VisionEngine {
 
 impl Drop for VisionEngine {
     fn drop(&mut self) {
-        if let Some(mut worker) = self.worker.lock().unwrap().take() {
-            // Closing stdin ends the worker's read loop; then reap it, under the
-            // same grace. A scan must be able to finish even if the worker
-            // cannot.
-            drop(worker.stdin);
-            crate::proc::shutdown_within(&mut worker.child, VisionEngine::shutdown_grace());
+        for slot in &self.workers {
+            let taken = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+            if let Some(mut worker) = taken {
+                // Closing stdin ends the worker's read loop; then reap it, under
+                // the same grace. A scan must be able to finish even if the
+                // worker cannot.
+                drop(worker.stdin);
+                crate::proc::shutdown_within(&mut worker.child, VisionEngine::shutdown_grace());
+            }
         }
     }
 }
@@ -754,6 +789,48 @@ done
         // The next request crosses the limit and must land on a new process.
         let after = engine.exchange(&file).unwrap().width;
         assert_ne!(after, first, "the worker should have been retired by now");
+    }
+
+    /// Photographs analysed at once each get a worker of their own (D-087).
+    ///
+    /// One pipe answers one photograph at a time, so four analysis threads
+    /// sharing a single worker would simply take turns, and parallel indexing
+    /// would be parallel everywhere except the part that takes the longest.
+    #[test]
+    fn concurrent_photographs_are_analysed_by_separate_workers_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atlasdrive-vision");
+        let script = r#"#!/bin/sh
+if [ "$1" = "--selftest" ]; then echo "atlasdrive-vision 1"; exit 0; fi
+while IFS= read -r _line; do
+  sleep 1
+  printf '{"ok":true,"error":null,"width":%s,"height":1,"faces":[],"labels":[],"ocr":"","print":[]}\n' "$$"
+done
+"#;
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let engine = engine_on_stub(path);
+        let file = dir.path().join("photo.jpg");
+        std::fs::File::create(&file).unwrap().write_all(b"x").unwrap();
+
+        let started = std::time::Instant::now();
+        let pids: Vec<u32> = std::thread::scope(|s| {
+            let handles: Vec<_> =
+                (0..4).map(|_| s.spawn(|| engine.exchange(&file).unwrap().width)).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let elapsed = started.elapsed();
+
+        let distinct: std::collections::HashSet<u32> = pids.iter().copied().collect();
+        assert_eq!(distinct.len(), 4, "each concurrent photograph needs its own worker: {pids:?}");
+        // Four one-second answers taken in turn would take four seconds.
+        assert!(elapsed < std::time::Duration::from_millis(3000), "not concurrent: {elapsed:?}");
+
+        // And a lone caller afterwards reuses a worker rather than starting one.
+        let again = engine.exchange(&file).unwrap().width;
+        assert!(distinct.contains(&again), "a lone caller must reuse an existing worker");
     }
 
     /// Retiring must not lose the request that triggered it.

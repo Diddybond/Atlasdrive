@@ -37,6 +37,8 @@ Required options and modes:
 - `--dry-run`
 - `--verify-only`
 - `--batch-size N`
+- `--workers N` — photographs analysed at once (default: half the cores, at
+  most four; `1` is one at a time). See D-087.
 - `--free-space-floor 20GB`
 - `--exclude PATTERN`
 - `--rebuild-faces`
@@ -56,6 +58,11 @@ atlasdrive verify --drive 14 --full
 ```
 
 Verifier exits zero only when all selected critical checks pass.
+
+`--drive N` limits the per-photograph checks — decoding each thumbnail,
+`stat`ing each original, decrypting each face embedding — to that drive. The
+catalogue-wide checks (database integrity, missing rows or hashes, queue
+consistency) always run over everything.
 
 ## Naming people
 

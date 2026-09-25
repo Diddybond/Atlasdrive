@@ -16,7 +16,9 @@ pub mod metadata;
 pub mod phash;
 pub mod thumbnail;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -187,6 +189,344 @@ impl Rescan {
     }
 }
 
+/// Deterministic file id so re-running is idempotent (no duplicate rows).
+fn file_id_for(drive_id: &str, root_id: &str, rel: &str) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(drive_id.as_bytes());
+    h.update(b"\0");
+    h.update(root_id.as_bytes());
+    h.update(b"\0");
+    h.update(rel.as_bytes());
+    // Format as a uuid-like hex so thumbnail sharding works.
+    h.finalize().to_hex().to_string()[..32].to_string()
+}
+
+/// A face found in a photograph, with everything the catalogue stores about it
+/// already worked out.
+struct PreparedFace {
+    detection: crate::ai::FaceDetection,
+    /// The identity embedding, and the model partition it belongs to.
+    vector: Vec<f32>,
+    model_id: String,
+    model_version: String,
+    /// A small JPEG of the face and its size, when it is big enough to show.
+    crop: Option<(Vec<u8>, u32, u32)>,
+}
+
+/// Everything about one photograph that can be worked out without the
+/// catalogue, ready to be written in one transaction.
+struct Analysed {
+    file_id: String,
+    snap: SourceSnapshot,
+    content_hash: String,
+    phash: String,
+    md: metadata::ImageMetadata,
+    color: crate::ai::ColorResult,
+    scene: crate::ai::SceneResult,
+    scan_art: crate::ai::ScanArtifactResult,
+    embedding: crate::ai::Provenanced<crate::ai::Embedding>,
+    date_est: dates::DateEstimate,
+    thumb: thumbnail::ThumbnailInfo,
+    faces: Vec<PreparedFace>,
+    ocr_text: Option<String>,
+    width: u32,
+    height: u32,
+}
+
+/// What reading a photograph concluded.
+enum Prepared {
+    /// Its bytes match a photograph this drive's catalogue has lost track of:
+    /// the same picture, moved (D-073). Nothing was decoded, because the
+    /// catalogue already knows everything about it.
+    Moved { abs: PathBuf, snap: SourceSnapshot, content_hash: String },
+    Analysed(Box<Analysed>),
+}
+
+/// The read-only half of indexing a photograph, shared by every analysis thread.
+///
+/// Reading, decoding and analysing a photograph is nearly all of the time it
+/// takes to index, and none of it needs the catalogue — so this holds nothing
+/// that touches it. The catalogue connection stays on the pipeline's thread: a
+/// rusqlite `Connection` cannot be shared between threads, and one writer loses
+/// nothing when each write is a few milliseconds against seconds of analysis
+/// (the same division as D-044).
+struct Analyst<'r> {
+    engines: &'r EngineRegistry,
+    paths: &'r AppPaths,
+    logger: &'r Logger,
+    cancel: &'r CancelToken,
+    root: &'r Path,
+    thumbs_dir: &'r Path,
+    thumbnail_max_edge: u32,
+    drive_id: &'r str,
+    /// Content hashes of this drive's `missing` rows, read once per run. Rows
+    /// only become `missing` while a run reconciles, before any photograph is
+    /// read, so the set cannot go stale in a way that loses a move.
+    moved_candidates: &'r HashSet<String>,
+    dry_run: bool,
+}
+
+impl Analyst<'_> {
+    /// Read one photograph and work out everything the catalogue will hold
+    /// about it. Never writes to the catalogue; never writes to the drive.
+    fn prepare(&self, item: &QueueItem) -> Result<Prepared> {
+        let abs = PathBuf::from(&item.abs_path);
+        // Containment: the queued path must still be inside the approved root.
+        let abs = scan::ensure_contained(self.root, &abs)?;
+
+        // 1. Pre-processing integrity snapshot.
+        let snap = SourceSnapshot::capture(&abs)?;
+
+        // 2. Content hash — before decoding, because it can settle whether this
+        //    file needs analysing at all.
+        let content_hash = integrity::content_hash(&abs)?;
+
+        // A file that moved is the same photograph.
+        //
+        // Re-scanning a drive from a different root records every path afresh,
+        // so a photograph first catalogued as `edits/x.jpg` reappears as
+        // `Aimee and Kent/edits/x.jpg`: the old row goes `missing` and the new
+        // path arrives as a stranger. Without this, the same picture would be
+        // decoded and analysed again, and — worse — its faces would exist
+        // twice, once on a row Reveal-in-Finder can never find. Names the
+        // owner had confirmed stay attached to the old faces, so the doubles
+        // would even disagree about who is in them. 758 photographs on a real
+        // drive sat in exactly this state.
+        //
+        // Content hash is identity here, as it already is for bit-rot
+        // detection and drive comparison. Adoption re-points the existing row
+        // at the new path; everything keyed by file id — faces, names, tags,
+        // embeddings, thumbnails, dates — simply remains true.
+        if !self.dry_run && self.moved_candidates.contains(&content_hash) {
+            return Ok(Prepared::Moved { abs, snap, content_hash });
+        }
+
+        self.analyse(item, &abs, snap, content_hash)
+            .map(|a| Prepared::Analysed(Box::new(a)))
+    }
+
+    /// Decode and analyse a photograph whose snapshot and hash are taken.
+    fn analyse(
+        &self,
+        item: &QueueItem,
+        abs: &Path,
+        snap: SourceSnapshot,
+        content_hash: String,
+    ) -> Result<Analysed> {
+        // 3. Decode read-only. Unsupported/broken decode is a recoverable error.
+        //    HEIC/HEIF go through the macOS system decoder (see `decode`).
+        let _ro = integrity::open_readonly(abs)?; // prove read-only open works
+        let rgb = decode::open_rgb(abs, &self.paths.cache_dir().join("decode"))?;
+        let (w, h) = (rgb.width(), rgb.height());
+
+        let phash = phash::dhash(&rgb);
+
+        // 4. Metadata.
+        let md = metadata::extract(abs, Some((w, h)));
+
+        // 5. AI analysis (all local, offline).
+        //
+        // Colour and scan-artefact analysis are cheap pixel statistics and always
+        // come from the heuristic engine. Everything that needs a model — the
+        // embedding, what the photograph shows, its text and its faces — comes
+        // from a single-pass analyser when one is registered (Apple Vision), and
+        // from the heuristic engine otherwise.
+        let cancel = self.cancel;
+        let color = self
+            .engines
+            .engine_for(Capability::Color)
+            .color(&rgb, cancel)?;
+        let scan_art = self
+            .engines
+            .engine_for(Capability::ScanArtifact)
+            .scan_artifact(&rgb, cancel)?;
+
+        let analyser = self.engines.file_analyser();
+        // A real model failing on one photograph must not fail the run; fall
+        // back to the heuristic engine for that file and carry on.
+        let analysis = match &analyser {
+            Some(engine) => match engine.analyse_file(abs, cancel) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    self.logger
+                        .warn("file_analysis_fallback")
+                        .field("path", item.relative_path.clone())
+                        .field("error", format!("{e}"))
+                        .emit_best_effort();
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let (embedding, faces, scene, ocr_text) = match analysis {
+            Some(a) => {
+                let meta = a.meta.clone();
+                let value = a.value;
+                let embedding = match value.embedding {
+                    Some(e) => crate::ai::Provenanced::new(e, meta.clone()),
+                    // An analyser that recognised the image but produced no
+                    // vector still leaves search working via the other engine.
+                    None => self
+                        .engines
+                        .engine_for(Capability::VisualEmbedding)
+                        .visual_embedding(&rgb, cancel)?,
+                };
+                let scene = match value.scene {
+                    Some(s) => crate::ai::Provenanced::new(s, meta.clone()),
+                    None => self.engines.engine_for(Capability::Scene).scene(&rgb, cancel)?,
+                };
+                let faces = crate::ai::Provenanced::new(value.faces, meta);
+                (embedding, faces, scene, value.ocr.map(|o| o.text))
+            }
+            None => {
+                let embedding = self
+                    .engines
+                    .engine_for(Capability::VisualEmbedding)
+                    .visual_embedding(&rgb, cancel)?;
+                let scene = self.engines.engine_for(Capability::Scene).scene(&rgb, cancel)?;
+                let faces = self
+                    .engines
+                    .engine_for(Capability::FaceDetection)
+                    .detect_faces(&rgb, cancel)?;
+                (embedding, faces, scene, None)
+            }
+        };
+
+        // Each face's identity embedding and crop. Prefer the embedding the
+        // analyser produced from the full-resolution original; only fall back
+        // to re-embedding the decoded copy when it did not provide one.
+        let face_engine = self.engines.engine_for(Capability::FaceEmbedding);
+        let mut prepared_faces = Vec::with_capacity(faces.value.len());
+        for f in faces.value {
+            let (vector, model_id, model_version) = match &f.embedding {
+                Some(v) => (v.clone(), faces.meta.model_id.clone(), faces.meta.model_version.clone()),
+                None => {
+                    let fe = face_engine.face_embedding(&rgb, &f, cancel)?;
+                    (fe.value.vector, fe.meta.model_id, fe.meta.model_version)
+                }
+            };
+            let crop = crop_face_image(&rgb, &f);
+            prepared_faces.push(PreparedFace { detection: f, vector, model_id, model_version, crop });
+        }
+
+        // 6. Date estimate.
+        let filename_year = dates::year_from_text(&item.relative_path);
+        let date_est = dates::estimate(&DateInputs {
+            exif_capture: md.exif_capture_date.clone(),
+            exif_digitized: md.exif_digitized_date.clone(),
+            fs_mtime_date: None,
+            filename_year,
+            likely_scanned_print: scan_art.value.likely_scanned_print,
+            is_grayscale: color.value.is_grayscale,
+        });
+
+        // 7. Thumbnail (generate + verify decode).
+        let file_id = file_id_for(self.drive_id, &item.root_id, &item.relative_path);
+        let thumb = thumbnail::generate(&rgb, self.thumbs_dir, &file_id, self.thumbnail_max_edge)?;
+        if !thumb.decode_ok {
+            return Err(Error::Other("thumbnail failed to decode".into()));
+        }
+
+        // 8. Re-stat the original and assert it is unchanged. HARD SAFETY GATE.
+        snap.assert_unchanged(abs)?;
+
+        Ok(Analysed {
+            file_id,
+            snap,
+            content_hash,
+            phash,
+            md,
+            color: color.value,
+            scene: scene.value,
+            scan_art: scan_art.value,
+            embedding,
+            date_est,
+            thumb,
+            faces: prepared_faces,
+            ocr_text,
+            width: w,
+            height: h,
+        })
+    }
+}
+
+/// Turn a caught panic into that photograph's failure.
+fn panic_to_error(payload: Box<dyn std::any::Any + Send>) -> Error {
+    let msg = payload
+        .downcast_ref::<&str>()
+        .map(|m| m.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown internal error".into());
+    Error::Other(format!("internal error: {msg}"))
+}
+
+/// Work through `items` on up to `workers` threads, handing each result to
+/// `on_result` on the calling thread as soon as it is ready.
+///
+/// Items are started in order, one per free thread. Nothing new is started
+/// once `stop` says so — it is asked before every item and while waiting — or
+/// once `on_result` returns `false`; results already in flight are still
+/// delivered, so a photograph that was fully read is never thrown away.
+///
+/// Returns the index of the first item never started (everything from there
+/// on was left untouched) and whether it was `stop` that ended the work.
+fn in_parallel<T: Sync, R: Send>(
+    items: &[T],
+    workers: usize,
+    stop: &(dyn Fn() -> bool + Sync),
+    work: &(dyn Fn(&T) -> R + Sync),
+    mut on_result: impl FnMut(usize, R) -> bool,
+) -> (usize, bool) {
+    let next = AtomicUsize::new(0);
+    let halt = AtomicBool::new(false);
+    let stopped = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, R)>();
+        for _ in 0..workers.clamp(1, items.len().max(1)) {
+            let tx = tx.clone();
+            let (next, halt, stopped) = (&next, &halt, &stopped);
+            s.spawn(move || loop {
+                if halt.load(Ordering::SeqCst) {
+                    break;
+                }
+                if stop() {
+                    stopped.store(true, Ordering::SeqCst);
+                    halt.store(true, Ordering::SeqCst);
+                    break;
+                }
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                if i >= items.len() {
+                    break;
+                }
+                if tx.send((i, work(&items[i]))).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(tx);
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok((i, r)) => {
+                    if !on_result(i, r) {
+                        halt.store(true, Ordering::SeqCst);
+                    }
+                }
+                // Every thread may be deep inside one slow photograph; a stop
+                // asked for meanwhile still stops anything new from starting.
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if !halt.load(Ordering::SeqCst) && stop() {
+                        stopped.store(true, Ordering::SeqCst);
+                        halt.store(true, Ordering::SeqCst);
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+    (next.load(Ordering::SeqCst).min(items.len()), stopped.load(Ordering::SeqCst))
+}
+
 /// Everything the pipeline needs to run.
 pub struct Pipeline<'a> {
     pub archive: &'a Connection,
@@ -346,6 +686,25 @@ impl<'a> Pipeline<'a> {
         // to claim more work from a drive that is no longer there.
         let mut disconnected: Option<String> = None;
 
+        // Photographs are read and analysed several at a time, and written to
+        // the catalogue one at a time, here, as each is ready (D-087).
+        let workers = opts.config.analysis_workers.max(1);
+        let moved_candidates =
+            if dry_run { HashSet::new() } else { self.missing_hashes(&drive.id)? };
+        let analyst = Analyst {
+            engines: &self.engines,
+            paths: self.paths,
+            logger: &self.logger,
+            cancel: &self.cancel,
+            root: &opts.path,
+            thumbs_dir: &thumbs_dir,
+            thumbnail_max_edge: opts.config.thumbnail_max_edge,
+            drive_id: &drive.id,
+            moved_candidates: &moved_candidates,
+            dry_run,
+        };
+        let (cancel, paths) = (&self.cancel, self.paths);
+
         loop {
             // Two ways to be asked to stop, checked in the same place.
             //
@@ -406,51 +765,72 @@ impl<'a> Pipeline<'a> {
             };
             let mut batch_success = 0u64;
             let mut batch_failure = 0u64;
+            // What this batch wrote, for the verifier to read back.
+            let mut batch_file_ids: Vec<String> = Vec::new();
+            // An error that ends the run: a hard safety halt, or the queue
+            // itself failing to record what happened.
+            let mut fatal: Option<Error> = None;
 
-            for item in &batch {
-                // Stop is answered between photographs, not only between
-                // batches. Every commit is per-file and atomic, so stopping
-                // here is exactly as safe as stopping at the batch boundary —
-                // and a batch of 64 large TIFFs can take an hour, which is
-                // how "stop at the next batch boundary" became "carry on for
-                // an hour after being told to stop" on a real drive. The
-                // unfinished lease simply expires and the file is redone next
-                // run.
-                if self.cancel.is_cancelled() || crate::stop::requested_since(self.paths, run_started_at) {
-                    logger.warn("cancelled").emit_best_effort();
-                    interrupted = true;
-                    break;
+            // Stop is answered between photographs, not only between batches.
+            // Every commit is per-file and atomic, so stopping there is exactly
+            // as safe as stopping at the batch boundary — and a batch of 64
+            // large TIFFs can take an hour, which is how "stop at the next
+            // batch boundary" became "carry on for an hour after being told to
+            // stop" on a real drive. Photographs already being read are
+            // finished and kept; nothing new is started.
+            // Named people, decrypted once for the batch rather than once per
+            // face. Someone named mid-batch is recognised from the next one.
+            let exemplars = if dry_run {
+                crate::faces::PersonExemplars::default()
+            } else {
+                FaceRepo::new(self.archive).person_exemplars(self.key)?
+            };
+            let stop_seen = AtomicBool::new(false);
+            let should_stop = || {
+                let stop = cancel.is_cancelled() || crate::stop::requested_since(paths, run_started_at);
+                if stop {
+                    stop_seen.store(true, Ordering::SeqCst);
                 }
-                // A panic while processing one photograph is that
-                // photograph's failure, never the run's. Without this, a
-                // slice-index bug tripped by OCR text in one folder crashed
-                // the whole scan every couple of minutes, and before crashes
-                // were caught at the thread boundary it froze the app for two
-                // days. Per-file commits make unwinding here safe: the file's
-                // transaction either committed or it did not.
-                let processed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.process_file(opts, &drive, item, &opts.path, &thumbs_dir, dry_run)
-                }))
-                .unwrap_or_else(|payload| {
-                    let msg = payload
-                        .downcast_ref::<&str>()
-                        .map(|m| m.to_string())
-                        .or_else(|| payload.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "unknown internal error".into());
-                    Err(Error::Other(format!("internal error: {msg}")))
+                stop
+            };
+            // A panic while processing one photograph is that photograph's
+            // failure, never the run's. Without this, a slice-index bug tripped
+            // by OCR text in one folder crashed the whole scan every couple of
+            // minutes, and before crashes were caught at the thread boundary it
+            // froze the app for two days. Per-file commits make unwinding safe:
+            // the file's transaction either committed or it did not.
+            let work = |item: &QueueItem| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| analyst.prepare(item)))
+                    .unwrap_or_else(|p| Err(panic_to_error(p)))
+            };
+
+            let (first_unstarted, stop_asked) = in_parallel(&batch, workers, &should_stop, &work, |i, prepared| {
+                let item = &batch[i];
+                // Nothing is written once the run is halting.
+                if fatal.is_some() {
+                    return false;
+                }
+                let processed = prepared.and_then(|p| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.commit_prepared(&analyst, &drive, item, p, &exemplars, dry_run)
+                    }))
+                    .unwrap_or_else(|p| Err(panic_to_error(p)))
                 });
-                match processed {
-                    Ok(rel) => {
+                // After a stop or an unplug, a photograph still being read when
+                // it happened most likely failed *because* of it.
+                let winding_down = disconnected.is_some() || stop_seen.load(Ordering::SeqCst);
+                let queue_result = match processed {
+                    Ok((rel, file_id)) => {
                         batch_success += 1;
                         summary.files_done += 1;
                         progress.last_completed_file = Some(rel);
-                        if !dry_run {
-                            q.complete(&item.id)?;
-                        }
+                        batch_file_ids.push(file_id);
+                        let done = if dry_run { Ok(()) } else { q.complete(&item.id) };
                         publish(&mut progress, &summary, batch_no, self.paths, dry_run);
                         if !dry_run {
                             self.beat(&run_id);
                         }
+                        done
                     }
                     Err(e) if e.is_hard_halt() => {
                         // Immediate hard halt (integrity, unsafe path, network...).
@@ -460,17 +840,8 @@ impl<'a> Pipeline<'a> {
                             .code(format!("{}", e.exit_code()))
                             .field("error", format!("{e}"))
                             .emit_best_effort();
-                        progress.files_done = summary.files_done;
-                        progress.files_failed = summary.files_failed;
-                        progress.status = "halted".into();
-                        progress.touch();
-                        if !dry_run {
-                            progress.write(self.paths)?;
-                        }
-                        summary.halted = true;
-                        summary.halt_reason = Some(format!("{e}"));
-                        self.finish_run(&run_id, "halted", &summary)?;
-                        return Err(e);
+                        fatal = Some(e);
+                        return false;
                     }
                     Err(Error::DriveDisconnected(reason)) => {
                         // The drive left. Everything still queued lives on it,
@@ -487,12 +858,12 @@ impl<'a> Pipeline<'a> {
                             .relative_path(item.relative_path.clone())
                             .field("reason", reason.clone())
                             .emit_best_effort();
-                        if !dry_run {
-                            q.release(&item.id)?;
-                        }
                         disconnected = Some(reason);
-                        interrupted = true;
-                        break;
+                        if dry_run { Ok(()) } else { q.release(&item.id) }
+                    }
+                    // Handed back unspent, not counted against the photograph.
+                    Err(_) if winding_down => {
+                        if dry_run { Ok(()) } else { q.release(&item.id) }
                     }
                     Err(e) => {
                         // Recoverable file-level failure: record and requeue.
@@ -505,9 +876,11 @@ impl<'a> Pipeline<'a> {
                             .field("error", format!("{e}"))
                             .field("retryable", retryable)
                             .emit_best_effort();
-                        if !dry_run {
-                            q.fail(&item.id, "PROCESS", &format!("{e}"), retryable)?;
-                        }
+                        let recorded = if dry_run {
+                            Ok(())
+                        } else {
+                            q.fail(&item.id, "PROCESS", &format!("{e}"), retryable)
+                        };
                         // A failure is news too. Without this the heartbeat only
                         // beats on success, so a run of files that each take
                         // minutes to fail — a wedged decoder times out at ten —
@@ -518,6 +891,41 @@ impl<'a> Pipeline<'a> {
                         if !dry_run {
                             self.beat(&run_id);
                         }
+                        recorded
+                    }
+                };
+                if let Err(e) = queue_result {
+                    fatal = Some(e);
+                    return false;
+                }
+                disconnected.is_none()
+            });
+
+            if let Some(e) = fatal {
+                if e.is_hard_halt() {
+                    progress.files_done = summary.files_done;
+                    progress.files_failed = summary.files_failed;
+                    progress.status = "halted".into();
+                    progress.touch();
+                    if !dry_run {
+                        progress.write(self.paths)?;
+                    }
+                    summary.halted = true;
+                    summary.halt_reason = Some(format!("{e}"));
+                    self.finish_run(&run_id, "halted", &summary)?;
+                }
+                return Err(e);
+            }
+            if stop_asked {
+                logger.warn("cancelled").emit_best_effort();
+            }
+            if stop_asked || disconnected.is_some() {
+                interrupted = true;
+                // Photographs never started go straight back to the queue,
+                // unspent, rather than waiting out a lease.
+                if !dry_run {
+                    for item in &batch[first_unstarted..] {
+                        q.release(&item.id)?;
                     }
                 }
             }
@@ -531,43 +939,17 @@ impl<'a> Pipeline<'a> {
             let elapsed = batch_started.elapsed().as_secs_f64().max(1e-6);
             let throughput = batch.len() as f64 / elapsed;
 
-            // Per-batch verification.
+            // Per-batch verification of what this batch wrote.
             if !dry_run {
-                let report = self.verify_batch(opts, throughput)?;
-                if report.has_halt() {
-                    logger
-                        .error("verifier_halt")
-                        .field("summary", report.summary())
-                        .emit_best_effort();
-                    progress.status = "halted".into();
-                    progress.write(self.paths)?;
-                    summary.halted = true;
-                    summary.halt_reason = Some(report.summary());
-                    self.write_report(&run_id, &report)?;
-                    self.finish_run(&run_id, "halted", &summary)?;
-                    return Err(Error::VerifierFailure(report.summary()));
-                }
-                if !report.ok() {
-                    consecutive_verifier_failures += 1;
-                    progress.consecutive_verifier_failures = consecutive_verifier_failures;
-                    logger
-                        .warn("verifier_failure")
-                        .batch(batch_no)
-                        .field("consecutive", consecutive_verifier_failures)
-                        .emit_best_effort();
-                    if consecutive_verifier_failures >= opts.config.max_consecutive_verifier_failures {
-                        self.write_report(&run_id, &report)?;
-                        progress.status = "halted".into();
-                        progress.write(self.paths)?;
-                        summary.halted = true;
-                        summary.halt_reason = Some("repeated verifier failure".into());
-                        self.finish_run(&run_id, "halted", &summary)?;
-                        return Err(Error::RepeatedVerifierFailure(report.summary()));
-                    }
-                } else {
-                    consecutive_verifier_failures = 0;
-                    progress.consecutive_verifier_failures = 0;
-                }
+                let report = self.verify_batch(
+                    opts,
+                    throughput,
+                    crate::verifier::Scope::Files(&batch_file_ids),
+                )?;
+                self.act_on_report(
+                    &report, opts, &run_id, batch_no, &logger,
+                    &mut consecutive_verifier_failures, &mut progress, &mut summary,
+                )?;
             }
 
             // Persist progress + append a batch log line.
@@ -628,6 +1010,32 @@ impl<'a> Pipeline<'a> {
             }
             self.finish_run(&run_id, "interrupted", &summary)?;
         } else if !summary.halted {
+            // Every photograph on the drive, read back once more now the run
+            // is over. Batches verify only what they wrote (D-087); this is
+            // what still notices a thumbnail lost, or an original changed,
+            // after its own batch had passed. Linear in the drive, once per
+            // scan, where the old per-batch sweep was quadratic in the archive.
+            if !dry_run {
+                let report = self.verify_batch(
+                    opts,
+                    f64::NAN,
+                    crate::verifier::Scope::Drive(&drive.id),
+                )?;
+                logger
+                    .info("drive_verified")
+                    .field("summary", report.summary())
+                    .emit_best_effort();
+                // Anything short of a pass is written down, even when the
+                // failure policy lets the run finish: this is the last look at
+                // the drive before the owner is told it can be unplugged.
+                if !report.ok() {
+                    self.write_report(&run_id, &report)?;
+                }
+                self.act_on_report(
+                    &report, opts, &run_id, summary.batches, &logger,
+                    &mut consecutive_verifier_failures, &mut progress, &mut summary,
+                )?;
+            }
             progress.status = "complete".into();
             progress.touch();
             if !dry_run {
@@ -661,9 +1069,22 @@ impl<'a> Pipeline<'a> {
         Ok(summary)
     }
 
+    /// Content hashes of this drive's photographs that are recorded as
+    /// `missing` — the ones a moved file could turn out to be.
+    fn missing_hashes(&self, drive_id: &str) -> Result<HashSet<String>> {
+        let mut stmt = self.archive.prepare(
+            "SELECT content_hash FROM files
+              WHERE drive_id = ?1 AND status = 'missing' AND content_hash IS NOT NULL",
+        )?;
+        let hashes = stmt
+            .query_map([drive_id], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<HashSet<_>, _>>()?;
+        Ok(hashes)
+    }
+
     /// Re-point a `missing` catalogue row at a file that has reappeared
-    /// elsewhere on the same drive. Returns the new relative path when a row
-    /// was adopted, `None` when this really is a new photograph.
+    /// elsewhere on the same drive. Returns the adopted row's file id, `None`
+    /// when this really is a new photograph.
     fn adopt_relocated_file(
         &self,
         drive: &crate::drive::Drive,
@@ -705,223 +1126,72 @@ impl<'a> Pipeline<'a> {
             .info("file_relocated")
             .field("path", item.relative_path.clone())
             .emit_best_effort();
-        Ok(Some(item.relative_path.clone()))
+        Ok(Some(file_id))
     }
 
-    /// Process one file: full read-only analysis and atomic commit.
-    /// Returns the relative path on success.
-    fn process_file(
+    /// Write one prepared photograph to the catalogue, atomically.
+    ///
+    /// Runs on the pipeline's own thread — the only one holding the catalogue
+    /// connection. Returns the relative path and the file id that were written.
+    fn commit_prepared(
         &self,
-        opts: &IndexOptions,
+        analyst: &Analyst,
         drive: &crate::drive::Drive,
         item: &QueueItem,
-        root: &Path,
-        thumbs_dir: &Path,
+        prepared: Prepared,
+        exemplars: &crate::faces::PersonExemplars,
         dry_run: bool,
-    ) -> Result<String> {
-        let abs = PathBuf::from(&item.abs_path);
-        // Containment: the queued path must still be inside the approved root.
-        let abs = scan::ensure_contained(root, &abs)?;
-
-        // 1. Pre-processing integrity snapshot.
-        let snap = SourceSnapshot::capture(&abs)?;
-
-        // 2. Content hash — before decoding, because it can settle whether this
-        //    file needs analysing at all.
-        let content_hash = integrity::content_hash(&abs)?;
-
-        // A file that moved is the same photograph.
-        //
-        // Re-scanning a drive from a different root records every path afresh,
-        // so a photograph first catalogued as `edits/x.jpg` reappears as
-        // `Aimee and Kent/edits/x.jpg`: the old row goes `missing` and the new
-        // path arrives as a stranger. Without this, the same picture would be
-        // decoded and analysed again, and — worse — its faces would exist
-        // twice, once on a row Reveal-in-Finder can never find. Names the
-        // owner had confirmed stay attached to the old faces, so the doubles
-        // would even disagree about who is in them. 758 photographs on a real
-        // drive sat in exactly this state.
-        //
-        // Content hash is identity here, as it already is for bit-rot
-        // detection and drive comparison. Adoption re-points the existing row
-        // at the new path; everything keyed by file id — faces, names, tags,
-        // embeddings, thumbnails, dates — simply remains true.
-        if !dry_run {
-            if let Some(adopted) =
-                self.adopt_relocated_file(drive, item, &snap, &content_hash)?
-            {
-                return Ok(adopted);
-            }
-        }
-
-        // 3. Decode read-only. Unsupported/broken decode is a recoverable error.
-        //    HEIC/HEIF go through the macOS system decoder (see `decode`).
-        let _ro = integrity::open_readonly(&abs)?; // prove read-only open works
-        let rgb = decode::open_rgb(&abs, &self.paths.cache_dir().join("decode"))?;
-        let (w, h) = (rgb.width(), rgb.height());
-
-        let phash = phash::dhash(&rgb);
-
-        // 4. Metadata.
-        let md = metadata::extract(&abs, Some((w, h)));
-
-        // 5. AI analysis (all local, offline).
-        //
-        // Colour and scan-artefact analysis are cheap pixel statistics and always
-        // come from the heuristic engine. Everything that needs a model — the
-        // embedding, what the photograph shows, its text and its faces — comes
-        // from a single-pass analyser when one is registered (Apple Vision), and
-        // from the heuristic engine otherwise.
-        let cancel = &self.cancel;
-        let color = self
-            .engines
-            .engine_for(Capability::Color)
-            .color(&rgb, cancel)?;
-        let scan_art = self
-            .engines
-            .engine_for(Capability::ScanArtifact)
-            .scan_artifact(&rgb, cancel)?;
-
-        let analyser = self.engines.file_analyser();
-        // A real model failing on one photograph must not fail the run; fall
-        // back to the heuristic engine for that file and carry on.
-        let analysis = match &analyser {
-            Some(engine) => match engine.analyse_file(&abs, cancel) {
-                Ok(a) => Some(a),
-                Err(e) => {
-                    self.logger
-                        .warn("file_analysis_fallback")
-                        .field("path", item.relative_path.clone())
-                        .field("error", format!("{e}"))
-                        .emit_best_effort();
-                    None
+    ) -> Result<(String, String)> {
+        let analysed = match prepared {
+            Prepared::Moved { abs, snap, content_hash } => {
+                if let Some(file_id) =
+                    self.adopt_relocated_file(drive, item, &snap, &content_hash)?
+                {
+                    return Ok((item.relative_path.clone(), file_id));
                 }
-            },
-            None => None,
-        };
-
-        let (embedding, faces, scene, ocr_text) = match analysis {
-            Some(a) => {
-                let meta = a.meta.clone();
-                let value = a.value;
-                let embedding = match value.embedding {
-                    Some(e) => crate::ai::Provenanced::new(e, meta.clone()),
-                    // An analyser that recognised the image but produced no
-                    // vector still leaves search working via the other engine.
-                    None => self
-                        .engines
-                        .engine_for(Capability::VisualEmbedding)
-                        .visual_embedding(&rgb, cancel)?,
-                };
-                let scene = match value.scene {
-                    Some(s) => crate::ai::Provenanced::new(s, meta.clone()),
-                    None => self.engines.engine_for(Capability::Scene).scene(&rgb, cancel)?,
-                };
-                let faces = crate::ai::Provenanced::new(value.faces, meta);
-                (embedding, faces, scene, value.ocr.map(|o| o.text))
+                // Another photograph in this run has already claimed that row —
+                // two copies of one moved picture — so this one is new after all.
+                analyst.analyse(item, &abs, snap, content_hash)?
             }
-            None => {
-                let embedding = self
-                    .engines
-                    .engine_for(Capability::VisualEmbedding)
-                    .visual_embedding(&rgb, cancel)?;
-                let scene = self.engines.engine_for(Capability::Scene).scene(&rgb, cancel)?;
-                let faces = self
-                    .engines
-                    .engine_for(Capability::FaceDetection)
-                    .detect_faces(&rgb, cancel)?;
-                (embedding, faces, scene, None)
-            }
+            Prepared::Analysed(a) => *a,
         };
-        let face_engine = self.engines.engine_for(Capability::FaceEmbedding);
-
-        // 6. Date estimate.
-        let filename_year = dates::year_from_text(&item.relative_path);
-        let date_est = dates::estimate(&DateInputs {
-            exif_capture: md.exif_capture_date.clone(),
-            exif_digitized: md.exif_digitized_date.clone(),
-            fs_mtime_date: None,
-            filename_year,
-            likely_scanned_print: scan_art.value.likely_scanned_print,
-            is_grayscale: color.value.is_grayscale,
-        });
-
-        // 7. Thumbnail (generate + verify decode).
-        let file_id = self.file_id_for(&drive.id, &item.root_id, &item.relative_path);
-        let thumb = thumbnail::generate(&rgb, thumbs_dir, &file_id, opts.config.thumbnail_max_edge)?;
-        if !thumb.decode_ok {
-            return Err(Error::Other("thumbnail failed to decode".into()));
-        }
-
-        // 8. Re-stat the original and assert it is unchanged. HARD SAFETY GATE.
-        snap.assert_unchanged(&abs)?;
 
         if dry_run {
             // Report the proposed record; write nothing to the catalogue.
             println!(
                 "[dry-run] {} | {}x{} | phash={} | faces={} | {} | date={}",
                 item.relative_path,
-                w,
-                h,
-                phash,
-                faces.value.len(),
-                scene.value.description,
-                dates::describe(&date_est)
+                analysed.width,
+                analysed.height,
+                analysed.phash,
+                analysed.faces.len(),
+                analysed.scene.description,
+                dates::describe(&analysed.date_est)
             );
-            return Ok(item.relative_path.clone());
+            return Ok((item.relative_path.clone(), analysed.file_id));
         }
 
         // 9. Atomic commit to archive.db.
         let tx = self.archive.unchecked_transaction()?;
-        self.commit_file(
-            &tx, &file_id, drive, item, &snap, &content_hash, &phash, &md, &color.value,
-            &scene.value, &scan_art.value, &embedding, &date_est, &thumb, &faces.value,
-            &(faces.meta.model_id.clone(), faces.meta.model_version.clone()),
-            ocr_text.as_deref(), &rgb,
-            &face_engine, cancel,
-        )?;
+        self.commit_file(&tx, drive, item, &analysed, exemplars)?;
         tx.commit()?;
 
-        Ok(item.relative_path.clone())
+        Ok((item.relative_path.clone(), analysed.file_id))
     }
 
-    /// Deterministic file id so re-running is idempotent (no duplicate rows).
-    fn file_id_for(&self, drive_id: &str, root_id: &str, rel: &str) -> String {
-        let mut h = blake3::Hasher::new();
-        h.update(drive_id.as_bytes());
-        h.update(b"\0");
-        h.update(root_id.as_bytes());
-        h.update(b"\0");
-        h.update(rel.as_bytes());
-        // Format as a uuid-like hex so thumbnail sharding works.
-        h.finalize().to_hex().to_string()[..32].to_string()
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn commit_file(
         &self,
         tx: &Connection,
-        file_id: &str,
         drive: &crate::drive::Drive,
         item: &QueueItem,
-        snap: &SourceSnapshot,
-        content_hash: &str,
-        phash: &str,
-        md: &metadata::ImageMetadata,
-        color: &crate::ai::ColorResult,
-        scene: &crate::ai::SceneResult,
-        scan_art: &crate::ai::ScanArtifactResult,
-        embedding: &crate::ai::Provenanced<crate::ai::Embedding>,
-        date_est: &dates::DateEstimate,
-        thumb: &thumbnail::ThumbnailInfo,
-        faces: &[crate::ai::FaceDetection],
-        // (model_id, model_version) of the analyser that produced the faces.
-        analysis_model: &(String, String),
-        ocr_text: Option<&str>,
-        rgb: &image::RgbImage,
-        face_engine: &Arc<dyn crate::ai::AiEngine>,
-        cancel: &CancelToken,
+        a: &Analysed,
+        exemplars: &crate::faces::PersonExemplars,
     ) -> Result<()> {
+        let file_id = a.file_id.as_str();
+        let (snap, md, color, scene, scan_art, embedding, date_est, thumb) = (
+            &a.snap, &a.md, &a.color, &a.scene, &a.scan_art, &a.embedding, &a.date_est, &a.thumb,
+        );
+        let (content_hash, phash, ocr_text) = (&a.content_hash, &a.phash, a.ocr_text.as_deref());
         let now = now_iso8601();
         let filename = Path::new(&item.relative_path)
             .file_name()
@@ -1046,42 +1316,32 @@ impl<'a> Pipeline<'a> {
         // faces + encrypted embeddings. Clear prior faces for idempotency.
         tx.execute("DELETE FROM faces WHERE file_id=?1", [file_id])?;
         let face_repo = FaceRepo::new(tx);
-        for f in faces {
-            // Prefer the identity embedding the analyser produced from the
-            // full-resolution original; only fall back to re-embedding the
-            // decoded copy when it did not provide one.
-            let (vector, model_id, model_version) = match &f.embedding {
-                Some(v) => (v.clone(), analysis_model.0.clone(), analysis_model.1.clone()),
-                None => {
-                    let fe = face_engine.face_embedding(rgb, f, cancel)?;
-                    (fe.value.vector, fe.meta.model_id, fe.meta.model_version)
-                }
-            };
+        for f in &a.faces {
+            let d = &f.detection;
             let face_id = face_repo.insert_face(
                 file_id,
-                (f.x, f.y, f.w, f.h),
-                f.quality,
-                &model_id,
-                &model_version,
-                &vector,
+                (d.x, d.y, d.w, d.h),
+                d.quality,
+                &f.model_id,
+                &f.model_version,
+                &f.vector,
                 self.key,
             )?;
 
             // A small crop of the face, kept locally so the gallery is browsable
             // with every drive unplugged. Encrypted, like the embedding.
-            if let Some((png, w, h)) = crop_face_image(rgb, f) {
-                face_repo.store_thumbnail(&face_id, &png, w, h, self.key)?;
+            if let Some((jpeg, w, h)) = &f.crop {
+                face_repo.store_thumbnail(&face_id, jpeg, *w, *h, self.key)?;
             }
 
             // Recognise people the user has already named. This is only ever a
             // suggestion — naming stays a human decision (D-007).
-            if let Some(hit) = face_repo.suggest_person(
-                &vector,
-                &model_id,
-                &model_version,
-                self.key,
+            if let Some(hit) = exemplars.best_match(
+                &f.vector,
+                &f.model_id,
+                &f.model_version,
                 crate::faces::PERSON_MATCH_THRESHOLD,
-            )? {
+            ) {
                 face_repo.suggest_face_is_person(&face_id, &hit.person_id, hit.score)?;
             }
         }
@@ -1166,25 +1426,80 @@ impl<'a> Pipeline<'a> {
         Ok(id)
     }
 
-    fn verify_batch(&self, opts: &IndexOptions, throughput: f64) -> Result<crate::verifier::VerifierReport> {
+    fn verify_batch(
+        &self,
+        opts: &IndexOptions,
+        throughput: f64,
+        scope: crate::verifier::Scope,
+    ) -> Result<crate::verifier::VerifierReport> {
         let ctx = crate::verifier::VerifyContext {
             archive: self.archive,
             queue: Some(self.queue),
             paths: self.paths,
             config: &opts.config,
             key: Some(self.key),
-            face_model: (
-                crate::ai::local::MODEL_ID.to_string(),
-                crate::ai::local::MODEL_VERSION.to_string(),
-            ),
             observed_throughput: Some(throughput),
             network_blocked_attempts: net::blocked_attempts(),
         };
-        crate::verifier::run(&ctx)
+        crate::verifier::run_scoped(&ctx, scope)
+    }
+
+    /// Apply the failure policy (`docs/13`) to a verifier report.
+    ///
+    /// A halting check ends the run at once; a failing one is tolerated until
+    /// `max_consecutive_verifier_failures` in a row, then ends it with a
+    /// report. `Err` means the run is over and has been recorded as halted.
+    #[allow(clippy::too_many_arguments)]
+    fn act_on_report(
+        &self,
+        report: &crate::verifier::VerifierReport,
+        opts: &IndexOptions,
+        run_id: &str,
+        batch_no: u64,
+        logger: &Logger,
+        consecutive_verifier_failures: &mut u32,
+        progress: &mut Progress,
+        summary: &mut IndexSummary,
+    ) -> Result<()> {
+        if report.has_halt() {
+            logger
+                .error("verifier_halt")
+                .field("summary", report.summary())
+                .emit_best_effort();
+            progress.status = "halted".into();
+            progress.write(self.paths)?;
+            summary.halted = true;
+            summary.halt_reason = Some(report.summary());
+            self.write_report(run_id, report)?;
+            self.finish_run(run_id, "halted", summary)?;
+            return Err(Error::VerifierFailure(report.summary()));
+        }
+        if report.ok() {
+            *consecutive_verifier_failures = 0;
+            progress.consecutive_verifier_failures = 0;
+            return Ok(());
+        }
+        *consecutive_verifier_failures += 1;
+        progress.consecutive_verifier_failures = *consecutive_verifier_failures;
+        logger
+            .warn("verifier_failure")
+            .batch(batch_no)
+            .field("consecutive", *consecutive_verifier_failures)
+            .emit_best_effort();
+        if *consecutive_verifier_failures >= opts.config.max_consecutive_verifier_failures {
+            self.write_report(run_id, report)?;
+            progress.status = "halted".into();
+            progress.write(self.paths)?;
+            summary.halted = true;
+            summary.halt_reason = Some("repeated verifier failure".into());
+            self.finish_run(run_id, "halted", summary)?;
+            return Err(Error::RepeatedVerifierFailure(report.summary()));
+        }
+        Ok(())
     }
 
     fn run_verify_only(&self, opts: &IndexOptions) -> Result<IndexSummary> {
-        let report = self.verify_batch(opts, f64::NAN)?;
+        let report = self.verify_batch(opts, f64::NAN, crate::verifier::Scope::Catalogue)?;
         self.write_report("verify-only", &report)?;
         if !report.ok() {
             return Err(Error::VerifierFailure(report.summary()));
@@ -1318,6 +1633,10 @@ impl<'a> Pipeline<'a> {
 
         let mut out = Rescan::default();
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        // One transaction for the whole reconciliation: a drive re-scanned from
+        // a different root marks every photograph on it, and one commit per row
+        // is one disk sync per row.
+        let tx = self.archive.unchecked_transaction()?;
 
         for (file, mtime) in discovered {
             seen.insert(file.relative_path.as_str());
@@ -1355,6 +1674,7 @@ impl<'a> Pipeline<'a> {
             out.missing += 1;
         }
 
+        tx.commit()?;
         Ok(out)
     }
 

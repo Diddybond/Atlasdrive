@@ -129,6 +129,25 @@ pub struct Config {
     pub min_throughput_files_per_sec: f64,
     /// Consecutive verifier failures tolerated before a hard halt.
     pub max_consecutive_verifier_failures: u32,
+    /// Photographs analysed at once. Reading, decoding and analysing run on
+    /// this many threads (and, on a Mac, this many Vision workers); writing to
+    /// the catalogue stays on one. `1` is the old one-at-a-time pipeline.
+    #[serde(default = "default_analysis_workers")]
+    pub analysis_workers: usize,
+}
+
+/// Half the machine's cores, between one and four.
+///
+/// Half, because each photograph is analysed twice over — once in Rust for the
+/// thumbnail and pixel statistics, once by the Vision worker — and the owner is
+/// usually using the Mac while a drive indexes overnight. Four at most, because
+/// each in-flight photograph can hold a large decode in memory and a Vision
+/// worker has been seen to grow to tens of gigabytes before retirement (D-064).
+pub fn default_analysis_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() / 2)
+        .unwrap_or(1)
+        .clamp(1, 4)
 }
 
 impl Default for Config {
@@ -141,6 +160,7 @@ impl Default for Config {
             thumbnail_max_edge: 512,
             min_throughput_files_per_sec: 0.10,
             max_consecutive_verifier_failures: 3,
+            analysis_workers: default_analysis_workers(),
         }
     }
 }

@@ -60,10 +60,6 @@ fn main() -> ExitCode {
         paths: &paths,
         config: &config,
         key: key.as_ref(),
-        face_model: (
-            family_archive_core::ai::local::MODEL_ID.to_string(),
-            family_archive_core::ai::local::MODEL_VERSION.to_string(),
-        ),
         observed_throughput: None,
         network_blocked_attempts: 0,
     };

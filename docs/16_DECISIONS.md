@@ -2360,3 +2360,98 @@ on one drive, and a guard that gets liveness wrong locks the owner out of their
 own archive. Recorded in `.project-state/next.md` rather than guessed at.
 
 **Supersedes:** None. Extends D-085 from the progress file to the catalogue.
+
+## D-087 — Indexing is parallel, and a batch verifies what it wrote
+
+**Status:** settled. Supersedes the "parallelising was considered and left
+alone" paragraph of D-045, at the owner's request to rethink how the app could
+work better.
+
+**Context.** D-045 declined parallel indexing because the owner's constraint was
+knowing when a drive is done, not speed. That was weighed against a night or
+two per drive. The owner's archive is twenty drives and roughly 200,000
+photographs, and at the measured 0.27–0.36 files/sec that is about seven days
+of continuous indexing. Measuring why it was that slow found three separate
+costs, only one of which was the model:
+
+1. **The per-batch verifier re-read the whole archive.** After every
+   64-photograph batch, `verify_batch` ran the full verifier: it decoded every
+   thumbnail ever made, `stat`ed every original on every connected drive and
+   decrypted every face embedding. That cost grows with the catalogue, so a
+   whole archive pays it quadratically. Measured on 3,000 synthetic photographs:
+   0.5s per batch at 400 photographs, 3.4s at 2,944, a steady ~1.1ms per
+   catalogued photograph per batch. Extrapolated to 200,000 photographs that is
+   about four days of verification alone, on a fast SSD.
+2. **Rust and Vision took turns.** For a 24-megapixel photograph the Rust side
+   (decode, thumbnail, hash, colour and scan statistics) measured ~1.6s, all of
+   it done *before* the Vision worker was asked for its ~3s, never alongside it.
+3. **The thumbnail was the largest Rust cost.** Lanczos over the full 24MP
+   grid: 632ms per photograph.
+
+**Decision.**
+
+- *Batch verification is scoped.* `verifier::run_scoped` takes a `Scope`
+  (`Catalogue`, `Drive`, `Files`). Checks that are a single SQL query over the
+  catalogue (database integrity, catalogue rows, hashes, thumbnail rows, path
+  containment, queue consistency) still run catalogue-wide every batch, so a
+  defect anywhere is still seen by every batch and the three-consecutive-failures
+  gate is unchanged. The per-photograph checks (thumbnail decode and checksum,
+  original stat, face embeddings) read the batch's own photographs. When a run
+  finishes, every photograph on the drive is verified once more
+  (`Scope::Drive`), and anything short of a pass leaves a report.
+  `atlasdrive verify`, verify-only and the standalone verifier stay full;
+  `atlasdrive verify --drive N` now does what its flag always promised.
+- *The face check reads every model partition.* Every caller asked it about
+  the heuristic engine's partition, so on a Mac, where faces come from Apple
+  Vision, it read no embeddings at all and passed. It now groups by
+  `(model_id, model_version)` and judges each on its own.
+- *Analysis runs on several threads; the catalogue has one writer.*
+  `Analyst::prepare` does everything that needs no database (containment,
+  snapshot, content hash, decode, analysis, face embeddings and crops,
+  thumbnail, the final re-stat) and runs on `Config::analysis_workers` threads.
+  Each result is committed, one transaction per photograph as before, on the
+  pipeline's thread, which holds the only connection (the D-044 division).
+  The default is half the cores, between one and four; `--workers N` overrides
+  it and `--workers 1` is the old pipeline.
+- *Vision keeps a small pool of workers.* One process answers one photograph
+  at a time, so `VisionEngine` holds up to eight slots, filled only when used,
+  and each call takes the first free one. A lone caller always lands on the
+  same process, so reuse and the 400-photograph retirement (D-064) are
+  unchanged per process.
+- *Thumbnails shrink in two steps* when the photograph is over four times the
+  target: an area average to twice the target, then Lanczos. 632ms → 78ms on
+  24MP, within 3/255 mean difference of the direct resize (tested).
+- *Named people are decrypted once per batch*, not once per detected face
+  (`FaceRepo::person_exemplars`), because the writing thread is now the one
+  place a scan waits in line. Someone named mid-batch is recognised from the
+  next batch.
+- *Rescan reconciliation is one transaction*, not one disk sync per row.
+
+**What did not change.** Every photograph is still snapshotted before reading
+and re-`stat`ed after, and a change is still a hard halt; nothing is written
+after a halt. Stop is still answered between photographs: nothing new starts
+once it is asked for, photographs already being read are finished and kept,
+and photographs never started are released back to the queue unspent rather
+than left on a five-minute lease. A panic in either half is that photograph's
+failure. Moved-file adoption (D-073) is decided from the drive's `missing`
+hashes, read once per run; a second copy of the same moved photograph finds
+the row already claimed and is analysed as new, as it was before.
+
+**Consequences.** Measured on this Linux container (4 cores, heuristic engine,
+3,000 photographs at 1600x1200): see `.project-state/test-evidence.md`. The
+Vision speed-up cannot be measured off a Mac. How well Apple Vision scales
+across several processes, and so what `analysis_workers` should default to on
+the owner's machine, is the first thing to measure on the next real drive:
+`index.log`'s `throughput_fps` with `--workers 1` against the default.
+
+Evidence: `parallel_analysis_attributes_every_result_to_its_own_photograph`
+(distinct sizes, each row checked against its own original),
+`one_worker_and_four_build_the_same_catalogue`,
+`batches_verify_their_own_photographs_and_the_drive_is_checked_at_the_end`,
+`face_embeddings_from_every_model_are_checked`,
+`concurrent_photographs_are_analysed_by_separate_workers_at_once` (fails with a
+one-slot pool: all four photographs served by one PID),
+`the_two_step_shrink_matches_a_direct_resize`, and three `in_parallel` tests
+for delivery, stop and halt.
+
+**Supersedes:** the parallelism paragraph of D-045. Extends D-044 and D-064.

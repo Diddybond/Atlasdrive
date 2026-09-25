@@ -317,6 +317,10 @@ struct IndexArgs {
     rebuild_faces: bool,
     #[arg(long)]
     batch_size: Option<usize>,
+    /// Photographs analysed at once. Defaults to half the cores, at most four;
+    /// `--workers 1` indexes one photograph at a time.
+    #[arg(long)]
+    workers: Option<usize>,
     #[arg(long, default_value = "20GB")]
     free_space_floor: String,
     #[arg(long)]
@@ -703,6 +707,9 @@ fn index_cmd(ctx: &Ctx, args: IndexArgs) -> Result<()> {
     if let Some(bs) = args.batch_size {
         config.batch_size = bs;
     }
+    if let Some(w) = args.workers {
+        config.analysis_workers = w.max(1);
+    }
 
     let mode = if args.dry_run {
         IndexMode::DryRun
@@ -837,7 +844,22 @@ fn verify_cmd(ctx: &Ctx, args: VerifyArgs) -> Result<()> {
         // A targeted verify does not fail purely on the machine's free disk.
         config.free_space_floor_bytes = 0;
     }
-    let _ = (args.run, args.drive); // targeted scoping reserved; full suite runs today
+    let _ = args.run; // per-run scoping reserved
+    // `--drive N` narrows the per-photograph checks (thumbnail decode, original
+    // stat, face embeddings) to that drive; the catalogue-wide checks still run.
+    let drive_id = match args.drive {
+        Some(n) => Some(
+            DriveRepo::new(&archive)
+                .get_by_number(n)?
+                .ok_or_else(|| Error::InvalidArgs(format!("drive {n} not registered")))?
+                .id,
+        ),
+        None => None,
+    };
+    let scope = match &drive_id {
+        Some(id) => verifier::Scope::Drive(id),
+        None => verifier::Scope::Catalogue,
+    };
 
     let vctx = verifier::VerifyContext {
         archive: &archive,
@@ -845,14 +867,10 @@ fn verify_cmd(ctx: &Ctx, args: VerifyArgs) -> Result<()> {
         paths: &ctx.paths,
         config: &config,
         key: key.as_ref(),
-        face_model: (
-            family_archive_core::ai::local::MODEL_ID.to_string(),
-            family_archive_core::ai::local::MODEL_VERSION.to_string(),
-        ),
         observed_throughput: None,
         network_blocked_attempts: 0,
     };
-    let report = verifier::run(&vctx)?;
+    let report = verifier::run_scoped(&vctx, scope)?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
