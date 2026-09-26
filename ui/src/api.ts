@@ -434,7 +434,10 @@ export const api = {
     call<SearchResult[]>("similar_photographs", { fileId, limit }),
   proposeEvents: (gapHours?: number) => call<ProposeReport>("propose_events", { gapHours }),
   listEvents: (status?: string) => call<ArchiveEvent[]>("list_events", { status }),
-  nextEventProposal: () => call<ArchiveEvent | null>("next_event_proposal"),
+  nextEventProposal: (skip?: string[]) =>
+    call<ArchiveEvent | null>("next_event_proposal", { skip }),
+  suggestEventName: (eventId: string) =>
+    call<{ name: string | null; client: string | null; because: string }>("suggest_event_name", { eventId }),
   nameEvent: (eventId: string, name: string, client?: string) =>
     call<void>("name_event", { eventId, name, client }),
   forgetEvent: (eventId: string) => call<void>("forget_event", { eventId }),
@@ -944,8 +947,18 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       const want = args?.status as string | undefined;
       return Promise.resolve((want ? mockEvents.filter((e) => e.status === want) : mockEvents) as unknown as T);
     }
-    case "next_event_proposal":
-      return Promise.resolve((mockEvents.find((e) => e.status === "proposed") ?? null) as unknown as T);
+    case "next_event_proposal": {
+      const skip = (args?.skip as string[] | undefined) ?? [];
+      return Promise.resolve(
+        (mockEvents.find((e) => e.status === "proposed" && !skip.includes(e.id)) ?? null) as unknown as T,
+      );
+    }
+    case "suggest_event_name":
+      return Promise.resolve({
+        name: "Crown shoot",
+        client: null,
+        because: 'most of them are in the folder "Crown shoot"',
+      } as unknown as T);
     case "name_event": {
       const target = mockEvents.find((e) => e.id === args?.eventId);
       if (target) {

@@ -61,11 +61,44 @@ export function EventsScreen({
   const [adjusting, setAdjusting] = useState<string | null>(null);
   const [splits, setSplits] = useState<SplitPoint[]>([]);
   const [mergeFrom, setMergeFrom] = useState("");
+  // Events passed over for now; they stay proposed and come back later.
+  const [skipped, setSkipped] = useState<string[]>([]);
+  const [because, setBecause] = useState<string | null>(null);
+  const [preview, setPreview] = useState<string[]>([]);
 
-  async function refresh() {
+  async function refresh(skip: string[] = skipped) {
     setEvents(await api.listEvents());
-    setProposal(await api.nextEventProposal());
+    const next = await api.nextEventProposal(skip);
+    setProposal(next);
     setClients(await api.eventClients());
+    await offer(next);
+  }
+
+  /// Show what the event is, and offer a name for it: a strip of its
+  /// photographs, and the name AtlasDrive would give it, ready to accept.
+  async function offer(next: ArchiveEvent | null) {
+    setBecause(null);
+    setPreview([]);
+    if (!next) return;
+    const s = await api.suggestEventName(next.id).catch(() => null);
+    if (s?.name) {
+      setName(s.name);
+      setClient(s.client ?? "");
+      setBecause(s.because);
+    } else {
+      setName("");
+      setClient("");
+    }
+    const ids = (await api.eventFiles(next.id).catch(() => [] as string[])).slice(0, 8);
+    const thumbs = await Promise.all(ids.map((id) => api.photoThumbnail(id, 160).catch(() => null)));
+    setPreview(thumbs.filter((t): t is string => !!t));
+  }
+
+  async function later() {
+    if (!proposal) return;
+    const next = [...skipped, proposal.id];
+    setSkipped(next);
+    await refresh(next);
   }
 
   useEffect(() => {
@@ -193,6 +226,20 @@ export function EventsScreen({
             <strong>{describe(proposal)}</strong>
             {when(proposal) ? ` · ${when(proposal)}` : ""}
           </p>
+          {preview.length > 0 && (
+            <ul className="event-preview" aria-label="Photographs in this event">
+              {preview.map((src, i) => (
+                <li key={i}>
+                  <img src={src} alt="" />
+                </li>
+              ))}
+            </ul>
+          )}
+          {because && (
+            <p className="check-detail" role="status">
+              Suggested because {because}. Change it if it is wrong.
+            </p>
+          )}
 
           <div className="form">
             <label>
@@ -229,9 +276,14 @@ export function EventsScreen({
             <button onClick={confirm} disabled={busy || !name.trim()}>
               Save
             </button>
-            <button className="ghost" onClick={skip} disabled={busy}>
-              Not an event
-            </button>
+            <span>
+              <button className="ghost" onClick={() => void later()} disabled={busy}>
+                Skip for now
+              </button>
+              <button className="ghost" onClick={skip} disabled={busy}>
+                Not an event
+              </button>
+            </span>
           </div>
         </div>
       )}
@@ -289,7 +341,7 @@ export function EventsScreen({
                   >
                     Adjust…
                   </button>{" "}
-                  <button className="ghost" onClick={() => void api.forgetEvent(e.id).then(refresh)}>
+                  <button className="ghost" onClick={() => void api.forgetEvent(e.id).then(() => refresh())}>
                     Remove
                   </button>
                 </span>

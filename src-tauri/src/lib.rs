@@ -1486,11 +1486,25 @@ fn list_events(
 #[tauri::command]
 fn next_event_proposal(
     state: State<AppState>,
+    skip: Option<Vec<String>>,
 ) -> Result<Option<family_archive_core::events::Event>, String> {
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
     family_archive_core::events::EventRepo::new(&archive)
-        .next_proposal()
+        .next_proposal_skipping(&skip.unwrap_or_default())
+        .map_err(map_err)
+}
+
+/// A name to offer for an event, from who is in it and where it lives.
+#[tauri::command]
+fn suggest_event_name(
+    state: State<AppState>,
+    event_id: String,
+) -> Result<family_archive_core::events::NameSuggestion, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let archive = open_archive(&paths)?;
+    family_archive_core::events::EventRepo::new(&archive)
+        .suggest_name(&event_id)
         .map_err(map_err)
 }
 
@@ -1762,6 +1776,7 @@ pub fn run() {
             get_progress,
             run_verifier,
             unnamed_face_counts,
+            suggest_event_name,
             single_copies,
             group_faces,
             prepare_review,

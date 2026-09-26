@@ -553,7 +553,37 @@ describe("Events", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Save" })).toBeDefined();
     });
+    // The suggested name is only an offer: empty the box and nothing saves.
+    fireEvent.change(screen.getByLabelText(/What was it/), { target: { value: "" } });
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  /// 393 events waiting, named one at a time from an empty box, was a chore.
+  /// Each now arrives with a name to accept, saying where it came from, and
+  /// its photographs to recognise it by.
+  it("offers a name for each event and says why", async () => {
+    await openEvents();
+    fireEvent.click(screen.getByRole("button", { name: "Find events" }));
+    await waitFor(() => {
+      expect((screen.getByLabelText(/What was it/) as HTMLInputElement).value).toBe("Crown shoot");
+    });
+    expect(screen.getByText(/Suggested because most of them are in the folder "Crown shoot"/)).toBeDefined();
+    expect(screen.getByRole("list", { name: "Photographs in this event" })).toBeDefined();
+  });
+
+  /// Skipping decides nothing; the next event comes up and this one waits.
+  it("can skip an event for now without deciding anything", async () => {
+    await openEvents();
+    fireEvent.click(screen.getByRole("button", { name: "Find events" }));
+    await waitFor(() => {
+      expect(screen.getByText("2 waiting")).toBeDefined();
+    });
+    const first = screen.getByRole("heading", { name: "Name this one" }).closest(".card")!.textContent;
+    fireEvent.click(screen.getByRole("button", { name: "Skip for now" }));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Name this one" }).closest(".card")!.textContent).not.toBe(first);
+    });
+    expect(screen.getByText("2 waiting")).toBeDefined();
   });
 
   it("can reject a proposal that is not really an event", async () => {
@@ -1044,9 +1074,14 @@ describe("Scan progress dashboard", () => {
 
   it("shows how far through the drive it is", async () => {
     await openScan();
-    await waitFor(() => {
-      expect(screen.getByText(/8,333 photographs/)).toBeDefined();
-    });
+    // Scan activity is a tab under Drives now, one render further away; give
+    // it room on a loaded machine rather than fail on timing.
+    await waitFor(
+      () => {
+        expect(screen.getByText(/8,333 photographs/)).toBeDefined();
+      },
+      { timeout: 3000 },
+    );
     // A progress bar carrying a real value, not a decorative strip.
     const bar = screen.getByRole("progressbar");
     expect(Number(bar.getAttribute("aria-valuenow"))).toBeGreaterThanOrEqual(0);

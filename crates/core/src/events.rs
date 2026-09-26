@@ -100,6 +100,33 @@ impl Event {
     }
 }
 
+/// A name offered for an event; see [`EventRepo::suggest_name`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NameSuggestion {
+    pub name: Option<String>,
+    pub client: Option<String>,
+    /// Why, in words: "most of them are in the folder …".
+    pub because: String,
+}
+
+/// Whether a folder name says anything about the shoot. Camera folders
+/// (`100CANON`, `DCIM`) and bare dates or numbers do not.
+fn is_meaningful_folder(folder: &str) -> bool {
+    let f = folder.trim();
+    let lower = f.to_lowercase();
+    if f.is_empty() || f.starts_with('(') || lower == "dcim" || lower.starts_with("untitled") {
+        return false;
+    }
+    let letters = f.chars().filter(|c| c.is_alphabetic()).count();
+    // "2017", "2017-12-19", "100CANON", "IMG_0001"
+    let camera = lower.len() >= 3
+        && lower[..3].chars().all(|c| c.is_ascii_digit())
+        && ["canon", "nikon", "msdcf", "_fuji", "olymp", "apple", "gopro", "sony", "ndrone"]
+            .iter()
+            .any(|m| lower.contains(m));
+    letters >= 3 && !camera
+}
+
 /// A candidate place to divide an event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SplitPoint {
@@ -493,19 +520,117 @@ impl<'a> EventRepo<'a> {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// A name to offer for an event, worked out from what is in it.
+    ///
+    /// The owner named events one at a time from an empty box, 393 of them
+    /// waiting. Most answer themselves from evidence already in the catalogue:
+    /// who is in the photographs (only people the owner confirmed), the shoot
+    /// folder most of them came from, and whether the pictures show a wedding.
+    /// This is an offer in an editable box, never a name applied on its own.
+    pub fn suggest_name(&self, event_id: &str) -> Result<NameSuggestion> {
+        let total: i64 = self.conn.query_row(
+            "SELECT count(*) FROM event_files WHERE event_id = ?1",
+            [event_id],
+            |r| r.get(0),
+        )?;
+        if total == 0 {
+            return Ok(NameSuggestion::default());
+        }
+
+        // Named people in a meaningful share of the photographs, most first.
+        let mut stmt = self.conn.prepare(
+            "SELECT p.display_name, count(DISTINCT fa.file_id) AS n
+               FROM event_files ef
+               JOIN faces fa ON fa.file_id = ef.file_id AND fa.is_false_detection = 0
+               JOIN face_clusters c ON c.id = fa.cluster_id AND c.status = 'confirmed'
+               JOIN people p ON p.id = c.person_id
+              WHERE ef.event_id = ?1
+              GROUP BY p.id ORDER BY n DESC, p.display_name LIMIT 2",
+        )?;
+        let people: Vec<String> = stmt
+            .query_map([event_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|(_, n)| *n * 10 >= total) // in at least a tenth of them
+            .map(|(name, _)| name)
+            .collect();
+
+        // The shoot folder most of them came from.
+        let mut stmt = self.conn.prepare(
+            "SELECT f.relative_path FROM event_files ef JOIN files f ON f.id = ef.file_id
+              WHERE ef.event_id = ?1",
+        )?;
+        let mut folders: std::collections::BTreeMap<String, i64> = Default::default();
+        for rel in stmt.query_map([event_id], |r| r.get::<_, String>(0))? {
+            *folders.entry(crate::foldersum::folder_key(&rel?)).or_default() += 1;
+        }
+        let folder = folders
+            .into_iter()
+            .max_by_key(|(_, n)| *n)
+            .filter(|(_, n)| n * 10 >= total * 6) // most of the event
+            .map(|(f, _)| f)
+            .filter(|f| is_meaningful_folder(f));
+
+        let weddings: i64 = self.conn.query_row(
+            "SELECT count(DISTINCT ef.file_id) FROM event_files ef
+               JOIN file_tags ft ON ft.file_id = ef.file_id
+               JOIN tags t ON t.id = ft.tag_id
+              WHERE ef.event_id = ?1 AND t.name IN ('wedding', 'bride', 'wedding_dress')",
+            [event_id],
+            |r| r.get(0),
+        )?;
+        let wedding = weddings * 5 >= total; // a fifth of the photographs
+
+        let first_names: Vec<String> = people
+            .iter()
+            .map(|n| n.split_whitespace().next().unwrap_or(n).to_string())
+            .collect();
+        let (name, because) = if !first_names.is_empty() {
+            let who = first_names.join(" & ");
+            (
+                Some(if wedding { format!("{who} wedding") } else { who }),
+                format!("{} {} in these photographs", people.join(" and "), if people.len() == 1 { "is" } else { "are" }),
+            )
+        } else if let Some(f) = &folder {
+            let add_wedding = wedding && !f.to_lowercase().contains("wedding");
+            (
+                Some(if add_wedding { format!("{f} wedding") } else { f.clone() }),
+                format!("most of them are in the folder \"{f}\""),
+            )
+        } else if wedding {
+            (Some("Wedding".into()), "the photographs look like a wedding".into())
+        } else {
+            (None, String::new())
+        };
+        Ok(NameSuggestion {
+            name,
+            client: if people.is_empty() { None } else { Some(people.join(" & ")) },
+            because,
+        })
+    }
+
     /// The next proposal awaiting a decision, largest first.
     ///
     /// Largest first because a big group is both the most valuable to name and
     /// the easiest to recognise.
     pub fn next_proposal(&self) -> Result<Option<Event>> {
+        self.next_proposal_skipping(&[])
+    }
+
+    /// As [`Self::next_proposal`], passing over events the owner chose to skip
+    /// for now. Skipping decides nothing: the event stays proposed and comes
+    /// back another time.
+    pub fn next_proposal_skipping(&self, skip: &[String]) -> Result<Option<Event>> {
         let mut stmt = self.conn.prepare(
             "SELECT e.id, e.name, e.client, e.earliest_date, e.latest_date, e.status,
                     (SELECT count(*) FROM event_files ef WHERE ef.event_id = e.id) AS n
                FROM events e
               WHERE e.status = 'proposed'
+                AND e.id NOT IN (SELECT value FROM json_each(?1))
               ORDER BY n DESC LIMIT 1",
         )?;
-        let mut rows = stmt.query_map([], |r| {
+        let skip = serde_json::to_string(skip).unwrap_or_else(|_| "[]".into());
+        let mut rows = stmt.query_map([skip], |r| {
             Ok(Event {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -1101,5 +1226,101 @@ mod tests {
         assert!(parse_epoch("not a date").is_none());
         assert!(parse_epoch("2026-13-01").is_none());
         assert!(parse_epoch("").is_none());
+    }
+}
+
+#[cfg(test)]
+mod suggestion_tests {
+    use super::*;
+    use crate::db::{self, SchemaKind};
+
+    /// An event of `paths`, each tagged with `tags`.
+    fn event(paths: &[&str], tags: &[&str]) -> (Connection, String) {
+        let conn = db::open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute_batch(
+            "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES ('d',1,'online','now');
+             INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r','d','','now');
+             INSERT INTO events (id, status, created_at, updated_at) VALUES ('e','proposed','now','now');",
+        )
+        .unwrap();
+        for (i, t) in tags.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO tags (id, name, tag_type, created_at) VALUES (?1, ?2, 'automatic', 'now')",
+                rusqlite::params![format!("t{i}"), t],
+            )
+            .unwrap();
+        }
+        for (i, rel) in paths.iter().enumerate() {
+            let id = format!("f{i}");
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, status, created_at, updated_at)
+                 VALUES (?1,'d','r',?2,?2,1,1,'complete','now','now')",
+                rusqlite::params![id, rel],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO event_files (event_id, file_id, created_at) VALUES ('e', ?1, 'now')",
+                [&id],
+            )
+            .unwrap();
+            for (t, _) in tags.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO file_tags (file_id, tag_id, source, created_at) VALUES (?1, ?2, 'automatic', 'now')",
+                    rusqlite::params![id, format!("t{t}")],
+                )
+                .unwrap();
+            }
+        }
+        (conn, "e".into())
+    }
+
+    #[test]
+    fn the_shoot_folder_names_the_event_and_says_so() {
+        let paths: Vec<String> = (0..8).map(|i| format!("Aimee and Kent/edits/{i}.jpg")).collect();
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let (conn, id) = event(&refs, &["wedding"]);
+        let s = EventRepo::new(&conn).suggest_name(&id).unwrap();
+        assert_eq!(s.name.as_deref(), Some("Aimee and Kent wedding"));
+        assert!(s.because.contains("Aimee and Kent"), "{}", s.because);
+    }
+
+    #[test]
+    fn camera_and_date_folders_say_nothing() {
+        for folder in ["100CANON", "2017", "2017-12-19", "DCIM"] {
+            let paths: Vec<String> = (0..6).map(|i| format!("{folder}/IMG_{i}.jpg")).collect();
+            let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+            let (conn, id) = event(&refs, &[]);
+            let s = EventRepo::new(&conn).suggest_name(&id).unwrap();
+            assert_eq!(s.name, None, "{folder} is not a name");
+        }
+    }
+
+    #[test]
+    fn people_the_owner_named_come_before_the_folder() {
+        let paths: Vec<String> = (0..6).map(|i| format!("Crown/{i}.jpg")).collect();
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let (conn, id) = event(&refs, &["wedding"]);
+        conn.execute_batch(
+            "INSERT INTO people (id, display_name, created_at, updated_at) VALUES
+               ('a','Aimee Kanovan','now','now'), ('k','Kent Canovan','now','now');
+             INSERT INTO face_clusters (id, status, person_id, created_at, updated_at) VALUES
+               ('ca','confirmed','a','now','now'), ('ck','confirmed','k','now','now');
+             INSERT INTO faces (id, file_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, created_at) VALUES
+               ('x1','f0',0,0,0.1,0.1,'ca','now'), ('x2','f1',0,0,0.1,0.1,'ca','now'),
+               ('x3','f1',0,0,0.1,0.1,'ck','now');",
+        )
+        .unwrap();
+        let s = EventRepo::new(&conn).suggest_name(&id).unwrap();
+        assert_eq!(s.name.as_deref(), Some("Aimee & Kent wedding"));
+        assert_eq!(s.client.as_deref(), Some("Aimee Kanovan & Kent Canovan"));
+    }
+
+    #[test]
+    fn a_skipped_event_waits_its_turn() {
+        let (conn, id) = event(&["a/1.jpg"], &[]);
+        let repo = EventRepo::new(&conn);
+        assert_eq!(repo.next_proposal().unwrap().map(|e| e.id), Some(id.clone()));
+        assert!(repo.next_proposal_skipping(&[id]).unwrap().is_none());
     }
 }
