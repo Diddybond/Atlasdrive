@@ -249,6 +249,57 @@ async fn single_copies(
     .map_err(|e| e.to_string())?
 }
 
+/// Plugged-in drives with photographs not read back for six months, and how
+/// many — so AtlasDrive can offer to check them for silent damage.
+#[tauri::command]
+async fn health_due(state: State<'_, AppState>) -> Result<Vec<(i64, i64)>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<(i64, i64)>, String> {
+        let archive = open_archive(&paths)?;
+        let mut out = Vec::new();
+        for d in DriveRepo::new(&archive).list().map_err(map_err)? {
+            if d.status != "online" {
+                continue;
+            }
+            let due = family_archive_core::bitrot::due_for_check(
+                &archive,
+                d.drive_number,
+                family_archive_core::bitrot::RECHECK_AFTER_DAYS,
+            )
+            .map_err(map_err)?;
+            if due > 0 {
+                out.push((d.drive_number, due));
+            }
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Read back a drive's least-recently-checked photographs and compare them
+/// with what was scanned. Read-only; says what it found in words.
+#[tauri::command]
+async fn spot_check_drive(state: State<'_, AppState>, drive_number: i64) -> Result<String, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let archive = open_archive(&paths)?;
+        let report = family_archive_core::bitrot::verify_drive(
+            &archive,
+            drive_number,
+            &family_archive_core::bitrot::VerifyOptions {
+                limit: Some(family_archive_core::bitrot::SPOT_CHECK_FILES),
+                ..Default::default()
+            },
+            |_, _| {},
+        )
+        .map_err(map_err)?;
+        family_archive_core::bitrot::describe(&archive, &report).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// How many faces nobody has named, per drive — counted, not sampled.
 #[tauri::command]
 async fn unnamed_face_counts(
@@ -2000,6 +2051,8 @@ pub fn run() {
             get_progress,
             run_verifier,
             unnamed_face_counts,
+            health_due,
+            spot_check_drive,
             suggest_event_name,
             single_copies,
             group_faces,

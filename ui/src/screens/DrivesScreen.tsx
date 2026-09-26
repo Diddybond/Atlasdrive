@@ -424,6 +424,28 @@ export function DrivesScreen() {
                         </ul>
                       </div>
                     )}
+                    {d.status === "online" && (
+                      <button
+                        className="ghost"
+                        onClick={() => {
+                          setDriveNotes((n) => ({
+                            ...n,
+                            [d.drive_number]: "Reading photographs back to check for damage…",
+                          }));
+                          void api
+                            .spotCheckDrive(d.drive_number)
+                            .then(
+                              (m) => m,
+                              (e) => String(e),
+                            )
+                            .then((m) => setDriveNotes((n) => ({ ...n, [d.drive_number]: m })));
+                        }}
+                        aria-label={`Check Drive ${d.drive_number} for damage`}
+                        title="Reads 200 photographs back and compares them with what was scanned. Changes nothing."
+                      >
+                        Check for damage
+                      </button>
+                    )}
                     <button
                       className="ghost"
                       onClick={() => setEditing(d.id)}

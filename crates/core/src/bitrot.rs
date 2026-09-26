@@ -112,6 +112,72 @@ struct Row {
     content_hash: Option<String>,
 }
 
+/// Photographs not checked for this long are offered a check.
+pub const RECHECK_AFTER_DAYS: i64 = 180;
+
+/// How many photographs checked at a time from the app: enough to work
+/// through a drive over a few plug-ins, few enough to finish in minutes even
+/// when they are large TIFFs.
+pub const SPOT_CHECK_FILES: usize = 200;
+
+/// Photographs on a drive not read back for `days` — neither when they were
+/// scanned nor by a check since.
+pub fn due_for_check(conn: &Connection, drive_number: i64, days: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT count(*) FROM files f JOIN drives d ON d.id = f.drive_id
+              WHERE d.drive_number = ?1 AND f.status = 'complete'
+                AND (f.last_verified_at IS NULL
+                     OR julianday('now') - julianday(f.last_verified_at) >= {days})"
+        ),
+        [drive_number],
+        |r| r.get(0),
+    )?)
+}
+
+/// What a check found, in the owner's words — and, for a damaged photograph,
+/// which other drive holds a good copy, matched by the content hash recorded
+/// when it was scanned (the copy that hash describes is the undamaged one).
+pub fn describe(conn: &Connection, report: &RotReport) -> Result<String> {
+    let problems: Vec<&Finding> = report.problems().collect();
+    let mut out = if problems.is_empty() {
+        format!(
+            "Checked {} photographs on Drive {}: all intact.",
+            report.checked, report.drive_number
+        )
+    } else {
+        format!(
+            "Checked {} photographs on Drive {}: {} damaged or unreadable.",
+            report.checked,
+            report.drive_number,
+            problems.len()
+        )
+    };
+    let mut copy = conn.prepare(
+        "SELECT d.drive_number FROM files f0
+           JOIN files f ON f.content_hash = f0.content_hash AND f.drive_id <> f0.drive_id
+                        AND f.status = 'complete'
+           JOIN drives d ON d.id = f.drive_id
+          WHERE f0.id = ?1
+          ORDER BY d.drive_number LIMIT 1",
+    )?;
+    for f in problems.iter().take(10) {
+        let elsewhere: Option<i64> = copy.query_row([&f.file_id], |r| r.get(0)).ok();
+        out.push_str(&format!(
+            " {} — {}.",
+            f.relative_path,
+            match elsewhere {
+                Some(n) => format!("a good copy is on Drive {n}"),
+                None => "no other drive has a copy".to_string(),
+            }
+        ));
+    }
+    if report.incomplete {
+        out.push_str(" The check stopped before the end; run it again to carry on.");
+    }
+    Ok(out)
+}
+
 /// Re-read a drive's originals and compare them against what was indexed.
 ///
 /// `progress` is called after each file with (done, total).
@@ -512,5 +578,61 @@ mod tests {
             crate::integrity::mtime_ns(&before),
             crate::integrity::mtime_ns(&after)
         );
+    }
+}
+
+#[cfg(test)]
+mod describe_tests {
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
+
+    fn archive() -> Connection {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute_batch(
+            "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES
+               ('d5',5,'online','now'), ('d7',7,'offline','now');
+             INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r5','d5','','now'), ('r7','d7','','now');
+             INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes, source_mtime_ns,
+                                content_hash, status, last_verified_at, created_at, updated_at) VALUES
+               ('bad','d5','r5','2009/Crete/001.jpg','001.jpg',1,1,'h1','complete','2020-01-01T00:00:00Z','now','now'),
+               ('good','d7','r7','backup/001.jpg','001.jpg',1,1,'h1','complete',NULL,'now','now'),
+               ('lone','d5','r5','2009/Crete/002.jpg','002.jpg',1,1,'h2','complete',NULL,'now','now'),
+               ('fresh','d5','r5','2026/new.jpg','new.jpg',1,1,'h3','complete',datetime('now'),'now','now');",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// A damaged photograph is named with the drive holding a good copy.
+    #[test]
+    fn damage_is_reported_with_where_a_good_copy_is() {
+        let conn = archive();
+        let finding = |id: &str, rel: &str| Finding {
+            file_id: id.into(),
+            relative_path: rel.into(),
+            verdict: Verdict::Corrupt,
+            detail: String::new(),
+        };
+        let report = RotReport {
+            drive_number: 5,
+            checked: 200,
+            intact: 198,
+            findings: vec![finding("bad", "2009/Crete/001.jpg"), finding("lone", "2009/Crete/002.jpg")],
+            ..Default::default()
+        };
+        let text = describe(&conn, &report).unwrap();
+        assert!(text.contains("Checked 200 photographs on Drive 5: 2 damaged"), "{text}");
+        assert!(text.contains("2009/Crete/001.jpg — a good copy is on Drive 7"), "{text}");
+        assert!(text.contains("2009/Crete/002.jpg — no other drive has a copy"), "{text}");
+
+        let clean = RotReport { drive_number: 5, checked: 200, intact: 200, ..Default::default() };
+        assert_eq!(describe(&conn, &clean).unwrap(), "Checked 200 photographs on Drive 5: all intact.");
+    }
+
+    /// Only photographs not read back recently are due.
+    #[test]
+    fn photographs_checked_recently_are_not_due() {
+        let conn = archive();
+        assert_eq!(due_for_check(&conn, 5, RECHECK_AFTER_DAYS).unwrap(), 2);
     }
 }

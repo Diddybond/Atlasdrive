@@ -28,6 +28,8 @@ export function NeedsYou({ onGo }: { onGo: (place: Place) => void }) {
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(true);
   const [started, setStarted] = useState<string | null>(null);
+  const [due, setDue] = useState<[number, number][]>([]);
+  const [checking, setChecking] = useState<number | null>(null);
 
   useEffect(() => {
     void api.getSettings().then(setSettings, () => undefined);
@@ -35,11 +37,24 @@ export function NeedsYou({ onGo }: { onGo: (place: Place) => void }) {
     void api.listDrives().then(setDrives, () => undefined);
     void api.lastScanError().then(setScanError, () => undefined);
     void api.isIndexing().then(setScanning, () => undefined);
+    void api.healthDue().then(setDue, () => undefined);
   }, []);
+
+  async function check(number: number) {
+    setChecking(number);
+    try {
+      setStarted(await api.spotCheckDrive(number));
+      setDue((d) => d.filter(([n]) => n !== number));
+    } catch (err) {
+      setStarted(String(err));
+    } finally {
+      setChecking(null);
+    }
+  }
 
   async function scan(number: number) {
     try {
-      setStarted(await api.rescanDrive(number));
+      setStarted(`${await api.rescanDrive(number)} Progress is under Drives → Scan activity.`);
       setScanning(true);
     } catch (err) {
       setStarted(String(err));
@@ -99,13 +114,25 @@ export function NeedsYou({ onGo }: { onGo: (place: Place) => void }) {
     }
   }
 
+  if (!scanning) {
+    for (const [number, count] of due) {
+      if (items.some((i) => i.key === `drive-${number}` || i.key === `recheck-${number}`)) continue;
+      items.push({
+        key: `health-${number}`,
+        text: `Drive ${number} is plugged in. ${count.toLocaleString()} of its photographs have not been checked for damage in six months.`,
+        action: checking === number ? "Checking…" : "Check 200 now",
+        run: () => void check(number),
+      });
+    }
+  }
+
   if (items.length === 0 && !started) return null;
   return (
     <section className="card needs-you" aria-labelledby="needs-you-heading">
       <h2 id="needs-you-heading">Needs you</h2>
       {started && (
         <p className="search-note" role="status">
-          {started} Progress is under Drives → Scan activity.
+          {started}
         </p>
       )}
       <ul>

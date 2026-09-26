@@ -467,6 +467,8 @@ export const api = {
     call<GalleryFace[]>("face_gallery", { limit, driveNumber }),
   unnamedFaceCounts: () => call<UnnamedOnDrive[]>("unnamed_face_counts"),
   singleCopies: () => call<DriveCopies[]>("single_copies"),
+  healthDue: () => call<[number, number][]>("health_due"),
+  spotCheckDrive: (driveNumber: number) => call<string>("spot_check_drive", { driveNumber }),
   groupFaces: () => call<GroupingReport>("group_faces"),
   faceThumbnail: (faceId: string) => call<string | null>("face_thumbnail", { faceId }),
   tagFace: (faceId: string, name: string) =>
@@ -741,6 +743,12 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         (only ? mockGallery.filter((f) => f.drive_number === only) : mockGallery) as unknown as T,
       );
     }
+    case "health_due":
+      return Promise.resolve([[14, 4213]] as unknown as T);
+    case "spot_check_drive":
+      return Promise.resolve(
+        `Checked 200 photographs on Drive ${args?.driveNumber}: all intact.` as unknown as T,
+      );
     case "single_copies":
       return Promise.resolve([
         { drive_number: 7, drive_name: "Holidays 2004-2011", photographs: 8891, only_here: 3200, only_here_bytes: 41e9,

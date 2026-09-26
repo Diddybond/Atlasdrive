@@ -1203,6 +1203,27 @@ describe("Needs you", () => {
     expect(await screen.findByText(/Looking for new photographs on Drive 14/)).toBeDefined();
   });
 
+  /// One item per drive: a drive due both a new-photographs check and a
+  /// damage check is offered the first; the second follows next time.
+  it("never lists the same drive twice", async () => {
+    setMockScanning(false);
+    render(<App />);
+    const panel = await screen.findByRole("region", { name: "Needs you" });
+    await waitFor(() => expect(panel.textContent).toMatch(/Drive 14 is plugged in/));
+    expect(panel.textContent!.match(/Drive 14 is plugged in/g)!.length).toBe(1);
+  });
+
+  /// A drive can be checked for silent damage from its card, and the answer is
+  /// said in words.
+  it("checks a plugged-in drive for damage and says what it found", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Check Drive 14 for damage" }));
+    expect(await screen.findByText(/Checked 200 photographs on Drive 14: all intact/)).toBeDefined();
+    // Only a plugged-in drive can be read back.
+    expect(screen.queryByRole("button", { name: "Check Drive 7 for damage" })).toBeNull();
+  });
+
   /// Once a search is showing results, the panel steps aside.
   it("steps aside once there are results", async () => {
     resetMockBackup();
