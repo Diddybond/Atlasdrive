@@ -107,9 +107,12 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
     try {
       const r = await api.groupFaces();
       setGroupNote(
-        r.groups_created === 0
+        (r.groups_created === 0
           ? "No new groups — every face that looks like another is already grouped."
-          : `Put ${r.faces_grouped.toLocaleString()} faces into ${r.groups_created.toLocaleString()} groups. Name one face and its whole group is named.`,
+          : `Put ${r.faces_grouped.toLocaleString()} faces into ${r.groups_created.toLocaleString()} groups. Name one face and its whole group is named.`) +
+          (r.groups_merged
+            ? ` Joined ${r.groups_merged.toLocaleString()} groups that were the same person on different drives.`
+            : ""),
       );
       await refreshCounts();
       await load(driveFilter ?? undefined);

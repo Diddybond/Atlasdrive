@@ -270,12 +270,27 @@ fn greedy_groups(vectors: &[&[f32]], threshold: f32) -> Vec<Vec<usize>> {
     members
 }
 
+/// How much stricter merging whole groups is than grouping single faces.
+pub const GROUP_MERGE_MARGIN: f32 = 0.03;
+
+/// What [`FaceRepo::merge_lookalike_groups`] did.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeReport {
+    pub groups_considered: usize,
+    pub groups_merged: usize,
+    pub faces_moved: usize,
+}
+
 /// What [`FaceRepo::group_ungrouped`] did.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GroupingReport {
     pub faces_considered: usize,
     pub groups_created: usize,
     pub faces_grouped: usize,
+    /// Groups joined to another drive's group of the same person
+    /// ([`FaceRepo::merge_lookalike_groups`]), when that was run too.
+    #[serde(default)]
+    pub groups_merged: usize,
 }
 
 /// Unnamed faces on one drive; see [`FaceRepo::unnamed_counts`].
@@ -776,6 +791,102 @@ impl<'a> FaceRepo<'a> {
                 }
                 report.groups_created += 1;
                 report.faces_grouped += group.len();
+            }
+        }
+        tx.commit()?;
+        Ok(report)
+    }
+
+    /// Merge unnamed groups that are the same person, across every drive.
+    ///
+    /// [`Self::group_ungrouped`] works one drive at a time, so the same guest at
+    /// weddings on Drive 3 and Drive 8 ends up as two groups. This compares
+    /// the groups themselves — the average of each group's faces — and merges
+    /// look-alikes into the larger group. An average is steadier than any one
+    /// face, which also pulls different people's averages closer together, so
+    /// the bar is set higher than for single faces
+    /// ([`GROUP_MERGE_MARGIN`] above the model's threshold).
+    ///
+    /// Only groups nobody has named, and nobody has been suggested for, are
+    /// touched. A named group never moves and never absorbs anything here;
+    /// naming stays a human act (D-007).
+    pub fn merge_lookalike_groups(&self, key: &MasterKey) -> Result<MergeReport> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.cluster_id, fe.model_id, fe.model_version,
+                    fe.ciphertext, fe.nonce, fe.enc_version, fe.key_version
+               FROM faces f
+               JOIN face_clusters c ON c.id = f.cluster_id
+               JOIN face_embeddings fe ON fe.face_id = f.id
+              WHERE c.status = 'unnamed' AND c.person_id IS NULL
+                AND f.is_false_detection = 0 AND f.is_ignored = 0
+              ORDER BY fe.model_id, fe.model_version, f.cluster_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+                Sealed {
+                    ciphertext: r.get::<_, Vec<u8>>(3)?,
+                    nonce: r.get::<_, Vec<u8>>(4)?,
+                    enc_version: r.get::<_, i64>(5)?,
+                    key_version: r.get::<_, i64>(6)?,
+                },
+            ))
+        })?;
+        // model -> cluster -> (sum of unit vectors, faces)
+        type Sums = std::collections::BTreeMap<String, (Vec<f32>, usize)>;
+        let mut by_model: std::collections::BTreeMap<(String, String), Sums> = Default::default();
+        for row in rows {
+            let (cluster, model, sealed) = row?;
+            let Ok(v) = crypto::open_vector(key, &sealed) else { continue };
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if !norm.is_finite() || norm == 0.0 {
+                continue;
+            }
+            let entry = by_model
+                .entry(model)
+                .or_default()
+                .entry(cluster)
+                .or_insert_with(|| (vec![0.0; v.len()], 0));
+            if entry.0.len() != v.len() {
+                continue;
+            }
+            entry.0.iter_mut().zip(&v).for_each(|(a, x)| *a += x / norm);
+            entry.1 += 1;
+        }
+
+        let mut report = MergeReport::default();
+        let tx = self.conn.unchecked_transaction()?;
+        let now = now_iso8601();
+        for ((model_id, _), clusters) in by_model {
+            // Biggest groups first, so each merge lands in the best-established one.
+            let mut groups: Vec<(String, Vec<f32>, usize)> = clusters
+                .into_iter()
+                .map(|(id, (sum, n))| {
+                    let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::MIN_POSITIVE);
+                    (id, sum.into_iter().map(|x| x / norm).collect(), n)
+                })
+                .collect();
+            groups.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+            report.groups_considered += groups.len();
+            let dim = groups.first().map_or(0, |g| g.1.len());
+            let vectors: Vec<&[f32]> = groups.iter().map(|g| g.1.as_slice()).filter(|v| v.len() == dim).collect();
+            let threshold = (cluster_threshold_for(&model_id) + GROUP_MERGE_MARGIN).min(0.99);
+            for merged in greedy_groups(&vectors, threshold).into_iter().filter(|m| m.len() >= 2) {
+                let into = &groups[merged[0]].0;
+                for &i in &merged[1..] {
+                    let from = &groups[i].0;
+                    let moved = tx.execute(
+                        "UPDATE faces SET cluster_id = ?2 WHERE cluster_id = ?1",
+                        params![from, into],
+                    )?;
+                    tx.execute(
+                        "UPDATE face_clusters SET status = 'merged', updated_at = ?2 WHERE id = ?1",
+                        params![from, now],
+                    )?;
+                    report.groups_merged += 1;
+                    report.faces_moved += moved;
+                }
             }
         }
         tx.commit()?;
@@ -1992,6 +2103,35 @@ mod grouping_tests {
         let on_d2 = repo.gallery_on_drive(200, Some(2)).unwrap();
         assert_eq!(on_d2.len(), 1);
         assert_eq!(on_d2[0].face_id, loner);
+    }
+
+    /// D-091: the same person grouped separately on two drives becomes one
+    /// group; a different person stays apart; a named group is never touched.
+    #[test]
+    fn the_same_person_on_two_drives_becomes_one_group() {
+        let (conn, key) = archive();
+        let repo = FaceRepo::new(&conn);
+        let on_1: Vec<String> = (0..3).map(|i| face(&conn, &key, "d1", 0, 0.05 * i as f32, 0.9)).collect();
+        let on_2: Vec<String> = (0..3).map(|i| face(&conn, &key, "d2", 0, 0.04 * i as f32, 0.8)).collect();
+        let other: Vec<String> = (0..3).map(|i| face(&conn, &key, "d1", 6, 0.05 * i as f32, 0.9)).collect();
+        repo.group_ungrouped(Some("d1"), &key).unwrap();
+        repo.group_ungrouped(Some("d2"), &key).unwrap();
+        assert_ne!(cluster_of(&conn, &on_1[0]), cluster_of(&conn, &on_2[0]), "grouped per drive first");
+
+        // A named group that looks just like them stays where it is.
+        let named: Vec<String> = (0..2).map(|i| face(&conn, &key, "d2", 0, 0.03 * i as f32, 0.95)).collect();
+        repo.tag_face_with_name(&named[0], "Aimee").unwrap();
+        let named_cluster = cluster_of(&conn, &named[0]).unwrap();
+
+        let r = repo.merge_lookalike_groups(&key).unwrap();
+        assert_eq!(r.groups_merged, 1, "{r:?}");
+        let one = cluster_of(&conn, &on_1[0]).unwrap();
+        assert!(on_1.iter().chain(&on_2).all(|f| cluster_of(&conn, f).as_ref() == Some(&one)));
+        assert!(other.iter().all(|f| cluster_of(&conn, f).as_ref() != Some(&one)), "a different person stays apart");
+        assert_eq!(cluster_of(&conn, &named[0]), Some(named_cluster), "a named group is never merged");
+
+        // And running it again changes nothing.
+        assert_eq!(repo.merge_lookalike_groups(&key).unwrap().groups_merged, 0);
     }
 
     /// The per-drive counts come from the catalogue, not from a sample.

@@ -334,6 +334,7 @@ async fn group_faces(state: State<'_, AppState>) -> Result<faces::GroupingReport
             total.groups_created += r.groups_created;
             total.faces_grouped += r.faces_grouped;
         }
+        total.groups_merged = repo.merge_lookalike_groups(&key).map_err(map_err)?.groups_merged;
         Ok(total)
     })
     .await

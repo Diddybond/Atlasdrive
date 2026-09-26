@@ -955,6 +955,11 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
                     d.drive_number, r.faces_considered, r.faces_grouped, r.groups_created
                 );
             }
+            let m = repo.merge_lookalike_groups(&key)?;
+            println!(
+                "Joined {} group(s) that were the same person on different drives ({} faces).",
+                m.groups_merged, m.faces_moved
+            );
             Ok(())
         }
         FaceAction::Rebuild { threshold } => {

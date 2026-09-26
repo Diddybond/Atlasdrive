@@ -1162,6 +1162,7 @@ describe("Faces nobody has named", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Group look-alike faces" }));
     await waitFor(() => {
       expect(screen.getByText(/Put 17,400 faces into 3,100 groups/)).toBeDefined();
+      expect(screen.getByText(/Joined 42 groups that were the same person on different drives/)).toBeDefined();
     });
   });
 });

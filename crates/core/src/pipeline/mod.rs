@@ -1076,12 +1076,19 @@ impl<'a> Pipeline<'a> {
             // one (D-089). A convenience: failing here must not fail a scan
             // whose photographs are all safely catalogued.
             if !dry_run {
-                match FaceRepo::new(self.archive).group_ungrouped(Some(&drive.id), self.key) {
-                    Ok(r) => logger
+                let repo = FaceRepo::new(self.archive);
+                let grouped = repo.group_ungrouped(Some(&drive.id), self.key).and_then(|r| {
+                    // Then join this drive's groups to the same people on
+                    // other drives (D-091).
+                    repo.merge_lookalike_groups(self.key).map(|m| (r, m))
+                });
+                match grouped {
+                    Ok((r, m)) => logger
                         .info("faces_grouped")
                         .field("faces", r.faces_considered as i64)
                         .field("groups", r.groups_created as i64)
                         .field("grouped", r.faces_grouped as i64)
+                        .field("merged_across_drives", m.groups_merged as i64)
                         .emit_best_effort(),
                     Err(e) => logger
                         .warn("faces_grouping_failed")

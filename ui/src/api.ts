@@ -255,6 +255,8 @@ export interface GroupingReport {
   faces_considered: number;
   groups_created: number;
   faces_grouped: number;
+  /// Groups joined to the same person's group on another drive.
+  groups_merged?: number;
 }
 
 /// One face in the gallery — a picture first, a name only if you gave it one.
@@ -771,7 +773,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         { drive_number: 14, drive_name: "AtlasDrive A", faces: 25695, groups: 9021 },
       ] as unknown as T);
     case "group_faces":
-      return Promise.resolve({ faces_considered: 25000, groups_created: 3100, faces_grouped: 17400 } as unknown as T);
+      return Promise.resolve({ faces_considered: 25000, groups_created: 3100, faces_grouped: 17400, groups_merged: 42 } as unknown as T);
     case "face_thumbnail": {
       const idx = mockGallery.findIndex((f) => f.face_id === args?.faceId);
       return Promise.resolve((idx >= 0 ? mockFaceImage(idx + 1) : null) as unknown as T);
