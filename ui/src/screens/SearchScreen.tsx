@@ -7,10 +7,13 @@ export function SearchScreen({
   context,
   onClearContext,
   onGo,
+  asked,
 }: {
   context?: SearchContext | null;
   onClearContext?: () => void;
   onGo?: (place: Place) => void;
+  /// A search requested from another screen, run on arrival.
+  asked?: { query: string; n: number } | null;
 }) {
   const [query, setQuery] = useState("");
   // Every drive is always searched, plugged in or not — that is the point of
@@ -59,6 +62,10 @@ export function SearchScreen({
     if (context) void search(query || "photograph");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [context?.eventId, context?.client]);
+  useEffect(() => {
+    if (asked) void search(asked.query);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asked?.n]);
   const [similarTo, setSimilarTo] = useState<string | null>(null);
   const [correcting, setCorrecting] = useState<string | null>(null);
   const [dateError, setDateError] = useState<string | null>(null);

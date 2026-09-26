@@ -31,6 +31,14 @@ export function App() {
   const [section, setSection] = useState<Section>("search");
   const [drivesTab, setDrivesTab] = useState<"drives" | "scan">("drives");
   const [context, setContext] = useState<SearchContext | null>(null);
+  // A search asked for from another screen ("Find their photographs"). The
+  // counter makes asking twice for the same name run it twice.
+  const [asked, setAsked] = useState<{ query: string; n: number } | null>(null);
+  function findFor(query: string) {
+    setContext(null);
+    setAsked((prev) => ({ query, n: (prev?.n ?? 0) + 1 }));
+    setSection("search");
+  }
   /// Jumping to Search with a filter is the only cross-screen navigation in
   /// the app, so it is a callback rather than a router.
   function searchWithin(next: SearchContext) {
@@ -80,6 +88,7 @@ export function App() {
             context={context}
             onClearContext={() => setContext(null)}
             onGo={(place) => setSection(place)}
+            asked={asked}
           />
         )}
         {section === "drives" && (
@@ -105,7 +114,7 @@ export function App() {
             {drivesTab === "drives" ? <DrivesScreen /> : <ScanScreen />}
           </>
         )}
-        {section === "review" && <ReviewScreen />}
+        {section === "review" && <ReviewScreen onFind={findFor} />}
         {section === "events" && <EventsScreen onSearchWithin={searchWithin} />}
         {section === "settings" && <SettingsScreen />}
       </main>

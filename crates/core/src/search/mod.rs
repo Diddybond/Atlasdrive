@@ -380,6 +380,159 @@ impl<'a> SearchRepo<'a> {
         visual: Option<VisualQuery<'_>>,
         filters: &SearchFilters,
     ) -> Result<Vec<SearchResult>> {
+        // A named person in the query is a fact, not a guess: it decides which
+        // photographs qualify, and the rest of the words rank them.
+        let named = self.people_named_in(query)?;
+        if !named.groups.is_empty() {
+            return self.search_with_people(&named, visual, filters);
+        }
+        self.search_words(query, visual, filters)
+    }
+
+    /// Photographs of the people a query names, ranked by its other words.
+    fn search_with_people(
+        &self,
+        named: &NamedInQuery,
+        visual: Option<VisualQuery<'_>>,
+        filters: &SearchFilters,
+    ) -> Result<Vec<SearchResult>> {
+        let mut sql = String::from(
+            "SELECT f.id FROM files f JOIN drives d ON d.id = f.drive_id
+              WHERE f.status = 'complete'",
+        );
+        // Each name group must be present: "Aimee and Kent" is both of them.
+        for group in &named.groups {
+            let ids: Vec<String> = group.iter().map(|id| format!("'{}'", escape_sql(id))).collect();
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM faces fa JOIN face_clusters c ON c.id = fa.cluster_id
+                               WHERE fa.file_id = f.id AND fa.is_false_detection = 0
+                                 AND c.status = 'confirmed' AND c.person_id IN ({}))",
+                ids.join(",")
+            ));
+        }
+        push_filter_sql(&mut sql, filters);
+        sql.push_str(&format!(" LIMIT {}", filters.limit_or(100)));
+        let ids: Vec<String> = self
+            .conn
+            .prepare(&sql)?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Photographs of them that also match the remaining words come first.
+        let ranked: Vec<SearchResult> = if named.rest.trim().is_empty() {
+            Vec::new()
+        } else {
+            let mut wide = filters.clone();
+            wide.limit = wide.limit_or(100).max(1000);
+            self.search_words(&named.rest, visual, &wide)?
+        };
+        let wanted: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut out: Vec<SearchResult> = Vec::new();
+        let mut placed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for mut r in ranked.into_iter().filter(|r| wanted.contains(r.file_id.as_str())) {
+            r.matched.insert(0, "person".into());
+            r.score = (0.5 + r.score / 2.0).clamp(0.0, 1.0);
+            placed.insert(r.file_id.clone());
+            out.push(r);
+        }
+        for id in &ids {
+            if placed.contains(id) {
+                continue;
+            }
+            if let Some(mut r) = self.load_result(id)? {
+                r.matched.push("person".into());
+                r.score = 0.5;
+                out.push(r);
+            }
+        }
+        out.truncate(filters.limit_or(100));
+        Ok(out)
+    }
+
+    /// Which named people a query mentions, and what else it says.
+    ///
+    /// A person is mentioned by their full name or their first name, as whole
+    /// words ("Aimee" finds Aimee Kanovan; "aim" finds nobody). People who share
+    /// the name used form one group, any of whom will do; separate names are
+    /// separate groups, all of which must be in the photograph. Joining words
+    /// ("and", "with", "&") are dropped from what is left.
+    fn people_named_in(&self, query: &str) -> Result<NamedInQuery> {
+        let words = |s: &str| -> Vec<String> {
+            s.split(|c: char| !c.is_alphanumeric() && c != '\'')
+                .map(|w| w.trim_end_matches("'s").trim_matches('\'').to_lowercase())
+                .filter(|w| !w.is_empty())
+                .collect()
+        };
+        let query_words = words(query);
+        if query_words.is_empty() {
+            return Ok(NamedInQuery::default());
+        }
+        let mut stmt = self.conn.prepare("SELECT id, display_name, aliases_json FROM people")?;
+        let people: Vec<(String, String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+
+        // name as words -> people it could mean
+        let mut by_name: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+        let mut add = |name: Vec<String>, id: &str| {
+            if name.is_empty() || (name.len() == 1 && name[0].chars().count() < 2) {
+                return;
+            }
+            match by_name.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, ids)) if !ids.iter().any(|x| x == id) => ids.push(id.to_string()),
+                Some(_) => {}
+                None => by_name.push((name, vec![id.to_string()])),
+            }
+        };
+        for (id, display, aliases) in &people {
+            let full = words(display);
+            if let Some(first) = full.first() {
+                add(vec![first.clone()], id);
+            }
+            add(full, id);
+            for alias in aliases
+                .as_deref()
+                .and_then(|a| serde_json::from_str::<Vec<String>>(a).ok())
+                .unwrap_or_default()
+            {
+                add(words(&alias), id);
+            }
+        }
+        // Longest names first, so "Aimee Kanovan" is taken whole rather than
+        // as "Aimee" plus a stray word.
+        by_name.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+        let mut used = vec![false; query_words.len()];
+        let mut groups: Vec<Vec<String>> = Vec::new();
+        for (name, ids) in &by_name {
+            let n = name.len();
+            let mut i = 0;
+            while i + n <= query_words.len() {
+                if !used[i..i + n].iter().any(|u| *u) && query_words[i..i + n] == name[..] {
+                    used[i..i + n].iter_mut().for_each(|u| *u = true);
+                    if !groups.contains(ids) {
+                        groups.push(ids.clone());
+                    }
+                }
+                i += 1;
+            }
+        }
+        let rest: Vec<&str> = query_words
+            .iter()
+            .zip(&used)
+            .filter(|(w, u)| !**u && !matches!(w.as_str(), "and" | "with" | "&"))
+            .map(|(w, _)| w.as_str())
+            .collect();
+        Ok(NamedInQuery { groups, rest: rest.join(" ") })
+    }
+
+    /// Text and visual search over the words of a query.
+    fn search_words(
+        &self,
+        query: &str,
+        visual: Option<VisualQuery<'_>>,
+        filters: &SearchFilters,
+    ) -> Result<Vec<SearchResult>> {
         let mut merged: Vec<SearchResult> = self.text_search(query, filters)?;
         for r in &mut merged {
             r.score = TEXT_WEIGHT;
@@ -459,6 +612,14 @@ impl<'a> SearchRepo<'a> {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// The people a query names (groups, all required; any person within a group
+/// will do) and the words left over.
+#[derive(Debug, Default)]
+struct NamedInQuery {
+    groups: Vec<Vec<String>>,
+    rest: String,
 }
 
 /// Show each photograph once, however many drives hold a copy of it.
@@ -1039,5 +1200,98 @@ mod fold_copies_tests {
 
         assert_eq!(folded[1].file_id, "b9");
         assert!(folded[1].also_on.is_empty(), "only one copy exists");
+    }
+}
+
+#[cfg(test)]
+mod people_search_tests {
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
+
+    /// Aimee is confirmed in p1 and p3, Kent in p2 and p3; p4 only has a
+    /// face the app *suggested* might be Aimee.
+    fn archive() -> Connection {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute_batch(
+            "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES ('d',1,'online','now');
+             INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r','d','','now');
+             INSERT INTO people (id, display_name, created_at, updated_at) VALUES
+               ('aimee','Aimee Kanovan','now','now'), ('kent','Kent Canovan','now','now');
+             INSERT INTO face_clusters (id, status, person_id, created_at, updated_at) VALUES
+               ('ca','confirmed','aimee','now','now'), ('ck','confirmed','kent','now','now'),
+               ('cs','unnamed','aimee','now','now');",
+        )
+        .unwrap();
+        for (file, text, clusters) in [
+            ("p1", "beach", vec!["ca"]),
+            ("p2", "church", vec!["ck"]),
+            ("p3", "cake", vec!["ca", "ck"]),
+            ("p4", "beach", vec!["cs"]),
+        ] {
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, status, created_at, updated_at)
+                 VALUES (?1,'d','r',?1,?1,1,1,'complete','now','now')",
+                [file],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO files_fts (file_id, filename, relative_path, tags, ocr_text, description)
+                 VALUES (?1, ?1, ?1, ?2, '', '')",
+                [file, text],
+            )
+            .unwrap();
+            for (i, c) in clusters.iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO faces (id, file_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, created_at)
+                     VALUES (?1, ?2, 0.1, 0.1, 0.2, 0.2, ?3, 'now')",
+                    rusqlite::params![format!("{file}-{i}"), file, c],
+                )
+                .unwrap();
+            }
+        }
+        conn
+    }
+
+    fn ids(conn: &Connection, q: &str) -> Vec<String> {
+        SearchRepo::new(conn)
+            .natural_language_search(q, None, &SearchFilters { limit: 100, include_offline: true, ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .map(|r| r.file_id)
+            .collect()
+    }
+
+    #[test]
+    fn a_first_name_finds_every_confirmed_photograph_of_that_person() {
+        let conn = archive();
+        let mut got = ids(&conn, "Aimee");
+        got.sort();
+        assert_eq!(got, vec!["p1", "p3"], "the suggestion on p4 is not a fact yet");
+        let mut full = ids(&conn, "aimee kanovan");
+        full.sort();
+        assert_eq!(full, vec!["p1", "p3"]);
+    }
+
+    #[test]
+    fn two_names_mean_both_people_in_the_photograph() {
+        let conn = archive();
+        assert_eq!(ids(&conn, "Aimee and Kent"), vec!["p3"]);
+        // Possessives, "&" and words that match nothing only rank; they never
+        // remove the photograph of both of them.
+        assert_eq!(ids(&conn, "Kent & Aimee's photos"), vec!["p3"]);
+    }
+
+    #[test]
+    fn other_words_rank_that_persons_photographs() {
+        let conn = archive();
+        assert_eq!(ids(&conn, "aimee beach"), vec!["p1", "p3"]);
+        assert_eq!(ids(&conn, "aimee cake"), vec!["p3", "p1"]);
+    }
+
+    #[test]
+    fn part_of_a_name_is_not_a_name() {
+        let conn = archive();
+        assert!(ids(&conn, "aim").is_empty());
     }
 }

@@ -782,3 +782,8 @@ details.more[open] { display: flex; flex-direction: column; align-items: flex-st
 .copies.safe { color: var(--ink-soft); }
 .drive-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
 .plain-list { margin: 4px 0 6px; padding-left: 18px; }
+
+/* ---- People -------------------------------------------------------------- */
+.face-tools { margin: 4px 0 12px; }
+.naming-card { border-color: var(--accent); }
+.subtle { color: var(--ink-soft); }

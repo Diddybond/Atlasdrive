@@ -284,7 +284,7 @@ describe("AtlasDrive UI", () => {
 
     fireEvent.click(screen.getAllByRole("button", { name: /Unnamed face, 34 photographs/ })[0]);
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Name this face" })).toBeDefined();
+      expect(screen.getByRole("heading", { name: "Who is this?" })).toBeDefined();
     });
 
     // Nothing can be saved until a name is typed — nothing is named automatically.
@@ -292,7 +292,7 @@ describe("AtlasDrive UI", () => {
       true,
     );
 
-    fireEvent.change(screen.getByLabelText(/Who is this/), { target: { value: "Aimee" } });
+    fireEvent.change(screen.getByLabelText(/^Name$/), { target: { value: "Aimee" } });
     fireEvent.click(screen.getByRole("button", { name: "Save name" }));
 
     await waitFor(() => {
@@ -312,7 +312,7 @@ describe("AtlasDrive UI", () => {
       expect(screen.getAllByRole("button", { name: /Unnamed face/ }).length).toBeGreaterThan(0);
     });
     fireEvent.click(screen.getAllByRole("button", { name: /Unnamed face/ })[0]);
-    fireEvent.change(screen.getByLabelText(/Who is this/), { target: { value: "Kent" } });
+    fireEvent.change(screen.getByLabelText(/^Name$/), { target: { value: "Kent" } });
     fireEvent.click(screen.getByRole("button", { name: "Save name" }));
 
     // Per-person actions live behind Manage, so the row stays readable.
@@ -339,7 +339,7 @@ describe("AtlasDrive UI", () => {
       expect(screen.getAllByRole("button", { name: /Unnamed face/ }).length).toBeGreaterThan(0);
     });
     fireEvent.click(screen.getAllByRole("button", { name: /Unnamed face/ })[0]);
-    fireEvent.change(screen.getByLabelText(/Who is this/), { target: { value: "Margaret" } });
+    fireEvent.change(screen.getByLabelText(/^Name$/), { target: { value: "Margaret" } });
     fireEvent.click(screen.getByRole("button", { name: "Save name" }));
 
     await waitFor(() => {
@@ -1110,11 +1110,10 @@ describe("Faces nobody has named", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /People/ }));
     await waitFor(() => {
-      expect(screen.getByText(/27,535 faces nobody has named/)).toBeDefined();
+      expect(screen.getByText(/27,535 unnamed faces in 9,633 groups/)).toBeDefined();
     });
-    expect(screen.getByText(/In 9,633 groups of look-alikes/)).toBeDefined();
-    const chip = screen.getByRole("button", { name: /Drive 14/ });
-    expect(chip.textContent).toContain("25,695");
+    const option = screen.getByRole("option", { name: /Drive 14/ });
+    expect(option.textContent).toContain("25,695");
   });
 
   /// An archive indexed before scans grouped their own faces can be grouped
@@ -1175,5 +1174,21 @@ describe("Needs you", () => {
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await screen.findByText("beach_1998.jpg");
     expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
+  });
+});
+
+describe("From a name to the photographs", () => {
+  /// Naming someone is only worth it if it finds them. One click from People
+  /// runs the search on Find.
+  it("finds a named person's photographs from the People screen", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+    const find = (await screen.findAllByRole("button", { name: /^Find photographs of / }))[0];
+    const who = find.getAttribute("aria-label")!.replace("Find photographs of ", "");
+    fireEvent.click(find);
+    await screen.findByRole("heading", { name: "Find a photograph", level: 1 });
+    await waitFor(() => {
+      expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe(who);
+    });
   });
 });

@@ -10,7 +10,7 @@ import { api, ExportSummary, GalleryFace, NamedPerson, PersonFolder, SuggestedFa
 ///   1. People you have named — facts, plus the actions for one person.
 ///   2. Faces that might be someone — guesses, asked as questions.
 ///   3. Faces nobody has claimed — the gallery to browse and name.
-export function ReviewScreen() {
+export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = {}) {
   // Which drive's faces to show. A wall of unnamed faces from twenty disks is
   // not reviewable; "who is this?" is a far easier question when you know the
   // photograph came off the 2019 weddings drive.
@@ -217,8 +217,8 @@ export function ReviewScreen() {
     <section aria-labelledby="review-heading">
       <h1 id="review-heading">People</h1>
       <p className="lede">
-        AtlasDrive groups faces that look alike and can guess who they are, but it never puts a name
-        to anyone on its own.
+        Name only the people you want to find — family, friends, the couple at a wedding. Everyone
+        else can stay unnamed. Once someone is named, search for them on Find like anything else.
       </p>
 
       {status && (
@@ -263,8 +263,17 @@ export function ReviewScreen() {
                 <span className="person-counts">
                   {p.confirmed_faces} photograph{p.confirmed_faces === 1 ? "" : "s"}
                 </span>
+                {onFind && (
+                  <button
+                    onClick={() => onFind(p.display_name)}
+                    aria-label={`Find photographs of ${p.display_name}`}
+                  >
+                    Find their photographs
+                  </button>
+                )}
                 {p.suggested_faces > 0 && (
                   <button
+                    className="ghost"
                     onClick={() => void openReview(p)}
                     aria-label={`Review ${p.suggested_faces} possible matches for ${p.display_name}`}
                   >
@@ -468,53 +477,46 @@ export function ReviewScreen() {
         </div>
       )}
 
-      {/* 3. Faces nobody has claimed. */}
-      {drives.length > 1 && (
-        <div className="drive-filter">
-          <span className="filter-label">Show faces from</span>
-          <button
-            className={driveFilter === null ? "chip selected" : "chip"}
-            onClick={() => setDriveFilter(null)}
-          >
-            Every drive
-          </button>
-          {drives.map((d) => (
-            <button
-              key={d.number}
-              className={driveFilter === d.number ? "chip selected" : "chip"}
-              onClick={() => setDriveFilter(d.number)}
-              title={d.name}
-            >
-              Drive {d.number} <span className="chip-count">{d.faces.toLocaleString()}</span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {revealNote && (
-        <p className="search-note" role="status">
-          {revealNote}
-        </p>
-      )}
-
-      <h2>
-        {loadingFaces && shownDrive !== driveFilter ? (
-          <>Loading faces{driveFilter !== null && ` from Drive ${driveFilter}`}…</>
-        ) : (
-          <>
-            {(totalUnnamed || unnamed.length).toLocaleString()} face
-            {(totalUnnamed || unnamed.length) === 1 ? "" : "s"} nobody has named
-            {shownDrive !== null && ` on Drive ${shownDrive}`}
-          </>
+      {/* 3. Faces to choose from. Naming is optional; this is a place to
+          pick out the people who matter, not a list to get through. */}
+      <h2>Add someone</h2>
+      <p className="panel-note">
+        Faces AtlasDrive found, biggest groups first. Click a face you know and type their name —
+        the whole group is named at once.
+        {totalUnnamed > 0 && (
+          <span className="subtle">
+            {" "}
+            {totalUnnamed.toLocaleString()} unnamed faces in {totalTiles.toLocaleString()} groups
+            {shownDrive !== null && ` on Drive ${shownDrive}`}.
+          </span>
         )}
-      </h2>
-      <div className="row-between">
-        <p className="panel-note">
-          {totalTiles > unnamed.length
-            ? `In ${totalTiles.toLocaleString()} groups of look-alikes and single faces. Showing the ${unnamed.length} biggest first — naming one face names its whole group.`
-            : "Naming one face names its whole group."}
-        </p>
-        <button onClick={() => void groupLookAlikes()} disabled={grouping}>
+      </p>
+      <div className="row-between face-tools">
+        {drives.length > 1 ? (
+          <label className="inline-select">
+            Faces from
+            <select
+              aria-label="Faces from"
+              value={driveFilter ?? ""}
+              onChange={(e) => setDriveFilter(e.target.value === "" ? null : Number(e.target.value))}
+            >
+              <option value="">Every drive</option>
+              {drives.map((d) => (
+                <option key={d.number} value={d.number}>
+                  Drive {d.number} — {d.name} ({d.faces.toLocaleString()})
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <span />
+        )}
+        <button
+          className="ghost"
+          onClick={() => void groupLookAlikes()}
+          disabled={grouping}
+          title="Scans do this themselves. Use it once for drives scanned before grouping existed."
+        >
           {grouping ? "Grouping…" : "Group look-alike faces"}
         </button>
       </div>
@@ -523,7 +525,46 @@ export function ReviewScreen() {
           {groupNote}
         </p>
       )}
-      {unnamed.length === 0 ? (
+      {revealNote && (
+        <p className="search-note" role="status">
+          {revealNote}
+        </p>
+      )}
+
+      {selected && (
+        <div className="card naming-card">
+          <h2>Who is this?</h2>
+          <label className="review-name">
+            Name
+            <input
+              autoFocus
+              list="known-people"
+              placeholder="Type a name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void tag();
+              }}
+            />
+          </label>
+          <p className="drive-meta subtle">
+            Names {selected.group_size} photograph{selected.group_size === 1 ? "" : "s"}. AtlasDrive
+            will then show you other faces that might be them, to confirm or not.
+          </p>
+          <div className="review-actions">
+            <button onClick={() => void tag()} disabled={!name.trim() || busy}>
+              Save name
+            </button>
+            <button className="ghost" onClick={() => setSelected(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loadingFaces && shownDrive !== driveFilter ? (
+        <p className="empty">Loading faces{driveFilter !== null && ` from Drive ${driveFilter}`}…</p>
+      ) : unnamed.length === 0 ? (
         <p className="empty">No faces yet. Scan a drive and any faces found will appear here.</p>
       ) : (
         <ul className="face-grid" aria-label="Faces found">
@@ -545,7 +586,7 @@ export function ReviewScreen() {
                   </span>
                 )}
                 <span className="face-cell-label">
-                  Who is this?{f.group_size > 1 && <> · {f.group_size}</>}
+                  {f.group_size > 1 ? `${f.group_size} photos` : "1 photo"}
                 </span>
               </button>
               <button
@@ -559,38 +600,6 @@ export function ReviewScreen() {
             </li>
           ))}
         </ul>
-      )}
-
-      {selected && (
-        <div className="card">
-          <h2>Name this face</h2>
-          <label className="review-name">
-            Who is this?
-            <input
-              autoFocus
-              list="known-people"
-              placeholder="Type a name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void tag();
-              }}
-            />
-          </label>
-          <p className="drive-meta subtle">
-            Naming this confirms {selected.group_size} photograph
-            {selected.group_size === 1 ? "" : "s"}, and AtlasDrive will then ask you about any other
-            faces that look like them.
-          </p>
-          <div className="review-actions">
-            <button onClick={() => void tag()} disabled={!name.trim() || busy}>
-              Save name
-            </button>
-            <button className="ghost" onClick={() => setSelected(null)}>
-              Cancel
-            </button>
-          </div>
-        </div>
       )}
 
       <datalist id="known-people">
