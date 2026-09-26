@@ -2713,3 +2713,16 @@ read in it.
   with "unable to open database file" (seen on the live archive).
 - The shared connection is dropped after any error and before a restore, so a
   replaced catalogue is never read stale.
+
+## D-100 — A drive being scanned is never "safe to unplug"
+
+**Status:** settled.
+
+- `DriveCoverage::scanning` is true while a live run (`running_scans`, alive) is
+  scanning the drive. The summary then reads "Scanning now — N photographs read
+  so far. Keep it plugged in…", and `can_unplug` is false.
+- The Drives screen refreshes coverage every few seconds while a scan runs,
+  and once more when it ends. The picker of connected drives refreshes on the
+  same timer.
+- Found on the live archive: Drive 11 (BU A), registered moments earlier, read
+  "Finished — all 3 photographs scanned. Safe to unplug." mid-scan.

@@ -29,6 +29,7 @@ export interface DriveCoverage {
   /// indexed. Safe to unplug." on a drive that had never been scanned.
   summary: string;
   can_unplug: boolean;
+  scanning?: boolean;
 }
 
 export interface IndexEstimate {

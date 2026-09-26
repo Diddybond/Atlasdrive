@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, FolderSummary, Drive, DriveContents, DriveCopies, DriveCoverage, subjectLabel, Volume } from "../api";
 
 export function DrivesScreen() {
@@ -13,6 +13,7 @@ export function DrivesScreen() {
   // Folder stories, loaded on demand per drive. null = not asked yet.
   const [folderView, setFolderView] = useState<Record<number, FolderSummary[] | null>>({});
   const [stopPending, setStopPending] = useState(false);
+  const wasScanning = useRef<number | null>(null);
   const [number, setNumber] = useState("");
   const [name, setName] = useState("");
   const [path, setPath] = useState("");
@@ -84,8 +85,20 @@ export function DrivesScreen() {
   async function refreshScanState() {
     const p = await api.getProgress().catch(() => null);
     const busy = await api.isIndexing().catch(() => false);
-    setScanningDrive(p && (busy || p.status === "running") ? p.driveNumber : null);
+    const now = p && (busy || p.status === "running") ? p.driveNumber : null;
+    setScanningDrive(now);
     setStopPending(await api.stopPending().catch(() => false));
+    // The coverage line says whether a drive is safe to unplug, so it must
+    // follow a scan: while one runs, and once more when it ends.
+    if (now !== null || wasScanning.current !== null) {
+      await refreshCoverage();
+    }
+    wasScanning.current = now;
+  }
+
+  async function refreshCoverage() {
+    const rows = await api.driveCoverage().catch(() => null);
+    if (rows) setCoverage(Object.fromEntries(rows.map((c) => [c.drive_number, c])));
   }
 
   async function load() {
@@ -154,9 +167,7 @@ export function DrivesScreen() {
     void api.connectedVolumes().then(setVolumes);
     // Coverage is what tells you whether a drive can be unplugged, so it is
     // loaded whenever this screen is, not behind a button.
-    void api.driveCoverage().then((rows) => {
-      setCoverage(Object.fromEntries(rows.map((c) => [c.drive_number, c])));
-    });
+    void refreshCoverage();
     void api.singleCopies().then(
       (rows) => setCopies(Object.fromEntries(rows.map((c) => [c.drive_number, c]))),
       () => undefined,

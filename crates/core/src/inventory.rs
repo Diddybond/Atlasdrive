@@ -548,6 +548,10 @@ pub struct DriveCoverage {
     // "Finished — all 0 photographs indexed. Safe to unplug." The Rust test for
     // that wording passed the whole time, because it tested code the screen was
     // not using. Serialising the answer leaves nothing to reimplement.
+    /// A scan of this drive is running right now. Until it ends, the counts
+    /// are a snapshot of a moving target and the drive must stay connected.
+    #[serde(default)]
+    pub scanning: bool,
     /// The sentence to show. Never says "safe to unplug" unless it is.
     pub summary: String,
     /// Whether this drive can be disconnected without losing work.
@@ -574,8 +578,16 @@ impl DriveCoverage {
     /// Fill in the computed fields. The only place the rule is written.
     fn finish(mut self) -> Self {
         let never_scanned = self.discovered == 0 && self.complete == 0;
-        self.can_unplug = !never_scanned && !self.is_incomplete();
-        self.summary = if never_scanned {
+        self.can_unplug = !self.scanning && !never_scanned && !self.is_incomplete();
+        self.summary = if self.scanning {
+            // Seen on the live archive: a drive registered moments earlier read
+            // "Finished — all 3 photographs scanned. Safe to unplug." while its
+            // scan was still finding photographs.
+            format!(
+                "Scanning now — {} photographs read so far. Keep it plugged in until the scan finishes.",
+                thousands(self.complete)
+            )
+        } else if never_scanned {
             "Not scanned yet — plug it in and press Scan this drive.".to_string()
         } else if self.is_incomplete() {
             format!(
@@ -642,6 +654,11 @@ pub fn drive_coverage_with_queue(
             .collect::<std::result::Result<_, _>>()?,
         None => Default::default(),
     };
+    let scanning: std::collections::HashSet<i64> = running_scans(conn)?
+        .into_iter()
+        .filter(|r| r.alive)
+        .map(|r| r.drive_number)
+        .collect();
     let mut stmt = conn.prepare(
         "SELECT d.drive_number, d.friendly_name, d.last_scan_at,
                 (SELECT count(*) FROM files f
@@ -665,8 +682,10 @@ pub fn drive_coverage_with_queue(
         // Never more than was actually left over.
         let remaining = (discovered - complete).max(0);
         let unreadable = given_up.get(&drive_id).copied().unwrap_or(0).min(remaining);
+        let drive_number: i64 = r.get(0)?;
         Ok(DriveCoverage {
-            drive_number: r.get(0)?,
+            drive_number,
+            scanning: scanning.contains(&drive_number),
             drive_name: r.get(1)?,
             last_scan_at: r.get(2)?,
             complete,
@@ -1685,6 +1704,37 @@ mod name_recurrence_tests {
 mod unreadable_tests {
     use super::*;
     use crate::db::{open_in_memory, SchemaKind};
+
+    /// A drive whose scan is running is never "safe to unplug", however
+    /// complete the first handful of photographs make it look.
+    #[test]
+    fn a_drive_being_scanned_is_not_safe_to_unplug() {
+        let archive = open_in_memory(SchemaKind::Archive).unwrap();
+        archive
+            .execute_batch(
+                "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES ('d11',11,'online','now');
+                 INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r11','d11','','now');
+                 INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, status, created_at, updated_at)
+                 VALUES ('f1','d11','r11','a','a',1,1,'complete','now','now');",
+            )
+            .unwrap();
+        archive
+            .execute(
+                "INSERT INTO scan_runs (id, drive_id, drive_number, scan_root, mode, started_at,
+                                        heartbeat_at, outcome, files_discovered, pid)
+                 VALUES ('s11','d11',11,'/x','initial',?1,?1,'running',1,?2)",
+                rusqlite::params![crate::util::now_iso8601(), std::process::id() as i64],
+            )
+            .unwrap();
+
+        let all = drive_coverage_with_queue(&archive, None).unwrap();
+        let d = all.iter().find(|c| c.drive_number == 11).unwrap();
+        assert!(d.scanning);
+        assert!(!d.can_unplug);
+        assert!(d.summary.starts_with("Scanning now"), "{}", d.summary);
+        assert!(!d.summary.contains("Safe to unplug"), "{}", d.summary);
+    }
 
     /// Photographs the scan gave up on do not keep a drive "unfinished": the
     /// owner's archive had eight drives saying "plug it in to finish" over a
