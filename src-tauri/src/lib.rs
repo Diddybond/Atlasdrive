@@ -223,6 +223,20 @@ async fn face_gallery(
     .map_err(|e| e.to_string())?
 }
 
+/// Photographs that exist on only one drive, per drive and folder.
+#[tauri::command]
+async fn single_copies(
+    state: State<'_, AppState>,
+) -> Result<Vec<family_archive_core::copies::DriveCopies>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive = open_archive(&paths)?;
+        family_archive_core::copies::single_copies(&archive).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// How many faces nobody has named, per drive — counted, not sampled.
 #[tauri::command]
 async fn unnamed_face_counts(
@@ -1731,6 +1745,7 @@ pub fn run() {
             get_progress,
             run_verifier,
             unnamed_face_counts,
+            single_copies,
             group_faces,
             prepare_review,
             doctor,

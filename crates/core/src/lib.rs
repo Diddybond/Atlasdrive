@@ -18,6 +18,7 @@ pub mod backup;
 pub mod bitrot;
 pub mod compare;
 pub mod config;
+pub mod copies;
 pub mod crypto;
 pub mod dates;
 /// Tests only: the decision log is documentation, and nothing ships from here.

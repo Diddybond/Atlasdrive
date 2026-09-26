@@ -230,6 +230,13 @@ enum DriveAction {
         #[arg(long)]
         category: Vec<String>,
     },
+    /// Photographs that exist on only one drive — what a drive failure would
+    /// lose. Works with every drive disconnected.
+    Copies {
+        /// Limit to one drive; omit for every drive.
+        #[arg(long)]
+        number: Option<i64>,
+    },
     /// What is stored on a drive — works with the drive disconnected.
     Contents {
         /// Limit to one drive; omit to inventory every registered drive.
@@ -572,6 +579,17 @@ fn drive_cmd(ctx: &Ctx, action: DriveAction) -> Result<()> {
                     updated.categories.join(", ")
                 }
             );
+            Ok(())
+        }
+        DriveAction::Copies { number } => {
+            let report = family_archive_core::copies::single_copies(&archive)?;
+            for d in report.iter().filter(|d| number.is_none_or(|n| n == d.drive_number)) {
+                println!("{}", d.summary());
+                for f in &d.folders {
+                    let folder = if f.folder.is_empty() { "(top level)" } else { &f.folder };
+                    println!("    {:>6}  {}", f.photographs, folder);
+                }
+            }
             Ok(())
         }
         DriveAction::Contents { number } => {
