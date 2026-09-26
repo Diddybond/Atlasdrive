@@ -1,6 +1,7 @@
 import { FaceUpgradeCard } from "./FaceUpgradeCard";
+import { PhotoViewer } from "./PhotoViewer";
 import { useEffect, useState } from "react";
-import { api, ExportSummary, GalleryFace, NamedPerson, PersonFolder, SuggestedFace, UnnamedOnDrive } from "../api";
+import { api, DoubtfulFace, ExportSummary, GalleryFace, NamedPerson, PersonCheck, PersonFolder, SuggestedFace, UnnamedOnDrive } from "../api";
 
 /// People, in three clearly separate parts.
 ///
@@ -35,6 +36,10 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
   const [thumbNote, setThumbNote] = useState<string | null>(null);
   const [people, setPeople] = useState<NamedPerson[]>([]);
   // The suggestion being answered "someone else", and the name typed for it.
+  // A person whose faces are being checked for strangers (D-103).
+  const [checking, setChecking] = useState<NamedPerson | null>(null);
+  const [check, setCheck] = useState<PersonCheck | null>(null);
+  const [viewing, setViewing] = useState<DoubtfulFace | null>(null);
   const [otherFor, setOtherFor] = useState<string | null>(null);
   const [otherName, setOtherName] = useState("");
   const [selected, setSelected] = useState<GalleryFace | null>(null);
@@ -210,6 +215,22 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
     setPeople(await api.listPeople());
   }
 
+  async function openCheck(p: NamedPerson) {
+    setChecking(p);
+    setReviewing(null);
+    setCheck(null);
+    const c = await api.checkPerson(p.id);
+    setCheck(c);
+    setThumbs(await loadThumbs(c.doubtful.map((f) => f.face_id), thumbs));
+  }
+
+  async function answerDoubt(f: DoubtfulFace, isThem: boolean) {
+    if (!checking) return;
+    await api.answerDoubtfulFace(f.face_id, checking.id, isThem);
+    setCheck((c) => (c ? { ...c, doubtful: c.doubtful.filter((x) => x.face_id !== f.face_id) } : c));
+    if (!isThem) setPeople(await api.listPeople());
+  }
+
   async function answerAll(person: NamedPerson, isThem: boolean) {
     setBusy(true);
     try {
@@ -328,6 +349,13 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
                     Review {p.suggested_faces} possible
                   </button>
                 )}
+                <button
+                  className="ghost"
+                  onClick={() => void openCheck(p)}
+                  aria-label={`Check ${p.display_name}'s photographs for faces that are not them`}
+                >
+                  Check photos
+                </button>
                 <button
                   className="ghost"
                   onClick={() => {
@@ -463,6 +491,82 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
       )}
 
       {/* 2. Guesses — asked as questions, never shown as names. */}
+      {checking && (
+        <div className="card">
+          <div className="row-between">
+            <h2>Is every face here {checking.display_name}?</h2>
+            <button className="ghost" onClick={() => setChecking(null)}>
+              Close
+            </button>
+          </div>
+          {check === null ? (
+            <p className="subtle">Comparing {checking.display_name}'s faces…</p>
+          ) : check.checked < 4 ? (
+            <p className="empty">
+              This check needs the improved face recognition. Once it has finished (see the card at
+              the top), {checking.display_name}'s photographs can be checked here.
+            </p>
+          ) : check.doubtful.length === 0 ? (
+            <p className="empty">
+              All {check.checked.toLocaleString()} faces checked. Every one looks like{" "}
+              {checking.display_name}.
+            </p>
+          ) : (
+            <>
+              <p className="drive-meta subtle">
+                {check.checked.toLocaleString()} faces checked. These {check.doubtful.length} do not
+                look like the rest of {checking.display_name}'s — least alike first. Click a face to
+                see the whole photograph.
+              </p>
+              <ul className="suggestion-list">
+                {check.doubtful.map((f) => (
+                  <li key={f.face_id} className="suggestion">
+                    <button
+                      className="face-open"
+                      onClick={() => setViewing(f)}
+                      aria-label={`See the photograph ${f.filename}`}
+                    >
+                      {thumbs[f.face_id] ? (
+                        <img src={thumbs[f.face_id]} alt="" width={96} height={96} />
+                      ) : (
+                        <span className="face-cell-empty" aria-hidden>
+                          🙂
+                        </span>
+                      )}
+                    </button>
+                    <span className="person-counts">
+                      Drive {f.drive_number} · {f.filename}
+                    </span>
+                    <button
+                      onClick={() => void answerDoubt(f, true)}
+                      aria-label={`Yes, this is ${checking.display_name}`}
+                    >
+                      It's {checking.display_name}
+                    </button>
+                    <button
+                      className="ghost"
+                      onClick={() => void answerDoubt(f, false)}
+                      aria-label={`No, this is not ${checking.display_name}`}
+                    >
+                      Not {checking.display_name}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+      {viewing && (
+        <PhotoViewer
+          fileId={viewing.file_id}
+          filename={viewing.filename}
+          driveNumber={viewing.drive_number}
+          online={viewing.online}
+          onClose={() => setViewing(null)}
+        />
+      )}
+
       {reviewing && (
         <div className="card">
           <div className="row-between">

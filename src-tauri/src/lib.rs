@@ -538,6 +538,45 @@ async fn name_face_in_photo(
     .map_err(|e| e.to_string())?
 }
 
+/// Faces filed under a person that do not look like the rest of them (D-103).
+#[tauri::command]
+async fn check_person(state: State<'_, AppState>, person_id: String) -> Result<faces::PersonCheck, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<faces::PersonCheck, String> {
+        let archive = open_archive(&paths)?;
+        let key = keystore::existing_key(paths.keys_dir())
+            .map_err(map_err)?
+            .ok_or_else(|| keystore::MISSING_KEY.to_string())?;
+        faces::FaceRepo::new(&archive).doubtful_faces(&person_id, &key).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Answer one doubtful face: it is them (kept, not asked again) or it is not
+/// (it leaves them and becomes an unnamed face).
+#[tauri::command]
+async fn answer_doubtful_face(
+    state: State<'_, AppState>,
+    face_id: String,
+    person_id: String,
+    is_them: bool,
+) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let archive = open_archive(&paths)?;
+        let repo = faces::FaceRepo::new(&archive);
+        if is_them {
+            repo.keep_face(&face_id, &person_id)
+        } else {
+            repo.not_this_person(&face_id)
+        }
+        .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Something the detector took for a face that is not one.
 #[tauri::command]
 async fn not_a_face(state: State<'_, AppState>, face_id: String) -> Result<(), String> {
@@ -2399,6 +2438,8 @@ pub fn run() {
             photo_view,
             name_face_in_photo,
             not_a_face,
+            check_person,
+            answer_doubtful_face,
             photos_of_person,
             copy_person_photos,
             write_sidecars_for_person,

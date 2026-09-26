@@ -2791,3 +2791,22 @@ read in it.
   one deliberately wrong group. After the upgrade each person is exactly one
   group of two. Measured cost on the 4-core Linux build box: ~260 ms per face
   per core.
+
+## D-103 — Check a named person for faces that are not them
+
+**Status:** settled.
+
+- Groups named before D-102 were built by Vision's look-alike matching, and
+  naming a whole group carried any strangers in it along. **Check photos**,
+  next to each named person, lists only the faces filed under them that do
+  not look like the rest (`FaceRepo::doubtful_faces`).
+- **Likeness:** a face's likeness is the mean of its five best identity-model
+  similarities to the person's other faces. A face is doubtful below 0.30. A
+  person photographed across many years still passes, as long as a handful of
+  photographs resemble each face.
+- **Answers:** "It's them" records a `face_person_links` row with source
+  `kept`, so the face is not asked about again. "Not them" moves the face out
+  into an unnamed group of its own (`not_this_person`). Clicking a face opens
+  the whole photograph in the viewer.
+- Needs identity-model embeddings: with fewer than four, the panel says it
+  becomes available once the upgrade has finished.

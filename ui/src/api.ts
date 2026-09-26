@@ -351,6 +351,20 @@ export interface FailureReason {
   example: string | null;
 }
 
+export interface DoubtfulFace {
+  face_id: string;
+  file_id: string;
+  filename: string;
+  drive_number: number;
+  online: boolean;
+  likeness: number;
+}
+
+export interface PersonCheck {
+  checked: number;
+  doubtful: DoubtfulFace[];
+}
+
 export interface FaceIdentityState {
   model_installed: boolean;
   status: { upgraded: number; pending: number; unreadable: number };
@@ -555,6 +569,9 @@ export const api = {
       faceId,
       name,
     }),
+  checkPerson: (personId: string) => call<PersonCheck>("check_person", { personId }),
+  answerDoubtfulFace: (faceId: string, personId: string, isThem: boolean) =>
+    call<void>("answer_doubtful_face", { faceId, personId, isThem }),
   faceIdentityState: () => call<FaceIdentityState>("face_identity_state"),
   startFaceUpgrade: () => call<void>("start_face_upgrade"),
   stopFaceUpgrade: () => call<void>("stop_face_upgrade"),
@@ -639,6 +656,7 @@ const mockClusters: ClusterSummary[] = [
 ];
 const mockPeople: NamedPerson[] = [];
 const mockPhotoFaces: Record<string, PhotoFace[]> = {};
+const mockDoubtful: Record<string, DoubtfulFace[]> = {};
 
 let mockSettings: Settings = {
   backup_destination: null,
@@ -877,6 +895,20 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       }
       person.confirmed_faces += face ? face.group_size : 1;
       return Promise.resolve({ person, suggested: 2 } as unknown as T);
+    }
+    case "check_person": {
+      const id = String(args?.personId ?? "");
+      mockDoubtful[id] ??= [
+        { face_id: `${id}-x1`, file_id: "f2", filename: "portrait.jpg", drive_number: 7, online: false, likeness: 0.04 },
+        { face_id: `${id}-x2`, file_id: "f1", filename: "beach_1998.jpg", drive_number: 14, online: true, likeness: 0.21 },
+      ];
+      return Promise.resolve({ checked: 140, doubtful: mockDoubtful[id] } as unknown as T);
+    }
+    case "answer_doubtful_face": {
+      for (const k of Object.keys(mockDoubtful)) {
+        mockDoubtful[k] = mockDoubtful[k].filter((f) => f.face_id !== args?.faceId);
+      }
+      return Promise.resolve(undefined as unknown as T);
     }
     case "face_identity_state":
       return Promise.resolve(mockIdentity as unknown as T);

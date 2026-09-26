@@ -364,6 +364,38 @@ pub struct PhotoFace {
     pub person_name: Option<String>,
 }
 
+/// A face filed under a named person that does not look like them (D-103).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoubtfulFace {
+    pub face_id: String,
+    pub file_id: String,
+    pub filename: String,
+    pub drive_number: i64,
+    pub online: bool,
+    /// How much this face resembles the person's other faces, 0–1.
+    pub likeness: f32,
+}
+
+/// The result of checking one person's faces.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PersonCheck {
+    /// Faces of this person the identity model could compare.
+    pub checked: usize,
+    /// Faces that do not look like the rest, least alike first.
+    pub doubtful: Vec<DoubtfulFace>,
+}
+
+/// Below this, a face does not look like the person it is filed under.
+///
+/// Measured as the average of its five best matches among the person's other
+/// faces, so a person photographed at many ages is still recognised as long
+/// as a handful of photographs resemble each face. Different people score
+/// around 0.0–0.2 on the identity model; the same person 0.45 and up.
+pub const DOUBT_THRESHOLD: f32 = 0.30;
+const DOUBT_NEIGHBOURS: usize = 5;
+/// Fewer identity-model faces than this and there is no "rest" to compare with.
+const DOUBT_MIN_FACES: usize = 4;
+
 /// A face the app believes is a named person, awaiting a yes or no.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuggestedFace {
@@ -660,6 +692,105 @@ impl<'a> FaceRepo<'a> {
             }
         };
         self.tag_cluster_with_name(&cluster_id, display_name)
+    }
+
+    /// Faces filed under a person that do not look like the rest of them.
+    ///
+    /// Groups named before the identity model (D-102) were built by Apple
+    /// Vision's look-alike matching, which put different people together; a
+    /// whole group named at once carried them in. This finds them, so the
+    /// owner can say "not them" to each. Faces the owner has already said are
+    /// them are not asked about again.
+    pub fn doubtful_faces(&self, person_id: &str, key: &MasterKey) -> Result<PersonCheck> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, fl.id, fl.filename, d.drive_number, d.status,
+                    fe.ciphertext, fe.nonce, fe.enc_version, fe.key_version
+               FROM faces f
+               JOIN face_clusters c   ON c.id = f.cluster_id
+               JOIN face_embeddings fe ON fe.face_id = f.id
+               JOIN files fl          ON fl.id = f.file_id
+               JOIN drives d          ON d.id = fl.drive_id
+              WHERE c.person_id = ?1 AND c.status = 'confirmed'
+                AND fe.model_id = ?2 AND fe.model_version = ?3
+                AND f.is_false_detection = 0",
+        )?;
+        let rows = stmt.query_map(
+            params![person_id, crate::ai::identity::MODEL_ID, crate::ai::identity::MODEL_VERSION],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    Sealed { ciphertext: r.get(5)?, nonce: r.get(6)?, enc_version: r.get(7)?, key_version: r.get(8)? },
+                ))
+            },
+        )?;
+        let mut faces = Vec::new();
+        for row in rows {
+            let (face_id, file_id, filename, drive_number, status, sealed) = row?;
+            if let Ok(v) = crypto::open_vector(key, &sealed) {
+                faces.push((face_id, file_id, filename, drive_number, status == "online", v));
+            }
+        }
+        let checked = faces.len();
+        if checked < DOUBT_MIN_FACES {
+            return Ok(PersonCheck { checked, doubtful: Vec::new() });
+        }
+        let kept: std::collections::HashSet<String> = self
+            .conn
+            .prepare(
+                "SELECT face_id FROM face_person_links
+                  WHERE person_id = ?1 AND source = 'kept' AND face_id IS NOT NULL",
+            )?
+            .query_map([person_id], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+
+        let k = DOUBT_NEIGHBOURS.min(checked - 1);
+        let mut doubtful = Vec::new();
+        for (i, (face_id, file_id, filename, drive_number, online, v)) in faces.iter().enumerate() {
+            if kept.contains(face_id) {
+                continue;
+            }
+            let mut sims: Vec<f32> = faces
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, other)| cosine_similarity(v, &other.5))
+                .collect();
+            sims.sort_by(|a, b| b.total_cmp(a));
+            let likeness = sims.iter().take(k).sum::<f32>() / k as f32;
+            if likeness < DOUBT_THRESHOLD {
+                doubtful.push(DoubtfulFace {
+                    face_id: face_id.clone(),
+                    file_id: file_id.clone(),
+                    filename: filename.clone(),
+                    drive_number: *drive_number,
+                    online: *online,
+                    likeness: likeness.max(0.0),
+                });
+            }
+        }
+        doubtful.sort_by(|a, b| a.likeness.total_cmp(&b.likeness));
+        Ok(PersonCheck { checked, doubtful })
+    }
+
+    /// The owner looked and said: yes, this face is them. Not asked again.
+    pub fn keep_face(&self, face_id: &str, person_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO face_person_links (id, face_id, person_id, source, confidence, is_confirmed, created_at)
+             VALUES (?1, ?2, ?3, 'kept', 1.0, 1, ?4)",
+            params![new_uuid(), face_id, person_id, now_iso8601()],
+        )?;
+        Ok(())
+    }
+
+    /// The owner looked and said: this face is not them. It leaves the
+    /// person and becomes an unnamed face again, free to be named or grouped.
+    pub fn not_this_person(&self, face_id: &str) -> Result<()> {
+        self.split_face(face_id)?;
+        Ok(())
     }
 
     /// Every face found in one photograph, left to right.
@@ -2005,6 +2136,48 @@ mod tests {
         let names: Vec<_> = after.iter().map(|f| f.person_name.clone().unwrap()).collect();
         assert_eq!(names, ["Kent", "Daisy"]);
         assert!(repo.name_one_face(&a, "  ").is_err());
+    }
+
+    /// A stranger filed under someone is found; their real faces are not;
+    /// answering removes it from the list either way.
+    #[test]
+    fn checking_a_person_finds_the_stranger_among_them() {
+        let (conn, _d, key) = setup();
+        let repo = FaceRepo::new(&conn);
+        let id = crate::ai::identity::MODEL_ID;
+        let mut aimee = Vec::new();
+        // Five faces of one person (similar), one stranger (orthogonal).
+        for (n, v) in [
+            [1.0, 0.1, 0.0], [0.95, 0.2, 0.0], [0.9, 0.0, 0.1], [1.0, 0.0, 0.2], [0.97, 0.1, 0.1],
+            [0.0, 0.0, 1.0],
+        ]
+        .iter()
+        .enumerate()
+        {
+            add_file(&conn, &format!("f{n}"));
+            aimee.push(repo.insert_face(&format!("f{n}"), (0.1, 0.1, 0.2, 0.2), 0.9, id, "1", v, &key).unwrap());
+        }
+        let c = repo.split_face(&aimee[0]).unwrap();
+        for f in &aimee {
+            conn.execute("UPDATE faces SET cluster_id=?1 WHERE id=?2", params![c, f]).unwrap();
+        }
+        let person = repo.tag_cluster_with_name(&c, "Aimee").unwrap();
+
+        let check = repo.doubtful_faces(&person.id, &key).unwrap();
+        assert_eq!(check.checked, 6);
+        let found: Vec<_> = check.doubtful.iter().map(|d| d.face_id.clone()).collect();
+        assert_eq!(found, [aimee[5].clone()]);
+
+        // "It's Aimee" — not asked again.
+        repo.keep_face(&aimee[5], &person.id).unwrap();
+        assert!(repo.doubtful_faces(&person.id, &key).unwrap().doubtful.is_empty());
+
+        // "Not Aimee" — the face leaves her.
+        conn.execute("DELETE FROM face_person_links WHERE source='kept'", []).unwrap();
+        repo.not_this_person(&aimee[5]).unwrap();
+        let after = repo.doubtful_faces(&person.id, &key).unwrap();
+        assert_eq!(after.checked, 5);
+        assert!(after.doubtful.is_empty());
     }
 
     #[test]

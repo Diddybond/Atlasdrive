@@ -380,6 +380,28 @@ describe("AtlasDrive UI", () => {
     );
   });
 
+  it("checks a named person's faces and removes one that is not them", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /Unnamed face/ }).length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /Unnamed face/ })[0]);
+    fireEvent.change(screen.getByLabelText(/^Name$/), { target: { value: "Grace" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Check Grace's photographs for faces that are not them" }),
+    );
+    expect(await screen.findByText(/140 faces checked\. These 2 do not look like the rest/)).toBeDefined();
+    fireEvent.click(screen.getAllByRole("button", { name: "No, this is not Grace" })[0]);
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: "No, this is not Grace" })).toHaveLength(1);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Yes, this is Grace" }));
+    expect(await screen.findByText(/Every one looks like Grace/)).toBeDefined();
+  });
+
   it("tags a suggested face as someone else while reviewing", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /People/ }));
