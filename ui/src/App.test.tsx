@@ -1,4 +1,4 @@
-import { resetMockBackup, setMockCoverage, setMockScanError, setMockScanning, setMockStopping } from "./api";
+import { resetMockBackup, setMockCoverage, setMockFaceThumbError, setMockScanError, setMockScanning, setMockStopping } from "./api";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { App } from "./App";
 
@@ -271,6 +271,16 @@ describe("AtlasDrive UI", () => {
     await waitFor(() => {
       expect(screen.getByText("Taken on 1998-08-12")).toBeDefined();
     });
+  });
+
+  it("says why face pictures are missing instead of showing blank faces", async () => {
+    setMockFaceThumbError("keychain read: access denied");
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/Face pictures cannot be shown: .*access denied/)).toBeDefined();
+    });
+    setMockFaceThumbError(null);
   });
 
   it("browses faces as pictures and names one without knowing it first", async () => {

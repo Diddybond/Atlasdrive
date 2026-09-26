@@ -377,6 +377,11 @@ export function resetMockBackup(destination: string | null = null) {
   mockSettings = { ...mockSettings, backup_destination: destination, last_backup_at: null };
 }
 
+let mockFaceThumbError: string | null = null;
+export function setMockFaceThumbError(msg: string | null) {
+  mockFaceThumbError = msg;
+}
+
 export function setMockScanning(v: boolean) {
   mockScanRunning = v;
 }
@@ -789,6 +794,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case "group_faces":
       return Promise.resolve({ faces_considered: 25000, groups_created: 3100, faces_grouped: 17400, groups_merged: 42 } as unknown as T);
     case "face_thumbnail": {
+      if (mockFaceThumbError) return Promise.reject(new Error(mockFaceThumbError));
       const idx = mockGallery.findIndex((f) => f.face_id === args?.faceId);
       return Promise.resolve((idx >= 0 ? mockFaceImage(idx + 1) : null) as unknown as T);
     }

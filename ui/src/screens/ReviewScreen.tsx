@@ -30,6 +30,8 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
 
   const [faces, setFaces] = useState<GalleryFace[]>([]);
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
+  // Why face pictures are not showing, when they are not — never a silent 🙂.
+  const [thumbNote, setThumbNote] = useState<string | null>(null);
   const [people, setPeople] = useState<NamedPerson[]>([]);
   const [selected, setSelected] = useState<GalleryFace | null>(null);
   const [name, setName] = useState("");
@@ -49,13 +51,30 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
 
   async function loadThumbs(ids: string[], into: Record<string, string>) {
     const loaded = { ...into };
+    let failure: string | null = null;
+    let missing = 0;
     await Promise.all(
       ids.map(async (id) => {
         if (loaded[id]) return;
-        const src = await api.faceThumbnail(id);
-        if (src) loaded[id] = src;
+        try {
+          const src = await api.faceThumbnail(id);
+          if (src) loaded[id] = src;
+          else missing += 1;
+        } catch (err) {
+          failure ??= String(err);
+        }
       }),
     );
+    if (failure) {
+      setThumbNote(`Face pictures cannot be shown: ${failure}`);
+    } else if (missing > 0 && missing === ids.length) {
+      setThumbNote(
+        "No pictures are stored for these faces yet, so they show as 🙂. " +
+          "The faces are still there and can be named and searched.",
+      );
+    } else {
+      setThumbNote(null);
+    }
     return loaded;
   }
 
@@ -531,6 +550,11 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
       {revealNote && (
         <p className="search-note" role="status">
           {revealNote}
+        </p>
+      )}
+      {thumbNote && (
+        <p className="search-note" role="status">
+          {thumbNote}
         </p>
       )}
 
