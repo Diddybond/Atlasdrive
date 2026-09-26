@@ -65,106 +65,114 @@ struct DriveDto {
 }
 
 #[tauri::command]
-fn list_drives(state: State<AppState>) -> Result<Vec<DriveDto>, String> {
+async fn list_drives(state: State<'_, AppState>) -> Result<Vec<DriveDto>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let repo = DriveRepo::new(&archive);
-    let drives = repo.list().map_err(map_err)?;
-    // DriveRepo::list already resolves live connection status; doing it again
-    // here is how the two ended up disagreeing in the first place.
-    let mut out = Vec::new();
-    for d in drives {
-        let image_count: i64 = archive
-            .query_row(
-                "SELECT count(*) FROM files WHERE drive_id=?1 AND status='complete'",
-                [&d.id],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        out.push(DriveDto {
-            id: d.id,
-            friendly_name: d.friendly_name,
-            status: d.status,
-            drive_number: d.drive_number,
-            physical_location: d.physical_location,
-            categories: d.categories,
-            last_scan_at: d.last_scan_at,
-            image_count,
-            note: None,
-        });
-    }
-    Ok(out)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<DriveDto>, String> {
+        let archive = open_archive(&paths)?;
+        let repo = DriveRepo::new(&archive);
+        let drives = repo.list().map_err(map_err)?;
+        // DriveRepo::list already resolves live connection status; doing it again
+        // here is how the two ended up disagreeing in the first place.
+        let mut out = Vec::new();
+        for d in drives {
+            let image_count: i64 = archive
+                .query_row(
+                    "SELECT count(*) FROM files WHERE drive_id=?1 AND status='complete'",
+                    [&d.id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            out.push(DriveDto {
+                id: d.id,
+                friendly_name: d.friendly_name,
+                status: d.status,
+                drive_number: d.drive_number,
+                physical_location: d.physical_location,
+                categories: d.categories,
+                last_scan_at: d.last_scan_at,
+                image_count,
+                note: None,
+            });
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn register_drive(
-    state: State<AppState>,
+async fn register_drive(
+    state: State<'_, AppState>,
     number: i64,
     path: String,
     name: Option<String>,
     write_manifest: bool,
 ) -> Result<DriveDto, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let repo = DriveRepo::new(&archive);
-    let vol = PathBuf::from(&path);
-    let drive = repo
-        .register(&RegisterParams {
-            drive_number: number,
-            friendly_name: name.clone(),
-            volume_name: vol.file_name().map(|s| s.to_string_lossy().to_string()),
-            // Remembered so the drive can be scanned straight after
-            // registering; without it there is nothing to scan until a scan has
-            // already run.
-            registered_root: Some(path.clone()),
-            ..Default::default()
-        })
-        .map_err(map_err)?;
-    // The identity file is a convenience, not part of registering: it lets the
-    // drive be recognised automatically next time, and the drive is perfectly
-    // usable without it. Failing the whole registration when it cannot be
-    // written was a real defect — the drive was already recorded by the call
-    // above, so the owner was told registration failed when it had succeeded,
-    // and retrying then complained the number was in use.
-    //
-    // Read-only drives are the common case here, not an edge one: macOS mounts
-    // NTFS read-only, so every Windows-formatted disk lands on this path.
-    let mut note = None;
-    if write_manifest {
-        let m = DriveManifest::new(&drive.id, drive.drive_number, name);
-        match m.write_to_volume(&vol) {
-            Ok(_) => {
-                let _ = repo.audit(&drive.id, "manifest_written", None);
-            }
-            Err(e) => {
-                let read_only = e.to_string().contains("Read-only")
-                    || e.to_string().contains("os error 30");
-                note = Some(if read_only {
-                    "Registered. This drive is read-only, so the identity file was not saved \
-                     — AtlasDrive will recognise it by name and contents instead. Nothing else \
-                     changes."
-                        .to_string()
-                } else {
-                    format!(
-                        "Registered, but the identity file could not be saved ({e}). \
-                         AtlasDrive will recognise this drive by name and contents instead."
-                    )
-                });
-                let _ = repo.audit(&drive.id, "manifest_skipped", None);
+    tauri::async_runtime::spawn_blocking(move || -> Result<DriveDto, String> {
+        let archive = open_archive(&paths)?;
+        let repo = DriveRepo::new(&archive);
+        let vol = PathBuf::from(&path);
+        let drive = repo
+            .register(&RegisterParams {
+                drive_number: number,
+                friendly_name: name.clone(),
+                volume_name: vol.file_name().map(|s| s.to_string_lossy().to_string()),
+                // Remembered so the drive can be scanned straight after
+                // registering; without it there is nothing to scan until a scan has
+                // already run.
+                registered_root: Some(path.clone()),
+                ..Default::default()
+            })
+            .map_err(map_err)?;
+        // The identity file is a convenience, not part of registering: it lets the
+        // drive be recognised automatically next time, and the drive is perfectly
+        // usable without it. Failing the whole registration when it cannot be
+        // written was a real defect — the drive was already recorded by the call
+        // above, so the owner was told registration failed when it had succeeded,
+        // and retrying then complained the number was in use.
+        //
+        // Read-only drives are the common case here, not an edge one: macOS mounts
+        // NTFS read-only, so every Windows-formatted disk lands on this path.
+        let mut note = None;
+        if write_manifest {
+            let m = DriveManifest::new(&drive.id, drive.drive_number, name);
+            match m.write_to_volume(&vol) {
+                Ok(_) => {
+                    let _ = repo.audit(&drive.id, "manifest_written", None);
+                }
+                Err(e) => {
+                    let read_only = e.to_string().contains("Read-only")
+                        || e.to_string().contains("os error 30");
+                    note = Some(if read_only {
+                        "Registered. This drive is read-only, so the identity file was not saved \
+                         — AtlasDrive will recognise it by name and contents instead. Nothing else \
+                         changes."
+                            .to_string()
+                    } else {
+                        format!(
+                            "Registered, but the identity file could not be saved ({e}). \
+                             AtlasDrive will recognise this drive by name and contents instead."
+                        )
+                    });
+                    let _ = repo.audit(&drive.id, "manifest_skipped", None);
+                }
             }
         }
-    }
-    Ok(DriveDto {
-        id: drive.id,
-        drive_number: drive.drive_number,
-        friendly_name: drive.friendly_name,
-        status: drive.status,
-        physical_location: drive.physical_location,
-        categories: drive.categories,
-        last_scan_at: drive.last_scan_at,
-        image_count: 0,
-        note,
+        Ok(DriveDto {
+            id: drive.id,
+            drive_number: drive.drive_number,
+            friendly_name: drive.friendly_name,
+            status: drive.status,
+            physical_location: drive.physical_location,
+            categories: drive.categories,
+            last_scan_at: drive.last_scan_at,
+            image_count: 0,
+            note,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Search results plus a plain-language note about how the query was handled.
@@ -190,16 +198,20 @@ struct SearchResponse {
 /// This is the only way a name is ever attached to a face. Confirming promotes
 /// the group's faces to exemplars, so the person is recognised on later scans.
 #[tauri::command]
-fn tag_face_cluster(
-    state: State<AppState>,
+async fn tag_face_cluster(
+    state: State<'_, AppState>,
     cluster_id: String,
     name: String,
 ) -> Result<faces::Person, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive)
-        .tag_cluster_with_name(&cluster_id, &name)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<faces::Person, String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive)
+            .tag_cluster_with_name(&cluster_id, &name)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Faces to browse: one per group, biggest groups first. No names required.
@@ -282,16 +294,20 @@ async fn group_faces(state: State<'_, AppState>) -> Result<faces::GroupingReport
 /// The crop is decrypted here and never written to disk in the clear; the CSP
 /// permits `data:` images, so nothing needs to be served from a file path.
 #[tauri::command]
-fn face_thumbnail(state: State<AppState>, face_id: String) -> Result<Option<String>, String> {
+async fn face_thumbnail(state: State<'_, AppState>, face_id: String) -> Result<Option<String>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let key = keystore::default_keystore(paths.keys_dir())
-        .get_or_create()
-        .map_err(map_err)?;
-    let crop = faces::FaceRepo::new(&archive)
-        .thumbnail(&face_id, &key)
-        .map_err(map_err)?;
-    Ok(crop.map(|(bytes, format)| format!("data:image/{format};base64,{}", b64(&bytes))))
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
+        let archive = open_archive(&paths)?;
+        let key = keystore::default_keystore(paths.keys_dir())
+            .get_or_create()
+            .map_err(map_err)?;
+        let crop = faces::FaceRepo::new(&archive)
+            .thumbnail(&face_id, &key)
+            .map_err(map_err)?;
+        Ok(crop.map(|(bytes, format)| format!("data:image/{format};base64,{}", b64(&bytes))))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Minimal base64, to avoid a dependency for one call site.
@@ -319,29 +335,33 @@ struct TagResult {
 }
 
 #[tauri::command]
-fn tag_face(state: State<AppState>, face_id: String, name: String) -> Result<TagResult, String> {
+async fn tag_face(state: State<'_, AppState>, face_id: String, name: String) -> Result<TagResult, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let repo = faces::FaceRepo::new(&archive);
-    let person = repo.tag_face_with_name(&face_id, &name).map_err(map_err)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<TagResult, String> {
+        let archive = open_archive(&paths)?;
+        let repo = faces::FaceRepo::new(&archive);
+        let person = repo.tag_face_with_name(&face_id, &name).map_err(map_err)?;
 
-    // Immediately answer "who else is this?" rather than leaving the user to
-    // find the same person's other groups by eye.
-    let key = keystore::default_keystore(paths.keys_dir())
-        .get_or_create()
-        .map_err(map_err)?;
-    let (model_id, model_version) = face_model_partition(&archive);
-    let suggested = repo
-        .suggest_for_person(
-            &person.id,
-            &model_id,
-            &model_version,
-            &key,
-            faces::PERSON_MATCH_THRESHOLD,
-        )
-        .map_err(map_err)?;
+        // Immediately answer "who else is this?" rather than leaving the user to
+        // find the same person's other groups by eye.
+        let key = keystore::default_keystore(paths.keys_dir())
+            .get_or_create()
+            .map_err(map_err)?;
+        let (model_id, model_version) = face_model_partition(&archive);
+        let suggested = repo
+            .suggest_for_person(
+                &person.id,
+                &model_id,
+                &model_version,
+                &key,
+                faces::PERSON_MATCH_THRESHOLD,
+            )
+            .map_err(map_err)?;
 
-    Ok(TagResult { person, suggested })
+        Ok(TagResult { person, suggested })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// The model partition most of this archive's faces were written under.
@@ -363,66 +383,86 @@ fn face_model_partition(archive: &rusqlite::Connection) -> (String, String) {
 
 /// Faces awaiting a yes/no for a person, most confident first.
 #[tauri::command]
-fn pending_suggestions(
-    state: State<AppState>,
+async fn pending_suggestions(
+    state: State<'_, AppState>,
     person_id: String,
     limit: Option<usize>,
 ) -> Result<Vec<faces::SuggestedFace>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive)
-        .pending_suggestions(&person_id, limit.unwrap_or(200))
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<faces::SuggestedFace>, String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive)
+            .pending_suggestions(&person_id, limit.unwrap_or(200))
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Accept every outstanding proposal for a person.
 #[tauri::command]
-fn confirm_suggestions(state: State<AppState>, person_id: String) -> Result<usize, String> {
+async fn confirm_suggestions(state: State<'_, AppState>, person_id: String) -> Result<usize, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive)
-        .confirm_suggestions(&person_id)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive)
+            .confirm_suggestions(&person_id)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Reject every outstanding proposal for a person, freeing those faces.
 #[tauri::command]
-fn reject_suggestions(state: State<AppState>, person_id: String) -> Result<usize, String> {
+async fn reject_suggestions(state: State<'_, AppState>, person_id: String) -> Result<usize, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive)
-        .reject_suggestions(&person_id)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive)
+            .reject_suggestions(&person_id)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Say yes or no to one proposed group.
 #[tauri::command]
-fn resolve_suggestion(
-    state: State<AppState>,
+async fn resolve_suggestion(
+    state: State<'_, AppState>,
     cluster_id: String,
     is_them: bool,
 ) -> Result<(), String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let repo = faces::FaceRepo::new(&archive);
-    if is_them {
-        repo.confirm_cluster_suggestion(&cluster_id).map_err(map_err)
-    } else {
-        repo.reject_cluster_suggestion(&cluster_id).map_err(map_err)
-    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let archive = open_archive(&paths)?;
+        let repo = faces::FaceRepo::new(&archive);
+        if is_them {
+            repo.confirm_cluster_suggestion(&cluster_id).map_err(map_err)
+        } else {
+            repo.reject_cluster_suggestion(&cluster_id).map_err(map_err)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Every photograph containing a named person, and which drive holds it.
 #[tauri::command]
-fn photos_of_person(
-    state: State<AppState>,
+async fn photos_of_person(
+    state: State<'_, AppState>,
     person_id: String,
 ) -> Result<Vec<faces::PersonPhoto>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive)
-        .photos_of_person(&person_id)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<faces::PersonPhoto>, String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive)
+            .photos_of_person(&person_id)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Copy a person's photographs into a folder the user chose.
@@ -430,22 +470,26 @@ fn photos_of_person(
 /// Reads originals and writes only into `destination`. Never moves, never
 /// deletes, never writes to the source drive.
 #[tauri::command]
-fn copy_person_photos(
-    state: State<AppState>,
+async fn copy_person_photos(
+    state: State<'_, AppState>,
     person_id: String,
     destination: String,
 ) -> Result<family_archive_core::export::ExportSummary, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let repo = faces::FaceRepo::new(&archive);
-    let ids: Vec<String> = repo
-        .photos_of_person(&person_id)
-        .map_err(map_err)?
-        .into_iter()
-        .map(|p| p.file_id)
-        .collect();
-    family_archive_core::export::copy_photos(&archive, &ids, std::path::Path::new(&destination))
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::export::ExportSummary, String> {
+        let archive = open_archive(&paths)?;
+        let repo = faces::FaceRepo::new(&archive);
+        let ids: Vec<String> = repo
+            .photos_of_person(&person_id)
+            .map_err(map_err)?
+            .into_iter()
+            .map(|p| p.file_id)
+            .collect();
+        family_archive_core::export::copy_photos(&archive, &ids, std::path::Path::new(&destination))
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Write XMP sidecars next to a person's originals, for Bridge and Lightroom.
@@ -453,19 +497,23 @@ fn copy_person_photos(
 /// **Writes to the source drive.** Never called automatically — the interface
 /// asks first, exactly as it does before writing a drive manifest.
 #[tauri::command]
-fn write_sidecars_for_person(
-    state: State<AppState>,
+async fn write_sidecars_for_person(
+    state: State<'_, AppState>,
     person_id: String,
 ) -> Result<family_archive_core::export::SidecarSummary, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let ids: Vec<String> = faces::FaceRepo::new(&archive)
-        .photos_of_person(&person_id)
-        .map_err(map_err)?
-        .into_iter()
-        .map(|p| p.file_id)
-        .collect();
-    family_archive_core::export::write_xmp_sidecars(&archive, &ids).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::export::SidecarSummary, String> {
+        let archive = open_archive(&paths)?;
+        let ids: Vec<String> = faces::FaceRepo::new(&archive)
+            .photos_of_person(&person_id)
+            .map_err(map_err)?
+            .into_iter()
+            .map(|p| p.file_id)
+            .collect();
+        family_archive_core::export::write_xmp_sidecars(&archive, &ids).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// A small JPEG of a photograph, as a data URL for the results grid.
@@ -478,47 +526,55 @@ fn write_sidecars_for_person(
 /// Works with the drive disconnected — it reads the local thumbnail, never the
 /// original.
 #[tauri::command]
-fn photo_thumbnail(
-    state: State<AppState>,
+async fn photo_thumbnail(
+    state: State<'_, AppState>,
     file_id: String,
     max_edge: Option<u32>,
 ) -> Result<Option<String>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let rel: Option<String> = archive
-        .query_row(
-            "SELECT rel_path FROM thumbnails WHERE file_id = ?1",
-            [&file_id],
-            |r| r.get(0),
-        )
-        .ok();
-    let Some(rel) = rel else { return Ok(None) };
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
+        let archive = open_archive(&paths)?;
+        let rel: Option<String> = archive
+            .query_row(
+                "SELECT rel_path FROM thumbnails WHERE file_id = ?1",
+                [&file_id],
+                |r| r.get(0),
+            )
+            .ok();
+        let Some(rel) = rel else { return Ok(None) };
 
-    let abs = paths.thumbnails_dir().join(rel);
-    let Ok(img) = image::open(&abs) else { return Ok(None) };
-    let edge = max_edge.unwrap_or(240).clamp(64, 512);
-    let small = img.thumbnail(edge, edge);
+        let abs = paths.thumbnails_dir().join(rel);
+        let Ok(img) = image::open(&abs) else { return Ok(None) };
+        let edge = max_edge.unwrap_or(240).clamp(64, 512);
+        let small = img.thumbnail(edge, edge);
 
-    let mut jpeg = Vec::new();
-    let mut encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut jpeg), 78);
-    encoder
-        .encode_image(&small.to_rgb8())
-        .map_err(|e| format!("could not encode thumbnail: {e}"))?;
-    Ok(Some(format!("data:image/jpeg;base64,{}", b64(&jpeg))))
+        let mut jpeg = Vec::new();
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut jpeg), 78);
+        encoder
+            .encode_image(&small.to_rgb8())
+            .map_err(|e| format!("could not encode thumbnail: {e}"))?;
+        Ok(Some(format!("data:image/jpeg;base64,{}", b64(&jpeg))))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Where a person's photographs live, grouped by folder.
 #[tauri::command]
-fn person_folders(
-    state: State<AppState>,
+async fn person_folders(
+    state: State<'_, AppState>,
     person_id: String,
 ) -> Result<Vec<faces::PersonFolder>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive)
-        .folders_for_person(&person_id)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<faces::PersonFolder>, String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive)
+            .folders_for_person(&person_id)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Open a folder in Finder. Read-only: it shows a window, nothing more.
@@ -567,26 +623,34 @@ fn open_folder(state: State<AppState>, path: String) -> Result<(), String> {
 
 /// Remove a person added by mistake. Their faces are kept and become unnamed.
 #[tauri::command]
-fn forget_person(state: State<AppState>, person_id: String) -> Result<(), String> {
+async fn forget_person(state: State<'_, AppState>, person_id: String) -> Result<(), String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive)
-        .remove_person(&person_id)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive)
+            .remove_person(&person_id)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Correct a person's name, merging into an existing person on a name clash.
 #[tauri::command]
-fn rename_person(
-    state: State<AppState>,
+async fn rename_person(
+    state: State<'_, AppState>,
     person_id: String,
     name: String,
 ) -> Result<faces::Person, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive)
-        .rename_person(&person_id, &name)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<faces::Person, String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive)
+            .rename_person(&person_id, &name)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Re-scan a drive for photographs added since the last scan.
@@ -646,63 +710,83 @@ fn rescan_drive(state: State<AppState>, drive_number: i64) -> Result<String, Str
 
 /// Mark how a person relates to the owner — "family" being the one that matters.
 #[tauri::command]
-fn set_person_relationship(
-    state: State<AppState>,
+async fn set_person_relationship(
+    state: State<'_, AppState>,
     person_id: String,
     relationship: Option<String>,
 ) -> Result<(), String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive)
-        .set_relationship(&person_id, relationship.as_deref())
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive)
+            .set_relationship(&person_id, relationship.as_deref())
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Every relationship in use, with how many people carry it.
 #[tauri::command]
-fn person_relationships(state: State<AppState>) -> Result<Vec<(String, i64)>, String> {
+async fn person_relationships(state: State<'_, AppState>) -> Result<Vec<(String, i64)>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive).relationships().map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<(String, i64)>, String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive).relationships().map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Everyone the user has named, and how established each is.
 #[tauri::command]
-fn list_people(state: State<AppState>) -> Result<Vec<faces::NamedPerson>, String> {
+async fn list_people(state: State<'_, AppState>) -> Result<Vec<faces::NamedPerson>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    faces::FaceRepo::new(&archive).people().map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<faces::NamedPerson>, String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive).people().map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Mark a group as not a person at all (a false detection).
 #[tauri::command]
-fn reject_face_cluster(state: State<AppState>, cluster_id: String) -> Result<(), String> {
+async fn reject_face_cluster(state: State<'_, AppState>, cluster_id: String) -> Result<(), String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    archive
-        .execute(
-            "UPDATE face_clusters SET status='rejected', updated_at=?2 WHERE id=?1",
-            rusqlite::params![cluster_id, family_archive_core::util::now_iso8601()],
-        )
-        .map_err(map_err)?;
-    Ok(())
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let archive = open_archive(&paths)?;
+        archive
+            .execute(
+                "UPDATE face_clusters SET status='rejected', updated_at=?2 WHERE id=?1",
+                rusqlite::params![cluster_id, family_archive_core::util::now_iso8601()],
+            )
+            .map_err(map_err)?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Rename a drive, keeping its number and everything indexed from it.
 #[tauri::command]
-fn rename_drive(
-    state: State<AppState>,
+async fn rename_drive(
+    state: State<'_, AppState>,
     drive_number: i64,
     name: String,
 ) -> Result<(), String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let repo = DriveRepo::new(&archive);
-    let drive = repo
-        .get_by_number(drive_number)
-        .map_err(map_err)?
-        .ok_or_else(|| format!("Drive {drive_number} is not registered."))?;
-    repo.rename(&drive.id, &name).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let archive = open_archive(&paths)?;
+        let repo = DriveRepo::new(&archive);
+        let drive = repo
+            .get_by_number(drive_number)
+            .map_err(map_err)?
+            .ok_or_else(|| format!("Drive {drive_number} is not registered."))?;
+        repo.rename(&drive.id, &name).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Every subject the catalogue recognised, for browsing rather than guessing.
@@ -733,13 +817,17 @@ async fn catalogue_tags(
 
 /// What is stored on each drive — answerable with every drive unplugged.
 #[tauri::command]
-fn drive_contents(
-    state: State<AppState>,
+async fn drive_contents(
+    state: State<'_, AppState>,
     drive_number: Option<i64>,
 ) -> Result<Vec<family_archive_core::inventory::DriveContents>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::inventory::drive_contents(&archive, drive_number).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::inventory::DriveContents>, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::inventory::drive_contents(&archive, drive_number).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Photographs that look like this one.
@@ -750,31 +838,35 @@ fn drive_contents(
 /// matches on colour rather than meaning. Text search goes through Vision's
 /// classification labels and OCR instead. See D-040.
 #[tauri::command]
-fn similar_photographs(
-    state: State<AppState>,
+async fn similar_photographs(
+    state: State<'_, AppState>,
     file_id: String,
     limit: Option<usize>,
 ) -> Result<Vec<family_archive_core::search::SearchResult>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let repo = family_archive_core::search::SearchRepo::with_index_dir(&archive, paths.cache_dir());
-    let similar = repo
-        .similar_to(
-            &file_id,
-            &SearchFilters {
-                limit: limit.unwrap_or(24),
-                include_offline: true,
-                ..Default::default()
-            },
-        )
-        .map_err(map_err)?;
-    family_archive_core::search::fold_copies(&archive, similar).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::search::SearchResult>, String> {
+        let archive = open_archive(&paths)?;
+        let repo = family_archive_core::search::SearchRepo::with_index_dir(&archive, paths.cache_dir());
+        let similar = repo
+            .similar_to(
+                &file_id,
+                &SearchFilters {
+                    limit: limit.unwrap_or(24),
+                    include_offline: true,
+                    ..Default::default()
+                },
+            )
+            .map_err(map_err)?;
+        family_archive_core::search::fold_copies(&archive, similar).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn search_catalogue(
-    state: State<AppState>,
+async fn search_catalogue(
+    state: State<'_, AppState>,
     query: String,
     drive: Option<i64>,
     include_offline: bool,
@@ -788,72 +880,76 @@ fn search_catalogue(
     limit: Option<usize>,
 ) -> Result<SearchResponse, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    // The index lives in the cache directory: it is derived entirely from the
-    // catalogue, so losing it costs a rebuild and nothing else.
-    let repo = family_archive_core::search::SearchRepo::with_index_dir(
-        &archive,
-        paths.cache_dir(),
-    );
-    let filters = SearchFilters {
-        drive_number: drive,
-        online_only: !include_offline,
-        include_offline,
-        event_id,
-        client,
-        tags: tags.unwrap_or_default(),
-        limit: limit.unwrap_or(100).clamp(1, 5000),
-        ..Default::default()
-    };
+    tauri::async_runtime::spawn_blocking(move || -> Result<SearchResponse, String> {
+        let archive = open_archive(&paths)?;
+        // The index lives in the cache directory: it is derived entirely from the
+        // catalogue, so losing it costs a rebuild and nothing else.
+        let repo = family_archive_core::search::SearchRepo::with_index_dir(
+            &archive,
+            paths.cache_dir(),
+        );
+        let filters = SearchFilters {
+            drive_number: drive,
+            online_only: !include_offline,
+            include_offline,
+            event_id,
+            client,
+            tags: tags.unwrap_or_default(),
+            limit: limit.unwrap_or(100).clamp(1, 5000),
+            ..Default::default()
+        };
 
-    // An empty box with subjects picked is a browse, not a search: the tag
-    // rows answer it exactly, and routing it through free text told the owner
-    // a subject with 995 photographs had none.
-    let browsing = query.trim().is_empty() && !filters.tags.is_empty();
+        // An empty box with subjects picked is a browse, not a search: the tag
+        // rows answer it exactly, and routing it through free text told the owner
+        // a subject with 995 photographs had none.
+        let browsing = query.trim().is_empty() && !filters.tags.is_empty();
 
-    let (mut results, text_only, understood) = if browsing {
-        (repo.browse_by_tags(&filters).map_err(map_err)?, false, Vec::new())
-    } else {
-        // Embed the query locally so it can be compared against image embeddings.
-        let registry = EngineRegistry::local_default();
-        let engine = registry.engine_for(Capability::TextEmbedding);
-        let embedded = engine.text_embedding(&query, &CancelToken::new()).ok();
-        let visual = embedded.as_ref().map(|q| VisualQuery {
-            vector: &q.value.vector,
-            model_id: engine.model_id(),
-            model_version: engine.model_version(),
-            coverage: q.meta.confidence,
-        });
-        let text_only = embedded.as_ref().is_none_or(|q| q.meta.confidence == 0.0);
-        let understood = family_archive_core::ai::text::render_query(&query).matched_terms;
-        let results = repo
-            .natural_language_search(&query, visual, &filters)
-            .map_err(map_err)?;
-        (results, text_only, understood)
-    };
-    // A photograph on several drives is one result that names them all.
-    results = family_archive_core::search::fold_copies(&archive, results).map_err(map_err)?;
-    // Populate a friendly date label from the stored range.
-    for r in &mut results {
-        if let Some((a, b)) = &r.date_range {
-            r.date_label = Some(if a == b {
-                format!("Around {a}")
-            } else {
-                format!("Likely between {} and {}", &a[..4.min(a.len())], &b[..4.min(b.len())])
+        let (mut results, text_only, understood) = if browsing {
+            (repo.browse_by_tags(&filters).map_err(map_err)?, false, Vec::new())
+        } else {
+            // Embed the query locally so it can be compared against image embeddings.
+            let registry = EngineRegistry::local_default();
+            let engine = registry.engine_for(Capability::TextEmbedding);
+            let embedded = engine.text_embedding(&query, &CancelToken::new()).ok();
+            let visual = embedded.as_ref().map(|q| VisualQuery {
+                vector: &q.value.vector,
+                model_id: engine.model_id(),
+                model_version: engine.model_version(),
+                coverage: q.meta.confidence,
             });
+            let text_only = embedded.as_ref().is_none_or(|q| q.meta.confidence == 0.0);
+            let understood = family_archive_core::ai::text::render_query(&query).matched_terms;
+            let results = repo
+                .natural_language_search(&query, visual, &filters)
+                .map_err(map_err)?;
+            (results, text_only, understood)
+        };
+        // A photograph on several drives is one result that names them all.
+        results = family_archive_core::search::fold_copies(&archive, results).map_err(map_err)?;
+        // Populate a friendly date label from the stored range.
+        for r in &mut results {
+            if let Some((a, b)) = &r.date_range {
+                r.date_label = Some(if a == b {
+                    format!("Around {a}")
+                } else {
+                    format!("Likely between {} and {}", &a[..4.min(a.len())], &b[..4.min(b.len())])
+                });
+            }
         }
-    }
-    // Answer "which drive do I need?" alongside the photographs themselves.
-    let mut drives = family_archive_core::inventory::drives_matching(&results);
-    family_archive_core::inventory::locate_matches(&archive, &mut drives).map_err(map_err)?;
-    let where_to_look = family_archive_core::inventory::where_to_look(&drives);
+        // Answer "which drive do I need?" alongside the photographs themselves.
+        let mut drives = family_archive_core::inventory::drives_matching(&results);
+        family_archive_core::inventory::locate_matches(&archive, &mut drives).map_err(map_err)?;
+        let where_to_look = family_archive_core::inventory::where_to_look(&drives);
 
-    // Only browsing can state an exact total cheaply; a fused text/visual
-    // search does not, and claiming one would be a guess dressed as a fact.
-    let total_matches =
-        if browsing { repo.count_by_tags(&filters).ok() } else { None };
+        // Only browsing can state an exact total cheaply; a fused text/visual
+        // search does not, and claiming one would be a guess dressed as a fact.
+        let total_matches =
+            if browsing { repo.count_by_tags(&filters).ok() } else { None };
 
-    Ok(SearchResponse { results, understood, text_only, drives, where_to_look, total_matches })
+        Ok(SearchResponse { results, understood, text_only, drives, where_to_look, total_matches })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Start (or resume) an index run in the background and return immediately.
@@ -1053,14 +1149,18 @@ fn verify_catalogue(paths: &AppPaths) -> Result<Vec<Check>, String> {
 }
 
 #[tauri::command]
-fn prepare_review(
-    state: State<AppState>,
+async fn prepare_review(
+    state: State<'_, AppState>,
     limit: usize,
 ) -> Result<Vec<family_archive_core::faces::ClusterSummary>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let repo = faces::FaceRepo::new(&archive);
-    repo.prepare_review(limit).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::faces::ClusterSummary>, String> {
+        let archive = open_archive(&paths)?;
+        let repo = faces::FaceRepo::new(&archive);
+        repo.prepare_review(limit).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Record the user's own correction to a photograph's date.
@@ -1068,30 +1168,38 @@ fn prepare_review(
 /// Returns the phrasing to show, e.g. "Taken on 1998-08-12". The correction
 /// outranks the estimator and survives re-analysis.
 #[tauri::command]
-fn set_date_override(
-    state: State<AppState>,
+async fn set_date_override(
+    state: State<'_, AppState>,
     file_id: String,
     earliest: String,
     latest: Option<String>,
 ) -> Result<String, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let repo = family_archive_core::dates::DateRepo::new(&archive);
-    let latest = latest.unwrap_or_else(|| earliest.clone());
-    let est = repo
-        .set_user_override(&file_id, &earliest, &latest)
-        .map_err(map_err)?;
-    Ok(family_archive_core::dates::describe(&est))
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let archive = open_archive(&paths)?;
+        let repo = family_archive_core::dates::DateRepo::new(&archive);
+        let latest = latest.unwrap_or_else(|| earliest.clone());
+        let est = repo
+            .set_user_override(&file_id, &earliest, &latest)
+            .map_err(map_err)?;
+        Ok(family_archive_core::dates::describe(&est))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Remove a correction, letting AtlasDrive's own estimate apply again.
 #[tauri::command]
-fn clear_date_override(state: State<AppState>, file_id: String) -> Result<(), String> {
+async fn clear_date_override(state: State<'_, AppState>, file_id: String) -> Result<(), String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::dates::DateRepo::new(&archive)
-        .clear_user_override(&file_id)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::dates::DateRepo::new(&archive)
+            .clear_user_override(&file_id)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Record where a drive physically lives and how it is categorised.
@@ -1099,48 +1207,52 @@ fn clear_date_override(state: State<AppState>, file_id: String) -> Result<(), St
 /// Both fields are optional and independent: omitting one leaves it alone,
 /// rather than blanking it.
 #[tauri::command]
-fn update_drive_details(
-    state: State<AppState>,
+async fn update_drive_details(
+    state: State<'_, AppState>,
     drive_number: i64,
     physical_location: Option<String>,
     categories: Option<Vec<String>>,
 ) -> Result<DriveDto, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let repo = DriveRepo::new(&archive);
-    let drive = repo
-        .get_by_number(drive_number)
-        .map_err(map_err)?
-        .ok_or_else(|| format!("Drive {drive_number} is not registered."))?;
-    repo.update_details(
-        &drive.id,
-        physical_location.as_deref(),
-        categories.as_deref(),
-    )
-    .map_err(map_err)?;
-
-    let updated = repo
-        .get_by_number(drive_number)
-        .map_err(map_err)?
-        .ok_or_else(|| format!("Drive {drive_number} is not registered."))?;
-    let image_count: i64 = archive
-        .query_row(
-            "SELECT count(*) FROM files WHERE drive_id=?1 AND status='complete'",
-            [&updated.id],
-            |r| r.get(0),
+    tauri::async_runtime::spawn_blocking(move || -> Result<DriveDto, String> {
+        let archive = open_archive(&paths)?;
+        let repo = DriveRepo::new(&archive);
+        let drive = repo
+            .get_by_number(drive_number)
+            .map_err(map_err)?
+            .ok_or_else(|| format!("Drive {drive_number} is not registered."))?;
+        repo.update_details(
+            &drive.id,
+            physical_location.as_deref(),
+            categories.as_deref(),
         )
-        .unwrap_or(0);
-    Ok(DriveDto {
-        id: updated.id,
-        drive_number: updated.drive_number,
-        friendly_name: updated.friendly_name,
-        status: updated.status,
-        physical_location: updated.physical_location,
-        categories: updated.categories,
-        last_scan_at: updated.last_scan_at,
-        image_count,
-        note: None,
+        .map_err(map_err)?;
+
+        let updated = repo
+            .get_by_number(drive_number)
+            .map_err(map_err)?
+            .ok_or_else(|| format!("Drive {drive_number} is not registered."))?;
+        let image_count: i64 = archive
+            .query_row(
+                "SELECT count(*) FROM files WHERE drive_id=?1 AND status='complete'",
+                [&updated.id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok(DriveDto {
+            id: updated.id,
+            drive_number: updated.drive_number,
+            friendly_name: updated.friendly_name,
+            status: updated.status,
+            physical_location: updated.physical_location,
+            categories: updated.categories,
+            last_scan_at: updated.last_scan_at,
+            image_count,
+            note: None,
+        })
     })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Show an indexed original in Finder, when its drive is connected.
@@ -1150,34 +1262,38 @@ fn update_drive_details(
 /// message rather than an error string, because a disconnected drive is a normal
 /// state in this product, not a fault.
 #[tauri::command]
-fn reveal_in_finder(state: State<AppState>, file_id: String) -> Result<String, String> {
+async fn reveal_in_finder(state: State<'_, AppState>, file_id: String) -> Result<String, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let drive_number: Option<i64> = archive
-        .query_row(
-            "SELECT d.drive_number FROM files f JOIN drives d ON d.id=f.drive_id WHERE f.id=?1",
-            [&file_id],
-            |r| r.get(0),
-        )
-        .ok();
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let archive = open_archive(&paths)?;
+        let drive_number: Option<i64> = archive
+            .query_row(
+                "SELECT d.drive_number FROM files f JOIN drives d ON d.id=f.drive_id WHERE f.id=?1",
+                [&file_id],
+                |r| r.get(0),
+            )
+            .ok();
 
-    match family_archive_core::search::resolve_original(&archive, &file_id).map_err(map_err)? {
-        Some(path) => {
-            #[cfg(target_os = "macos")]
-            {
-                std::process::Command::new("open")
-                    .arg("-R")
-                    .arg(&path)
-                    .spawn()
-                    .map_err(|e| format!("could not open Finder: {e}"))?;
+        match family_archive_core::search::resolve_original(&archive, &file_id).map_err(map_err)? {
+            Some(path) => {
+                #[cfg(target_os = "macos")]
+                {
+                    std::process::Command::new("open")
+                        .arg("-R")
+                        .arg(&path)
+                        .spawn()
+                        .map_err(|e| format!("could not open Finder: {e}"))?;
+                }
+                Ok(format!("Showing {} in Finder.", path.display()))
             }
-            Ok(format!("Showing {} in Finder.", path.display()))
+            None => Ok(match drive_number {
+                Some(n) => format!("Connect Drive {n} to open the original."),
+                None => "That photograph is no longer in the catalogue.".to_string(),
+            }),
         }
-        None => Ok(match drive_number {
-            Some(n) => format!("Connect Drive {n} to open the original."),
-            None => "That photograph is no longer in the catalogue.".to_string(),
-        }),
-    }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Write a privacy-redacted diagnostics bundle and return its path.
@@ -1185,15 +1301,19 @@ fn reveal_in_finder(state: State<AppState>, file_id: String) -> Result<String, S
 /// There is no unredacted variant: the export is built from counts and check
 /// outcomes, so the user never has to audit it before sharing it.
 #[tauri::command]
-fn export_diagnostics(state: State<AppState>) -> Result<String, String> {
+async fn export_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let queue = open_queue(&paths)?;
-    let diag =
-        family_archive_core::diagnostics::collect(&archive, Some(&queue), &paths, None)
-            .map_err(map_err)?;
-    let path = family_archive_core::diagnostics::write(&paths, &diag).map_err(map_err)?;
-    Ok(path.to_string_lossy().to_string())
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let archive = open_archive(&paths)?;
+        let queue = open_queue(&paths)?;
+        let diag =
+            family_archive_core::diagnostics::collect(&archive, Some(&queue), &paths, None)
+                .map_err(map_err)?;
+        let path = family_archive_core::diagnostics::write(&paths, &diag).map_err(map_err)?;
+        Ok(path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Off the main thread, like [`run_verifier`]: an integrity check of the whole
@@ -1242,14 +1362,18 @@ fn doctor_report(paths: AppPaths) -> Result<std::collections::BTreeMap<String, S
 
 /// Drives plugged in right now, so one can be picked rather than typed.
 #[tauri::command]
-fn connected_volumes(
-    state: State<AppState>,
+async fn connected_volumes(
+    state: State<'_, AppState>,
 ) -> Result<Vec<family_archive_core::volumes::Volume>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    // The catalogue is only needed to say which volumes are already registered;
-    // the picker must still work before one exists.
-    let archive = open_archive(&paths).ok();
-    family_archive_core::volumes::connected(archive.as_ref()).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::volumes::Volume>, String> {
+        // The catalogue is only needed to say which volumes are already registered;
+        // the picker must still work before one exists.
+        let archive = open_archive(&paths).ok();
+        family_archive_core::volumes::connected(archive.as_ref()).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Folders on a volume where photographs usually live.
@@ -1271,15 +1395,19 @@ fn likely_photo_folders(path: String) -> Vec<String> {
 /// figures survive the app being closed mid-run and cannot drift from what was
 /// actually written.
 #[tauri::command]
-fn scan_stats(
-    state: State<AppState>,
+async fn scan_stats(
+    state: State<'_, AppState>,
     drive_number: i64,
     recent: Option<usize>,
 ) -> Result<family_archive_core::inventory::ScanStats, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::inventory::scan_stats(&archive, drive_number, recent.unwrap_or(12))
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::inventory::ScanStats, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::inventory::scan_stats(&archive, drive_number, recent.unwrap_or(12))
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Look for names printed on things in the photographs, from their text.
@@ -1287,13 +1415,17 @@ fn scan_stats(
 /// A backfill rather than a rescan: no original is opened, so it works with
 /// every drive unplugged.
 #[tauri::command]
-fn find_names(
-    state: State<AppState>,
+async fn find_names(
+    state: State<'_, AppState>,
     drive_number: Option<i64>,
 ) -> Result<family_archive_core::inventory::NameScan, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::inventory::scan_for_names(&archive, drive_number).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::inventory::NameScan, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::inventory::scan_for_names(&archive, drive_number).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Ask whichever process is scanning to stop at the next batch boundary.
@@ -1344,64 +1476,76 @@ fn last_scan_error(state: State<AppState>) -> Option<String> {
 /// What each folder on a drive appears to contain, in plain language.
 /// Works with the drive disconnected — it reads only the catalogue.
 #[tauri::command]
-fn folder_summaries(
-    state: State<AppState>,
+async fn folder_summaries(
+    state: State<'_, AppState>,
     drive_number: i64,
 ) -> Result<Vec<family_archive_core::foldersum::FolderSummary>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::foldersum::folder_summaries(&archive, drive_number).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::foldersum::FolderSummary>, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::foldersum::folder_summaries(&archive, drive_number).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Open a shoot folder in Finder, when its drive is connected.
 #[tauri::command]
-fn reveal_folder(
-    state: State<AppState>,
+async fn reveal_folder(
+    state: State<'_, AppState>,
     drive_number: i64,
     folder: String,
     example_path: String,
 ) -> Result<String, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    match family_archive_core::foldersum::folder_abs_path(
-        &archive,
-        drive_number,
-        &example_path,
-        &folder,
-    )
-    .map_err(map_err)?
-    {
-        Some(dir) => {
-            #[cfg(target_os = "macos")]
-            {
-                std::process::Command::new("open")
-                    .arg(&dir)
-                    .spawn()
-                    .map_err(|e| format!("could not open Finder: {e}"))?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let archive = open_archive(&paths)?;
+        match family_archive_core::foldersum::folder_abs_path(
+            &archive,
+            drive_number,
+            &example_path,
+            &folder,
+        )
+        .map_err(map_err)?
+        {
+            Some(dir) => {
+                #[cfg(target_os = "macos")]
+                {
+                    std::process::Command::new("open")
+                        .arg(&dir)
+                        .spawn()
+                        .map_err(|e| format!("could not open Finder: {e}"))?;
+                }
+                Ok(format!("Opened {} in Finder.", dir.display()))
             }
-            Ok(format!("Opened {} in Finder.", dir.display()))
+            None => Ok(format!(
+                "Connect Drive {drive_number} to open this folder — it is not plugged in right now."
+            )),
         }
-        None => Ok(format!(
-            "Connect Drive {drive_number} to open this folder — it is not plugged in right now."
-        )),
-    }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Why files on this drive were given up on, most common reason first.
 #[tauri::command]
-fn scan_failures(
-    state: State<AppState>,
+async fn scan_failures(
+    state: State<'_, AppState>,
     drive_number: i64,
 ) -> Result<Vec<family_archive_core::queue::FailureReason>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let drive_id: String = archive
-        .query_row("SELECT id FROM drives WHERE drive_number=?1", [drive_number], |r| r.get(0))
-        .map_err(|_| format!("no drive numbered {drive_number}"))?;
-    let queue = open_queue(&paths)?;
-    family_archive_core::queue::Queue::new(&queue)
-        .failure_reasons(&drive_id)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::queue::FailureReason>, String> {
+        let archive = open_archive(&paths)?;
+        let drive_id: String = archive
+            .query_row("SELECT id FROM drives WHERE drive_number=?1", [drive_number], |r| r.get(0))
+            .map_err(|_| format!("no drive numbered {drive_number}"))?;
+        let queue = open_queue(&paths)?;
+        family_archive_core::queue::Queue::new(&queue)
+            .failure_reasons(&drive_id)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Put files that were given up on back in the queue.
@@ -1410,46 +1554,58 @@ fn scan_failures(
 /// not: without it those photographs stay out of the catalogue permanently,
 /// because an item that failed three times is never leased again.
 #[tauri::command]
-fn retry_failed_files(
-    state: State<AppState>,
+async fn retry_failed_files(
+    state: State<'_, AppState>,
     drive_number: i64,
     code: Option<String>,
 ) -> Result<usize, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let drive_id: String = archive
-        .query_row("SELECT id FROM drives WHERE drive_number=?1", [drive_number], |r| r.get(0))
-        .map_err(|_| format!("no drive numbered {drive_number}"))?;
-    let queue = open_queue(&paths)?;
-    family_archive_core::queue::Queue::new(&queue)
-        .retry_failed(&drive_id, code.as_deref())
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let archive = open_archive(&paths)?;
+        let drive_id: String = archive
+            .query_row("SELECT id FROM drives WHERE drive_number=?1", [drive_number], |r| r.get(0))
+            .map_err(|_| format!("no drive numbered {drive_number}"))?;
+        let queue = open_queue(&paths)?;
+        family_archive_core::queue::Queue::new(&queue)
+            .retry_failed(&drive_id, code.as_deref())
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// How completely each drive has been indexed, least complete first.
 #[tauri::command]
-fn drive_coverage(
-    state: State<AppState>,
+async fn drive_coverage(
+    state: State<'_, AppState>,
 ) -> Result<Vec<family_archive_core::inventory::DriveCoverage>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::inventory::drive_coverage(&archive).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::inventory::DriveCoverage>, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::inventory::drive_coverage(&archive).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// How long indexing a folder is likely to take, before a night is committed
 /// to it. Counts the files by walking the tree, which is fast — nothing is
 /// decoded or analysed.
 #[tauri::command]
-fn estimate_index(
-    state: State<AppState>,
+async fn estimate_index(
+    state: State<'_, AppState>,
     path: String,
 ) -> Result<family_archive_core::inventory::IndexEstimate, String> {
-    use family_archive_core::scan::{enumerate, ScanOptions};
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    let found = enumerate(std::path::Path::new(&path), &ScanOptions::default())
-        .map_err(map_err)?;
-    Ok(family_archive_core::inventory::estimate_indexing(&archive, found.len() as u64))
+    tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::inventory::IndexEstimate, String> {
+        use family_archive_core::scan::{enumerate, ScanOptions};
+        let archive = open_archive(&paths)?;
+        let found = enumerate(std::path::Path::new(&path), &ScanOptions::default())
+            .map_err(map_err)?;
+        Ok(family_archive_core::inventory::estimate_indexing(&archive, found.len() as u64))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -1457,128 +1613,172 @@ fn estimate_index(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn propose_events(
-    state: State<AppState>,
+async fn propose_events(
+    state: State<'_, AppState>,
     gap_hours: Option<f64>,
 ) -> Result<family_archive_core::events::ProposeReport, String> {
-    use family_archive_core::events::{EventRepo, DEFAULT_GAP_HOURS};
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    EventRepo::new(&archive)
-        .propose(gap_hours.unwrap_or(DEFAULT_GAP_HOURS))
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::events::ProposeReport, String> {
+        use family_archive_core::events::{EventRepo, DEFAULT_GAP_HOURS};
+        let archive = open_archive(&paths)?;
+        EventRepo::new(&archive)
+            .propose(gap_hours.unwrap_or(DEFAULT_GAP_HOURS))
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn list_events(
-    state: State<AppState>,
+async fn list_events(
+    state: State<'_, AppState>,
     status: Option<String>,
 ) -> Result<Vec<family_archive_core::events::Event>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::events::EventRepo::new(&archive)
-        .list(status.as_deref())
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::events::Event>, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::events::EventRepo::new(&archive)
+            .list(status.as_deref())
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// The next event awaiting a decision, so the interface can review one at a
 /// time rather than presenting a wall of proposals.
 #[tauri::command]
-fn next_event_proposal(
-    state: State<AppState>,
+async fn next_event_proposal(
+    state: State<'_, AppState>,
     skip: Option<Vec<String>>,
 ) -> Result<Option<family_archive_core::events::Event>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::events::EventRepo::new(&archive)
-        .next_proposal_skipping(&skip.unwrap_or_default())
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<family_archive_core::events::Event>, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::events::EventRepo::new(&archive)
+            .next_proposal_skipping(&skip.unwrap_or_default())
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// A name to offer for an event, from who is in it and where it lives.
 #[tauri::command]
-fn suggest_event_name(
-    state: State<AppState>,
+async fn suggest_event_name(
+    state: State<'_, AppState>,
     event_id: String,
 ) -> Result<family_archive_core::events::NameSuggestion, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::events::EventRepo::new(&archive)
-        .suggest_name(&event_id)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::events::NameSuggestion, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::events::EventRepo::new(&archive)
+            .suggest_name(&event_id)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn name_event(
-    state: State<AppState>,
+async fn name_event(
+    state: State<'_, AppState>,
     event_id: String,
     name: String,
     client: Option<String>,
 ) -> Result<(), String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::events::EventRepo::new(&archive)
-        .name_event(&event_id, &name, client.as_deref())
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::events::EventRepo::new(&archive)
+            .name_event(&event_id, &name, client.as_deref())
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn forget_event(state: State<AppState>, event_id: String) -> Result<(), String> {
+async fn forget_event(state: State<'_, AppState>, event_id: String) -> Result<(), String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::events::EventRepo::new(&archive)
-        .forget(&event_id)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::events::EventRepo::new(&archive)
+            .forget(&event_id)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn merge_events(state: State<AppState>, into: String, from: String) -> Result<u64, String> {
+async fn merge_events(state: State<'_, AppState>, into: String, from: String) -> Result<u64, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::events::EventRepo::new(&archive)
-        .merge(&into, &from)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<u64, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::events::EventRepo::new(&archive)
+            .merge(&into, &from)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn split_event(state: State<AppState>, event_id: String, at: String) -> Result<String, String> {
+async fn split_event(state: State<'_, AppState>, event_id: String, at: String) -> Result<String, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::events::EventRepo::new(&archive)
-        .split(&event_id, &at)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::events::EventRepo::new(&archive)
+            .split(&event_id, &at)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Where an event could sensibly be divided, largest pause first.
 #[tauri::command]
-fn event_split_points(
-    state: State<AppState>,
+async fn event_split_points(
+    state: State<'_, AppState>,
     event_id: String,
     limit: Option<usize>,
 ) -> Result<Vec<family_archive_core::events::SplitPoint>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::events::EventRepo::new(&archive)
-        .split_points(&event_id, limit.unwrap_or(3))
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::events::SplitPoint>, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::events::EventRepo::new(&archive)
+            .split_points(&event_id, limit.unwrap_or(3))
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn event_clients(state: State<AppState>) -> Result<Vec<(String, i64)>, String> {
+async fn event_clients(state: State<'_, AppState>) -> Result<Vec<(String, i64)>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::events::EventRepo::new(&archive)
-        .clients()
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<(String, i64)>, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::events::EventRepo::new(&archive)
+            .clients()
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn event_files(state: State<AppState>, event_id: String) -> Result<Vec<String>, String> {
+async fn event_files(state: State<'_, AppState>, event_id: String) -> Result<Vec<String>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::events::EventRepo::new(&archive)
-        .files(&event_id)
-        .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
+        let archive = open_archive(&paths)?;
+        family_archive_core::events::EventRepo::new(&archive)
+            .files(&event_id)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ---------------------------------------------------------------------------
@@ -1613,18 +1813,26 @@ fn choose_folder(prompt: Option<String>) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn get_settings(state: State<AppState>) -> Result<family_archive_core::settings::Settings, String> {
+async fn get_settings(state: State<'_, AppState>) -> Result<family_archive_core::settings::Settings, String> {
     let paths = state.paths.lock().unwrap().clone();
-    Ok(family_archive_core::settings::load(&paths))
+    tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::settings::Settings, String> {
+        Ok(family_archive_core::settings::load(&paths))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn save_settings(
-    state: State<AppState>,
+async fn save_settings(
+    state: State<'_, AppState>,
     settings: family_archive_core::settings::Settings,
 ) -> Result<(), String> {
     let paths = state.paths.lock().unwrap().clone();
-    family_archive_core::settings::save(&paths, &settings).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        family_archive_core::settings::save(&paths, &settings).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Which cloud service, if any, appears to synchronise a folder. Advisory:
@@ -1636,85 +1844,101 @@ fn describe_backup_destination(path: String) -> Option<String> {
 }
 
 #[tauri::command]
-fn backup_now(
-    state: State<AppState>,
+async fn backup_now(
+    state: State<'_, AppState>,
     destination: Option<String>,
 ) -> Result<family_archive_core::backup::BackupReport, String> {
-    use family_archive_core::{backup, settings};
     let paths = state.paths.lock().unwrap().clone();
-    let mut prefs = settings::load(&paths);
+    tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::backup::BackupReport, String> {
+        use family_archive_core::{backup, settings};
+        let mut prefs = settings::load(&paths);
 
-    let dest = destination
-        .or_else(|| prefs.backup_destination.clone())
-        .ok_or_else(|| "no backup folder chosen yet".to_string())?;
+        let dest = destination
+            .or_else(|| prefs.backup_destination.clone())
+            .ok_or_else(|| "no backup folder chosen yet".to_string())?;
 
-    let report = backup::create(
-        &paths,
-        std::path::Path::new(&dest),
-        &backup::BackupOptions {
-            include_key: prefs.backup_include_key,
-            include_thumbnails: true,
-            keep: prefs.backup_keep,
-        },
-    )
-    .map_err(map_err)?;
+        let report = backup::create(
+            &paths,
+            std::path::Path::new(&dest),
+            &backup::BackupOptions {
+                include_key: prefs.backup_include_key,
+                include_thumbnails: true,
+                keep: prefs.backup_keep,
+            },
+        )
+        .map_err(map_err)?;
 
-    // Remember a destination that worked, so the next backup is one click.
-    prefs.backup_destination = Some(dest);
-    prefs.last_backup_at = Some(family_archive_core::util::now_iso8601());
-    let _ = settings::save(&paths, &prefs);
+        // Remember a destination that worked, so the next backup is one click.
+        prefs.backup_destination = Some(dest);
+        prefs.last_backup_at = Some(family_archive_core::util::now_iso8601());
+        let _ = settings::save(&paths, &prefs);
 
-    Ok(report)
+        Ok(report)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn list_backups(
-    state: State<AppState>,
+async fn list_backups(
+    state: State<'_, AppState>,
     destination: Option<String>,
 ) -> Result<Vec<family_archive_core::backup::BackupInfo>, String> {
-    use family_archive_core::{backup, settings};
     let paths = state.paths.lock().unwrap().clone();
-    let dest = destination.or_else(|| settings::load(&paths).backup_destination);
-    let Some(dest) = dest else { return Ok(Vec::new()) };
-    backup::list(std::path::Path::new(&dest)).map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::backup::BackupInfo>, String> {
+        use family_archive_core::{backup, settings};
+        let dest = destination.or_else(|| settings::load(&paths).backup_destination);
+        let Some(dest) = dest else { return Ok(Vec::new()) };
+        backup::list(std::path::Path::new(&dest)).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Restore the catalogue. The catalogue being replaced is kept, not deleted.
 #[tauri::command]
-fn restore_backup(
-    state: State<AppState>,
+async fn restore_backup(
+    state: State<'_, AppState>,
     bundle: String,
 ) -> Result<family_archive_core::backup::RestoreReport, String> {
-    use family_archive_core::backup;
     let paths = state.paths.lock().unwrap().clone();
-    backup::restore(
-        &paths,
-        std::path::Path::new(&bundle),
-        &backup::RestoreOptions { restore_key: true, restore_thumbnails: true },
-    )
-    .map_err(map_err)
+    tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::backup::RestoreReport, String> {
+        use family_archive_core::backup;
+        backup::restore(
+            &paths,
+            std::path::Path::new(&bundle),
+            &backup::RestoreOptions { restore_key: true, restore_thumbnails: true },
+        )
+        .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Reclaim disk space. Changes nothing the user can see.
 #[tauri::command]
-fn compact_catalogue(state: State<AppState>) -> Result<String, String> {
-    use family_archive_core::pipeline::thumbnail;
+async fn compact_catalogue(state: State<'_, AppState>) -> Result<String, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        use family_archive_core::pipeline::thumbnail;
+        let archive = open_archive(&paths)?;
 
-    let report = thumbnail::recompress_to_jpeg(&archive, &paths.thumbnails_dir()).map_err(map_err)?;
-    let before = std::fs::metadata(paths.archive_db()).map(|m| m.len()).unwrap_or(0);
-    archive.execute_batch("VACUUM").map_err(map_err)?;
-    let after = std::fs::metadata(paths.archive_db()).map(|m| m.len()).unwrap_or(0);
+        let report = thumbnail::recompress_to_jpeg(&archive, &paths.thumbnails_dir()).map_err(map_err)?;
+        let before = std::fs::metadata(paths.archive_db()).map(|m| m.len()).unwrap_or(0);
+        archive.execute_batch("VACUUM").map_err(map_err)?;
+        let after = std::fs::metadata(paths.archive_db()).map(|m| m.len()).unwrap_or(0);
 
-    let mb = |n: u64| n / (1024 * 1024);
-    Ok(format!(
-        "{} thumbnails re-encoded ({} MB saved); catalogue {} MB -> {} MB",
-        report.converted,
-        mb(report.bytes_before.saturating_sub(report.bytes_after)),
-        mb(before),
-        mb(after)
-    ))
+        let mb = |n: u64| n / (1024 * 1024);
+        Ok(format!(
+            "{} thumbnails re-encoded ({} MB saved); catalogue {} MB -> {} MB",
+            report.converted,
+            mb(report.bytes_before.saturating_sub(report.bytes_after)),
+            mb(before),
+            mb(after)
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 
