@@ -145,3 +145,21 @@ screenshots of the live app over ~218,000 photographs on ten drives.
   still counting) and "Not reading" instead of "Measuring…"; subjects read as
   words; event placeholders were real clients' names.
 - Evidence: `.project-state/test-evidence.md`, 2026-09-25.
+
+## 2026-09-26: Simpler to use, built around "which drive is it on?" (D-090–D-095)
+
+The owner asked for it to be "super easy to use and understand", for their own
+desktop only, to find any historic photograph and know which drive holds it;
+nothing that costs money (so no Apple Developer ID). Naming is selective.
+
+- Five sections; Find is home with "Needs you" (real problems and one-click
+  jobs only); every drive always searched; result cards lead with the drive.
+- Search understands named people ("Aimee and Kent" = both), shows a photograph
+  once with the other drives holding it, offers subjects that narrow.
+- Drive cards: status, "N photographs exist only on this drive", one button;
+  plug-in prompts; damage checks that name a drive with a good copy.
+- People: name who matters, "Find their photographs"; faces grouped across
+  drives. Events: suggested names with a photograph strip, "Skip for now".
+- Settings: backup first, one health verdict in plain words, Advanced.
+- One scan per drive at a time; 56 app commands off the main thread; OCR
+  misreadings kept out of subjects; Lightroom Classic open.

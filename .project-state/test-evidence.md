@@ -454,3 +454,17 @@ all four served by one PID), `batches_verify_their_own_photographs_and_the_drive
 `camera_exposures_stop_being_called_scans`, `a_finished_scan_has_already_grouped_its_faces`,
 UI: finished-scan clock, Settings not verifying on arrival, subject labels,
 real unnamed-face counts.
+
+## 2026-09-26: Simplification and archive tools (D-090–D-095)
+
+```text
+cargo test --workspace            exit 0 — 386 core + 2 CLI (1 core ignored, feature-gated)
+cargo clippy --workspace --all-targets   exit 0, no warnings
+(src-tauri) cargo clippy --all-targets   exit 0, no warnings (Linux, with WebKitGTK; stand-in
+                                         Vision helper and icons, not committed)
+(ui) npx tsc --noEmit && npx vitest run  exit 0 — 96 tests
+(ui) npm run build                       exit 0
+```
+
+Screens were also rendered in demo mode with Playwright/Chromium and looked at:
+Find (home and results), Drives, People, Events, Settings.

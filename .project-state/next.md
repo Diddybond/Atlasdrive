@@ -13,9 +13,18 @@ measured. On the next real drive, compare `index.log`'s `throughput_fps` for
 `config::default_analysis_workers` from the result. Watch memory too: each
 worker is retired after 400 photographs (D-064), but four can be alive at once.
 
+## Measure on the Mac (not measurable off it)
+
+- Parallel Vision workers (D-087): `throughput_fps` with `--workers 1` vs default.
+- Face merging across drives (D-091): how many merges a real drive produces, and
+  a sample of them looked at — the 0.03 margin is reasoned, not measured.
+- The whole redesign (D-092): the app has only been seen in demo mode in a
+  browser. Anything that feels wrong on the real archive is the next work.
+
 ## Needs the owner
 
-**A face-recognition model.** Grouping now happens after every scan and the
+**A face-recognition model** (free, local models only — the owner's rule is
+nothing that costs money). Grouping now happens after every scan and the
 gallery shows groups (D-089), but the identity embedding is still Vision's
 general image feature print of the face crop, so one person still splits
 across several groups. A local recognition model would fix it and reopens

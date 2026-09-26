@@ -5,12 +5,19 @@
 - Commit: see `git log` (latest: two things the specification asked for)
 - Current completion score: **100/100** under `docs/15_DEFINITION_OF_DONE.md`
 - Critical gates passing: **10/10**
-- Latest test result: 370 core + 2 CLI + 79 UI passing (1 core test ignored:
+- Latest test result: 386 core + 2 CLI + 96 UI passing (1 core test ignored:
   the network-guard test, behind `--features network-guard-tests`); clippy clean
-  across the workspace and `src-tauri` (now compiled on Linux too, D-087).
+  across the workspace and `src-tauri` (compiled on Linux too).
 - Current files being changed: none (clean checkpoint)
 - Runtime safety status: all safety boundaries implemented and tested; the
   original-integrity halt was demonstrated on macOS with a real exit code 10
+
+## 2026-09-26: simpler — built around "which drive is it on?"
+
+D-092 reorganised the app into Find (home, with "Needs you"), Drives, People,
+Events and Settings; see `completed.md` and D-090–D-095. Naming people and
+events is optional by the owner's choice. Nothing that costs money: the app
+stays locally signed (no Apple Developer ID).
 
 ## 2026-09-25: faster, and fixed against the owner's live archive
 
@@ -29,8 +36,9 @@ git fetch origin && git checkout claude/practical-einstein-55whcv
 
 Then replace `/Applications/AtlasDrive.app` with the new bundle. The catalogue
 in `~/Library/Application Support/AtlasDrive/` is kept; migration 7 runs once on
-first open. After that, on the People screen, press **Group look-alike faces**
-once to group the faces of drives indexed before this build.
+first open (migrations 7 and 8). After that, on the People screen, press
+**Group look-alike faces** once to group the faces of drives indexed before
+this build, across drives as well as within them.
 
 ## Image recognition is real now
 

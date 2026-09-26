@@ -10,7 +10,7 @@ the rubric does not measure.
 Current score: 100/100 (evidence-backed, verified on macOS)
 Critical gates: 10/10 passing
 Last verified commit: see `git log` (rubric completion batch)
-Tests: 370 core + 2 CLI integration + 79 UI = 451 passing; clippy clean
+Tests: 386 core + 2 CLI integration + 96 UI = 484 passing; clippy clean
        (--all-targets, workspace and src-tauri)
 Highest-priority gap: none in the rubric. Release blocker: code signing (needs an Apple Developer ID)
 ```

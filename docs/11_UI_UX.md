@@ -1,5 +1,11 @@
 # 11. User Interface and Experience
 
+> **Current layout (D-092, 2026-09-26).** The app is organised around one
+> question — which drive is it on? — in five sections: Find (home, with "Needs
+> you"), Drives (with Scan activity as a tab), People, Events and Settings.
+> Naming people and events is optional and never presented as a chore. Where
+> this document describes an earlier layout, D-092 is current.
+
 ## Navigation
 
 Primary sections:

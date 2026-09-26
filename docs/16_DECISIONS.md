@@ -2541,3 +2541,121 @@ and two UI tests for real counts and the grouping button.
 
 **Supersedes:** None. Extends D-007 (grouping stays a suggestion; naming stays
 a human act).
+
+## D-090 — A drive is scanned by one process at a time
+
+**Status:** settled.
+
+**Context.** Nothing stopped the app and a command-line run scanning the same
+drive at once. They would claim each other's photographs (a lease lasts five
+minutes and one slow photograph can hold a batch far longer) and double every
+heartbeat and failure. D-086 left this unbuilt because a guard that gets
+liveness wrong locks the owner out of their own drive.
+
+**Decision.** Runs record their process id (migration 8), and a resumed run
+takes the row over under its own. A scan refuses to start while another run of
+the same drive is *alive*: its heartbeat is newer than `STALL_AFTER_MINUTES`
+and its process still exists (asked of `ps`, under a budget; an unanswerable
+`ps` counts as alive, because a few minutes' refusal is recoverable and two
+racing scans are not). A scan killed a minute ago has a fresh heartbeat and no
+process, so it never blocks. The refusal is `InvalidArgs` (exit 2), in words.
+
+**Evidence:** `a_second_scan_of_the_same_drive_is_refused_only_while_the_first_is_alive`,
+with real processes: alive (refused), stalled and gone (both allowed).
+
+## D-091 — The same person on different drives becomes one group
+
+**Status:** settled.
+
+**Decision.** After per-drive grouping (D-089), unnamed groups with no pending
+suggestion are compared by their average face across all drives and merged
+into the larger at `cluster_threshold_for(model) + GROUP_MERGE_MARGIN` (0.03):
+an average is steadier than one face but also brings different people's
+averages closer, so the bar is higher. Runs after every scan, from "Group
+look-alike faces" and from `atlasdrive faces group`. Named groups never move
+and never absorb anything. Absorbed groups are marked `merged`.
+
+**Not validated on real faces.** The margin is reasoned, not measured; the next
+Mac session should look at how many merges a real drive produces and sample
+them.
+
+**Evidence:** `the_same_person_on_two_drives_becomes_one_group`.
+
+## D-092 — AtlasDrive is organised around one question: which drive is it on?
+
+**Status:** settled. The owner: "it has to be super easy to use and
+understand … this is an app that only runs on my desktop and is solely for me,
+so I can find any historic image and know exactly which drive to go look on."
+
+**Decision.**
+
+- Five sections named for what you do there: **Find**, **Drives**, **People**,
+  **Events**, **Settings**. Scan activity is a tab under Drives.
+- **Find** is the home screen: one search box, every drive always searched (the
+  switch to leave unplugged drives out is gone), a drive dropdown, a short list
+  of subjects that narrow (D-093), and results that lead with a large drive
+  badge and "Plugged in" or where the drive is kept. Secondary actions sit
+  under "More".
+- **Needs you** on the home screen lists only real problems and ready jobs:
+  no backup, a scan that stopped, a half-scanned drive (with where it is kept),
+  a plugged-in drive to finish, check for new photographs, or check for damage.
+  One item per drive. **Naming people and events is optional** — the owner names
+  family, friends, the couple at a wedding — so it never appears as a chore.
+- **People** is "name the people who matter": biggest groups first, the naming
+  box above the grid, and "Find their photographs" for each named person.
+- **Events** arrive with eight photographs and a suggested name (D-093);
+  "Skip for now" decides nothing.
+- **Drive cards** carry one status line, whether every photograph has a copy
+  elsewhere, and one main button; the rest is under "More".
+- **Settings** is backup first, one health verdict in plain words, and an
+  "Advanced" section for rarely needed tools.
+- One vocabulary: scan, read, preview, plugged in.
+
+**Consequences.** All previous capabilities remain; most moved under "More" or
+"Advanced". The UI suite was updated screen by screen (96 tests).
+
+## D-093 — Search understands people, copies and useful subjects
+
+**Status:** settled.
+
+- **People:** a query naming a person (full or first name, as whole words)
+  returns their *confirmed* photographs, ranked by the rest of the words; two
+  names mean both people in the picture. `SearchFilters::person_id` existed and
+  nothing read it, so "Aimee" had matched filenames only.
+- **Copies:** a photograph on several drives (same content hash) is one result,
+  shown from a plugged-in copy where one exists, with "Also on Drive 5, 9"
+  (`search::fold_copies`).
+- **Subjects:** the first list offered leaves out anything on more than a
+  quarter of the photographs in view ("people", "adult"), which cannot narrow a
+  search (`inventory::useful_subjects`); the full list is one click away.
+- **Event names:** suggested from named people in the event, else the shoot
+  folder most of it came from (camera and date folders ignored), plus
+  "wedding" when a fifth of the photographs show one (`EventRepo::suggest_name`).
+
+## D-094 — A name read once is not a subject
+
+**Status:** settled.
+
+OCR misreadings ("pipparts", "autospor") passed the name rules because an
+unfamiliar word looks like a name in any one photograph. A name tag must be
+read in at least `MIN_NAME_RECURRENCE` (3) photographs to be offered as a
+subject, unless it matched the known-brand list (recorded at 0.95 confidence;
+"Find names in photographs" upgrades older rows). Nothing is deleted; the text
+stays searchable. The live scan feed prefers what a picture shows over any word
+read in it.
+
+## D-095 — Damage checks and "only copy" are part of looking after a drive
+
+**Status:** settled.
+
+- `copies::single_copies` reports, per drive and folder, the photographs that
+  exist on no other drive (two copies on one drive do not count). Each drive
+  card says it in a sentence; `atlasdrive drive copies` lists folders.
+- A plugged-in drive with photographs not read back for 180 days is offered a
+  damage check; every plugged-in drive has "Check for damage". Each check reads
+  the 200 least-recently-checked photographs (`bitrot::SPOT_CHECK_FILES`), so a
+  drive is covered over several plug-ins, and names a drive holding a good copy
+  of anything damaged.
+- Opening an original in Lightroom Classic (when installed) or its default app
+  hands the file over by path; AtlasDrive never writes to it or to Lightroom's
+  catalogue.
