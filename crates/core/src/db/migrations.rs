@@ -122,7 +122,24 @@ const ARCHIVE_MIGRATIONS: &[Migration] = &[
         name: "scan_run_process",
         sql: ARCHIVE_V8,
     },
+    Migration {
+        version: 9,
+        name: "face_identity",
+        sql: ARCHIVE_V9,
+    },
 ];
+
+/// Faces the identity model could not find a face in (D-102), so the upgrade
+/// does not retry them for ever. Such a face keeps the embedding it had.
+const ARCHIVE_V9: &str = r#"
+CREATE TABLE face_identity_skips (
+    face_id     TEXT NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
+    model_id    TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (face_id, model_id)
+);
+CREATE INDEX idx_face_embeddings_model ON face_embeddings(model_id, face_id);
+"#;
 
 /// Which process is running a scan, so a second scan of the same drive can be
 /// refused only while the first is really alive (D-090). A heartbeat alone

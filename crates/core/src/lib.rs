@@ -31,6 +31,7 @@ pub mod error;
 pub mod events;
 pub mod export;
 pub mod faces;
+pub mod identity_upgrade;
 pub mod foldersum;
 pub mod integrity;
 pub mod inventory;

@@ -385,6 +385,16 @@ enum FaceAction {
         #[arg(long)]
         drive: Option<i64>,
     },
+    /// Re-read every stored face with the identity model, then regroup
+    /// (D-102). Resumable: stopping and running again carries on.
+    Identity {
+        /// Faces analysed at once. Default: all but two cores.
+        #[arg(long)]
+        workers: Option<usize>,
+        /// Only report how far the archive has got.
+        #[arg(long)]
+        status: bool,
+    },
     /// Remove a person added by mistake. Faces are kept and return to unnamed.
     Forget {
         #[arg(long)]
@@ -943,6 +953,44 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
         FaceAction::Rename { person, name } => {
             let updated = repo.rename_person(&person, &name)?;
             println!("Now called {}.", updated.display_name);
+            Ok(())
+        }
+        FaceAction::Identity { workers, status } => {
+            use family_archive_core::identity_upgrade as up;
+            let now = up::status(&archive)?;
+            println!(
+                "Identity model: {} faces upgraded, {} to do, {} unreadable.",
+                now.upgraded, now.pending, now.unreadable
+            );
+            if status {
+                return Ok(());
+            }
+            let model = family_archive_core::ai::identity::shared().ok_or_else(|| {
+                Error::Other("the face identity model is not installed — run scripts/fetch-face-model.sh".into())
+            })?;
+            let key = keystore::master_key(ctx.paths.keys_dir(), &archive)?;
+            let workers = workers.unwrap_or_else(|| {
+                std::thread::available_parallelism().map(|n| n.get().saturating_sub(2)).unwrap_or(2).max(1)
+            });
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            let started = std::time::Instant::now();
+            let total = now.pending;
+            let report = up::embed_pending(&archive, &model, &key, workers, &stop, |r| {
+                let handled = r.embedded + r.unreadable;
+                let rate = handled as f64 / started.elapsed().as_secs_f64().max(1.0);
+                eprint!(
+                    "\r  {handled}/{total} faces ({:.1}/s, about {} min left)   ",
+                    rate,
+                    ((total - handled.min(total)) as f64 / rate.max(0.01) / 60.0).round()
+                );
+            })?;
+            eprintln!();
+            println!("Re-read {} faces; {} could not be read and keep their old embedding.", report.embedded, report.unreadable);
+            let r = up::regroup(&archive, &key)?;
+            println!(
+                "Regrouped: {} old groups dissolved, {} new groups ({} faces), {} merged across drives, {} faces suggested as named people.",
+                r.groups_dissolved, r.groups_created, r.faces_grouped, r.groups_merged, r.suggestions
+            );
             Ok(())
         }
         FaceAction::Group { drive } => {

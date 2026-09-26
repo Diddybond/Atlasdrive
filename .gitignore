@@ -34,6 +34,7 @@ thumbnails/
 models/*.bin
 models/*.onnx
 models/*.mlmodel
+models/face-identity/
 keys/
 cache/
 

@@ -56,7 +56,7 @@ pub const VISION_CLUSTER_THRESHOLD: f32 = 0.84;
 /// cannot itself run. Referring to the gated module made the whole crate
 /// macOS-only and stopped it building — and therefore being tested — anywhere
 /// else.
-const VISION_MODEL_ID: &str = "apple-vision";
+pub const VISION_MODEL_ID: &str = "apple-vision";
 
 // The two declarations must never drift apart. On macOS, where both exist,
 // this fails the build the moment they do.
@@ -72,11 +72,35 @@ const _: () = {
     }
 };
 
+/// Grouping threshold for the ArcFace identity model (D-102).
+///
+/// ArcFace scores are cosine similarities in a space trained to separate
+/// people: on a test group photograph six different people scored −0.04 to
+/// 0.21 against each other, and the same face, darkened and shrunk, 0.99.
+/// Same-person pairs across different photographs typically land 0.45–0.85.
+/// 0.50 groups conservatively (the value Immich uses as its default distance),
+/// so a wrong merge is rarer than a missed one, which is the right way round:
+/// a missed one costs a second naming, a wrong one costs trust.
+pub const IDENTITY_CLUSTER_THRESHOLD: f32 = 0.50;
+
+/// Suggestion threshold for the identity model. Lower than grouping because a
+/// suggestion is only ever a question the owner answers.
+pub const IDENTITY_MATCH_THRESHOLD: f32 = 0.42;
+
 /// The clustering threshold to use for a given face-embedding model.
 pub fn cluster_threshold_for(model_id: &str) -> f32 {
     match model_id {
         VISION_MODEL_ID => VISION_CLUSTER_THRESHOLD,
+        crate::ai::identity::MODEL_ID => IDENTITY_CLUSTER_THRESHOLD,
         _ => DEFAULT_CLUSTER_THRESHOLD,
+    }
+}
+
+/// The threshold above which a face is proposed as a named person, per model.
+pub fn person_match_threshold_for(model_id: &str) -> f32 {
+    match model_id {
+        crate::ai::identity::MODEL_ID => IDENTITY_MATCH_THRESHOLD,
+        _ => PERSON_MATCH_THRESHOLD,
     }
 }
 
@@ -414,6 +438,37 @@ impl<'a> FaceRepo<'a> {
             ],
         )?;
         Ok(face_id)
+    }
+
+    /// Replace a face's embedding with one from another model.
+    ///
+    /// A face holds one embedding: the best the catalogue has. The identity
+    /// upgrade (D-102) swaps the Vision feature print for an ArcFace vector.
+    pub fn replace_embedding(
+        &self,
+        face_id: &str,
+        model_id: &str,
+        model_version: &str,
+        embedding: &[f32],
+        key: &MasterKey,
+    ) -> Result<()> {
+        let sealed = crypto::seal_vector(key, embedding)?;
+        self.conn.execute(
+            "INSERT INTO face_embeddings
+             (face_id, model_id, model_version, dim, ciphertext, nonce, enc_version, key_version, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(face_id) DO UPDATE SET
+                model_id=excluded.model_id, model_version=excluded.model_version, dim=excluded.dim,
+                ciphertext=excluded.ciphertext, nonce=excluded.nonce,
+                enc_version=excluded.enc_version, key_version=excluded.key_version,
+                created_at=excluded.created_at",
+            params![
+                face_id, model_id, model_version, embedding.len() as i64,
+                sealed.ciphertext, sealed.nonce, sealed.enc_version, sealed.key_version,
+                now_iso8601()
+            ],
+        )?;
+        Ok(())
     }
 
     /// Store a small encrypted crop of a face, so it can be browsed later with

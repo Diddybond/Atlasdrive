@@ -83,3 +83,12 @@ The verifier should detect likely pipeline failure, including:
 - sudden model-version mismatch
 
 Do not require every real-world batch to contain a face. Use contextual and fixture-based checks rather than a crude universal rule.
+
+## Identity model (D-102)
+
+Faces are embedded with ArcFace R50 (InsightFace `w600k_r50`) after
+five-landmark alignment from the SCRFD detector, in-process through
+`tract-onnx`. Embeddings are computed from the stored 200px face crop, so the
+archive can be upgraded without its drives. The People screen offers the
+one-off upgrade and shows its progress. Unnamed groups are rebuilt; named
+groups and refusals are kept.

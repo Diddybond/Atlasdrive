@@ -211,6 +211,9 @@ struct PreparedFace {
     model_version: String,
     /// A small JPEG of the face and its size, when it is big enough to show.
     crop: Option<(Vec<u8>, u32, u32)>,
+    /// The identity model looked at this face's crop and found no face to
+    /// align, so it keeps the analyser's embedding (D-102).
+    identity_unreadable: bool,
 }
 
 /// Everything about one photograph that can be worked out without the
@@ -264,6 +267,8 @@ struct Analyst<'r> {
     /// read, so the set cannot go stale in a way that loses a move.
     moved_candidates: &'r HashSet<String>,
     dry_run: bool,
+    /// The face identity model, when installed (D-102).
+    identity: Option<&'r crate::ai::identity::IdentityModel>,
 }
 
 impl Analyst<'_> {
@@ -412,7 +417,31 @@ impl Analyst<'_> {
                 }
             };
             let crop = crop_face_image(&rgb, &f);
-            prepared_faces.push(PreparedFace { detection: f, vector, model_id, model_version, crop });
+            // Who the face is, from the identity model, worked out from the
+            // same stored crop the upgrade uses so both land in one space.
+            let (mut vector, mut model_id, mut model_version) = (vector, model_id, model_version);
+            let mut identity_unreadable = false;
+            if let (Some(model), Some((jpeg, _, _))) = (self.identity, &crop) {
+                let embedded = image::load_from_memory(jpeg)
+                    .ok()
+                    .and_then(|img| model.embed_crop(&img.to_rgb8()).ok().flatten());
+                match embedded {
+                    Some(v) => {
+                        vector = v;
+                        model_id = crate::ai::identity::MODEL_ID.to_string();
+                        model_version = crate::ai::identity::MODEL_VERSION.to_string();
+                    }
+                    None => identity_unreadable = true,
+                }
+            }
+            prepared_faces.push(PreparedFace {
+                detection: f,
+                vector,
+                model_id,
+                model_version,
+                crop,
+                identity_unreadable,
+            });
         }
 
         // 6. Date estimate.
@@ -726,6 +755,7 @@ impl<'a> Pipeline<'a> {
         let workers = opts.config.analysis_workers.max(1);
         let moved_candidates =
             if dry_run { HashSet::new() } else { self.missing_hashes(&drive.id)? };
+        let identity = crate::ai::identity::shared();
         let analyst = Analyst {
             engines: &self.engines,
             paths: self.paths,
@@ -737,6 +767,7 @@ impl<'a> Pipeline<'a> {
             drive_id: &drive.id,
             moved_candidates: &moved_candidates,
             dry_run,
+            identity: identity.as_ref(),
         };
         let (cancel, paths) = (&self.cancel, self.paths);
 
@@ -1393,6 +1424,13 @@ impl<'a> Pipeline<'a> {
             if let Some((jpeg, w, h)) = &f.crop {
                 face_repo.store_thumbnail(&face_id, jpeg, *w, *h, self.key)?;
             }
+            if f.identity_unreadable {
+                tx.execute(
+                    "INSERT OR IGNORE INTO face_identity_skips (face_id, model_id, created_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![face_id, crate::ai::identity::MODEL_ID, now],
+                )?;
+            }
 
             // Recognise people the user has already named. This is only ever a
             // suggestion — naming stays a human decision (D-007).
@@ -1400,7 +1438,7 @@ impl<'a> Pipeline<'a> {
                 &f.vector,
                 &f.model_id,
                 &f.model_version,
-                crate::faces::PERSON_MATCH_THRESHOLD,
+                crate::faces::person_match_threshold_for(&f.model_id),
             ) {
                 face_repo.suggest_face_is_person(&face_id, &hit.person_id, hit.score)?;
             }

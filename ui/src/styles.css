@@ -823,3 +823,9 @@ details.advanced h3 { margin: 20px 0 6px; }
 .viewer-actions { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
 .someone-else { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .someone-else input { width: 200px; }
+
+/* Better face recognition (D-102). */
+.upgrade-card { border-color: var(--accent); }
+.upgrade-card.done { border-color: var(--ok); }
+.upgrade-card .bar span { display: block; height: 100%; background: var(--accent); border-radius: 999px; transition: width 0.6s ease; }
+.upgrade-card .bar { margin: 10px 0; }

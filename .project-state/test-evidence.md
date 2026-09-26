@@ -475,3 +475,4 @@ Find (home and results), Drives, People, Events, Settings.
 - D-099: src-tauri clippy clean; face pictures now served over one shared connection.
 - D-100: core 391 passed; UI 100 passed; clippy clean.
 - D-101: core tests incl. naming_one_face_leaves_its_group_alone; UI 101 passed (photo viewer test); clippy clean.
+- D-102: core 399 passed (1 ignored) + real-face end-to-end test passing with ATLASDRIVE_FACE_TEST_PHOTO; UI 103 passed; workspace + src-tauri clippy clean.

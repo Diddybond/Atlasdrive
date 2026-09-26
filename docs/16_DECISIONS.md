@@ -2747,3 +2747,47 @@ read in it.
 - Follow-up: every suggestion under "Review N possible" also has **Someone
   else…**. It refuses the guess and names that face as whoever is typed
   (`name_face_in_photo`), again that face only.
+
+## D-102 — Faces are recognised with ArcFace, not Apple Vision feature prints
+
+**Status:** settled. Supersedes D-026's interim use of the Vision feature print.
+
+- **Why:** Vision's feature print describes what an image looks like, not whose
+  face it is. On the owner's archive it scored different children at the same
+  89% as each other, so grouping and "who else is this?" could not work.
+- **Model:** InsightFace `buffalo_l`: the SCRFD `det_10g` detector (for five
+  landmarks) and the ArcFace `w600k_r50` recogniser (512-d). Faces are aligned
+  to the ArcFace 112×112 template by a least-squares similarity transform
+  before embedding (`ai::identity`).
+- **Engine:** `tract-onnx`, pure Rust, in-process. No native runtime to
+  install; no network at run time.
+- **Distribution:** the model files (~190 MB) are not in git.
+  `scripts/fetch-face-model.sh` downloads them once at build time from
+  InsightFace's GitHub release, verifies SHA-256 for the archive and each file,
+  and Tauri bundles them. Licence: InsightFace's pretrained models are for
+  non-commercial use. Here they are used only to organise the owner's own
+  archive, locally.
+- **Input:** the 200px face crops already stored encrypted in the catalogue.
+  The whole archive can be upgraded with every drive unplugged, and new scans
+  embed from the same crop, so both land in one space.
+- **Storage:** a face keeps one embedding, its best. The upgrade replaces the
+  Vision print with the ArcFace vector (model id `arcface-r50-w600k`). A face
+  the detector cannot find in its crop keeps its old embedding and is recorded
+  in `face_identity_skips` (migration v9), so it is not retried.
+- **Thresholds:** grouping at cosine 0.50 (`IDENTITY_CLUSTER_THRESHOLD`) and
+  suggestions at 0.42 (`IDENTITY_MATCH_THRESHOLD`). Measured on a test group
+  photo: six different people scored −0.04 to 0.21 against each other; the
+  same face, darkened and shrunk, scored 0.99.
+- **Upgrade (`identity_upgrade`):** embed in resumable, committed batches on
+  all but two cores, then dissolve every *unnamed* group (including pending
+  suggestions from the weak model), regroup drive by drive, merge across
+  drives, and recompute every named person's suggestions. Named groups and the
+  owner's refusals are never touched. The app offers it as a card on People,
+  with progress, a time-left estimate and "Stop for now"; the CLI equivalent is
+  `atlasdrive faces identity`.
+- **Evidence:** 9 new tests. An end-to-end test on real faces
+  (`the_upgrade_groups_real_faces_by_person`, run when
+  `ATLASDRIVE_FACE_TEST_PHOTO` is set) stores each of six people twice under
+  one deliberately wrong group. After the upgrade each person is exactly one
+  group of two. Measured cost on the 4-core Linux build box: ~260 ms per face
+  per core.

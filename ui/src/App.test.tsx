@@ -1,4 +1,4 @@
-import { resetMockBackup, resetMockFaces, setMockCoverage, setMockExtraVolumes, setMockFaceThumbError, setMockScanError, setMockScanning, setMockStopping } from "./api";
+import { resetMockBackup, resetMockFaces, setMockCoverage, setMockExtraVolumes, setMockFaceThumbError, setMockIdentity, setMockScanError, setMockScanning, setMockStopping } from "./api";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { App } from "./App";
 
@@ -357,6 +357,27 @@ describe("AtlasDrive UI", () => {
     expect(screen.getByText(/might also be Aimee/)).toBeDefined();
     expect(screen.getByText(/34 photographs/)).toBeDefined();
     expect(screen.getByRole("button", { name: /Review 2 possible matches for Aimee/ })).toBeDefined();
+  });
+
+  it("offers better face recognition, shows it working, and stops on request", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Improve face recognition" }));
+    expect(await screen.findByText(/Reading faces: 0 of 27,535/)).toBeDefined();
+
+    setMockIdentity({ done: 13000, unreadable: 767, elapsed_secs: 600 });
+    expect(await screen.findByText(/13,767 of 27,535 \(50%\) · about 10 minutes left/, {}, { timeout: 4000 })).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop for now" }));
+    setMockIdentity(
+      { running: false, stopped: true, phase: "finished", regroup: null },
+      { upgraded: 13000, pending: 13768, unreadable: 767 },
+    );
+    expect(await screen.findByRole("button", { name: "Carry on" }, { timeout: 4000 })).toBeDefined();
+    setMockIdentity(
+      { running: false, stopped: false, phase: "", done: 0, unreadable: 0, total: 0, elapsed_secs: 0 },
+      { upgraded: 0, pending: 27535, unreadable: 0 },
+    );
   });
 
   it("tags a suggested face as someone else while reviewing", async () => {

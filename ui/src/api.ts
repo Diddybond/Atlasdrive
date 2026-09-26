@@ -351,6 +351,28 @@ export interface FailureReason {
   example: string | null;
 }
 
+export interface FaceIdentityState {
+  model_installed: boolean;
+  status: { upgraded: number; pending: number; unreadable: number };
+  job: {
+    running: boolean;
+    phase: string;
+    done: number;
+    unreadable: number;
+    total: number;
+    elapsed_secs: number;
+    stopped: boolean;
+    regroup?: {
+      groups_dissolved: number;
+      groups_created: number;
+      faces_grouped: number;
+      groups_merged: number;
+      suggestions: number;
+    } | null;
+    error?: string | null;
+  };
+}
+
 /// A face inside one photograph. The box is a fraction of the image, from the
 /// top-left corner.
 export interface PhotoFace {
@@ -395,6 +417,15 @@ export function resetMockBackup(destination: string | null = null) {
 export function resetMockFaces() {
   for (const f of mockGallery) f.person_name = null;
   for (const k of Object.keys(mockPhotoFaces)) delete mockPhotoFaces[k];
+}
+
+let mockIdentity: FaceIdentityState = {
+  model_installed: true,
+  status: { upgraded: 0, pending: 27535, unreadable: 0 },
+  job: { running: false, phase: "", done: 0, unreadable: 0, total: 0, elapsed_secs: 0, stopped: false, regroup: null, error: null },
+};
+export function setMockIdentity(next: Partial<FaceIdentityState["job"]>, status?: FaceIdentityState["status"]) {
+  mockIdentity = { ...mockIdentity, job: { ...mockIdentity.job, ...next }, status: status ?? mockIdentity.status };
 }
 
 let mockExtraVolumes: string[] = [];
@@ -524,6 +555,9 @@ export const api = {
       faceId,
       name,
     }),
+  faceIdentityState: () => call<FaceIdentityState>("face_identity_state"),
+  startFaceUpgrade: () => call<void>("start_face_upgrade"),
+  stopFaceUpgrade: () => call<void>("stop_face_upgrade"),
   facesInPhoto: (fileId: string) => call<PhotoFace[]>("faces_in_photo", { fileId }),
   photoView: (fileId: string) => call<string | null>("photo_view", { fileId }),
   nameFaceInPhoto: (faceId: string, name: string) =>
@@ -844,6 +878,17 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       person.confirmed_faces += face ? face.group_size : 1;
       return Promise.resolve({ person, suggested: 2 } as unknown as T);
     }
+    case "face_identity_state":
+      return Promise.resolve(mockIdentity as unknown as T);
+    case "start_face_upgrade":
+      mockIdentity = {
+        ...mockIdentity,
+        job: { ...mockIdentity.job, running: true, phase: "reading", total: mockIdentity.status.pending, done: 0, elapsed_secs: 0 },
+      };
+      return Promise.resolve(undefined as unknown as T);
+    case "stop_face_upgrade":
+      mockIdentity = { ...mockIdentity, job: { ...mockIdentity.job, running: false, stopped: true, phase: "finished" } };
+      return Promise.resolve(undefined as unknown as T);
     case "faces_in_photo": {
       const id = String(args?.fileId ?? "");
       mockPhotoFaces[id] ??= [

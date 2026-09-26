@@ -41,6 +41,28 @@ struct AppState {
     /// a hundred and fifty file handles against macOS's default limit of 256
     /// for an app, and the losers failed with "unable to open database file".
     reader: Arc<Mutex<Option<rusqlite::Connection>>>,
+    /// The face identity upgrade (D-102), when one has run this session.
+    face_upgrade: Arc<Mutex<FaceUpgrade>>,
+    face_upgrade_stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Where the face identity upgrade has got to, for the People screen.
+#[derive(Clone, Default, Serialize)]
+struct FaceUpgrade {
+    running: bool,
+    /// "reading", "grouping" or "finished".
+    phase: String,
+    /// Faces given an identity embedding, and found unreadable, this run.
+    done: usize,
+    unreadable: usize,
+    /// Faces waiting when the run started.
+    total: usize,
+    started_at: Option<String>,
+    /// Seconds since the run started, for a time-left estimate.
+    elapsed_secs: u64,
+    stopped: bool,
+    regroup: Option<family_archive_core::identity_upgrade::RegroupReport>,
+    error: Option<String>,
 }
 
 /// Run a quick read on the shared connection, opening it on first use.
@@ -429,7 +451,7 @@ async fn tag_face(state: State<'_, AppState>, face_id: String, name: String) -> 
                 &model_id,
                 &model_version,
                 &key,
-                faces::PERSON_MATCH_THRESHOLD,
+                faces::person_match_threshold_for(&model_id),
             )
             .map_err(map_err)?;
 
@@ -508,7 +530,7 @@ async fn name_face_in_photo(
         let key = keystore::master_key(paths.keys_dir(), &archive).map_err(map_err)?;
         let (model_id, model_version) = face_model_partition(&archive);
         let suggested = repo
-            .suggest_for_person(&person.id, &model_id, &model_version, &key, faces::PERSON_MATCH_THRESHOLD)
+            .suggest_for_person(&person.id, &model_id, &model_version, &key, faces::person_match_threshold_for(&model_id))
             .map_err(map_err)?;
         Ok(TagResult { person, suggested })
     })
@@ -526,6 +548,108 @@ async fn not_a_face(state: State<'_, AppState>, face_id: String) -> Result<(), S
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// How far the archive is from better face recognition, and any run in progress.
+#[derive(Serialize)]
+struct FaceIdentityState {
+    model_installed: bool,
+    status: family_archive_core::identity_upgrade::IdentityStatus,
+    job: FaceUpgrade,
+}
+
+#[tauri::command]
+async fn face_identity_state(state: State<'_, AppState>) -> Result<FaceIdentityState, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let reader = state.reader.clone();
+    let job = state.face_upgrade.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<FaceIdentityState, String> {
+        let status = with_reader(&reader, &paths, |archive| {
+            family_archive_core::identity_upgrade::status(archive).map_err(map_err)
+        })?;
+        Ok(FaceIdentityState {
+            model_installed: family_archive_core::ai::identity::IdentityModel::find(&[]).is_some(),
+            status,
+            job,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Re-read every stored face with the identity model, then regroup (D-102).
+///
+/// Runs on its own thread; the People screen polls [`face_identity_state`].
+/// Stopping keeps everything done so far, and starting again carries on.
+#[tauri::command]
+fn start_face_upgrade(state: State<'_, AppState>) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let paths = state.paths.lock().unwrap().clone();
+    let job = state.face_upgrade.clone();
+    let stop = state.face_upgrade_stop.clone();
+    {
+        let mut j = job.lock().unwrap_or_else(|e| e.into_inner());
+        if j.running {
+            return Err("better face recognition is already being set up".into());
+        }
+        *j = FaceUpgrade {
+            running: true,
+            phase: "reading".into(),
+            started_at: Some(family_archive_core::util::now_iso8601()),
+            ..Default::default()
+        };
+    }
+    stop.store(false, Ordering::Relaxed);
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let set = |f: &dyn Fn(&mut FaceUpgrade)| {
+            let mut j = job.lock().unwrap_or_else(|e| e.into_inner());
+            f(&mut j);
+            j.elapsed_secs = started.elapsed().as_secs();
+        };
+        let result = (|| -> Result<(), String> {
+            use family_archive_core::identity_upgrade as up;
+            let model = family_archive_core::ai::identity::shared()
+                .ok_or("the face recognition model is not installed — rebuild the app")?;
+            let archive = open_archive(&paths)?;
+            let key = keystore::master_key(paths.keys_dir(), &archive).map_err(map_err)?;
+            let total = up::status(&archive).map_err(map_err)?.pending;
+            set(&|j| j.total = total);
+            // Leave a core or two for the rest of the Mac.
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get().saturating_sub(2))
+                .unwrap_or(2)
+                .clamp(1, 8);
+            let report = up::embed_pending(&archive, &model, &key, workers, &stop, |r| {
+                set(&|j| {
+                    j.done = r.embedded;
+                    j.unreadable = r.unreadable;
+                })
+            })
+            .map_err(map_err)?;
+            if report.stopped {
+                set(&|j| j.stopped = true);
+                return Ok(());
+            }
+            set(&|j| j.phase = "grouping".into());
+            let regrouped = up::regroup(&archive, &key).map_err(map_err)?;
+            set(&|j| j.regroup = Some(regrouped.clone()));
+            Ok(())
+        })();
+        set(&|j| {
+            j.running = false;
+            j.phase = "finished".into();
+            if let Err(e) = &result {
+                j.error = Some(e.clone());
+            }
+        });
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_face_upgrade(state: State<'_, AppState>) {
+    state.face_upgrade_stop.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The model partition most of this archive's faces were written under.
@@ -2197,6 +2321,8 @@ pub fn run() {
                 running: Arc::new(Mutex::new(None)),
                 last_error: Arc::new(Mutex::new(None)),
                 reader: Arc::new(Mutex::new(None)),
+                face_upgrade: Arc::new(Mutex::new(FaceUpgrade::default())),
+                face_upgrade_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
             Ok(())
         })
@@ -2267,6 +2393,9 @@ pub fn run() {
             face_thumbnail,
             tag_face,
             faces_in_photo,
+            face_identity_state,
+            start_face_upgrade,
+            stop_face_upgrade,
             photo_view,
             name_face_in_photo,
             not_a_face,

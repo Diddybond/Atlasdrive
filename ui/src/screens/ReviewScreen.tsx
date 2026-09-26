@@ -1,3 +1,4 @@
+import { FaceUpgradeCard } from "./FaceUpgradeCard";
 import { useEffect, useState } from "react";
 import { api, ExportSummary, GalleryFace, NamedPerson, PersonFolder, SuggestedFace, UnnamedOnDrive } from "../api";
 
@@ -265,6 +266,8 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
         Name only the people you want to find — family, friends, the couple at a wedding. Everyone
         else can stay unnamed. Once someone is named, search for them on Find like anything else.
       </p>
+
+      <FaceUpgradeCard onFinished={() => void load()} />
 
       {status && (
         <p className="search-note" role="status">
