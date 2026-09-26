@@ -706,16 +706,29 @@ fn rename_drive(
 }
 
 /// Every subject the catalogue recognised, for browsing rather than guessing.
+///
+/// `useful` leaves out subjects on so many photographs that picking them
+/// narrows nothing ("people", "adult"); see `inventory::useful_subjects`.
 #[tauri::command]
-fn catalogue_tags(
-    state: State<AppState>,
+async fn catalogue_tags(
+    state: State<'_, AppState>,
     limit: Option<usize>,
     drive_number: Option<i64>,
+    useful: Option<bool>,
 ) -> Result<Vec<family_archive_core::inventory::TagCount>, String> {
     let paths = state.paths.lock().unwrap().clone();
-    let archive = open_archive(&paths)?;
-    family_archive_core::inventory::tags_on_drive(&archive, limit.unwrap_or(60), drive_number)
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive = open_archive(&paths)?;
+        let limit = limit.unwrap_or(60);
+        if useful.unwrap_or(false) {
+            family_archive_core::inventory::useful_subjects(&archive, limit, drive_number)
+        } else {
+            family_archive_core::inventory::tags_on_drive(&archive, limit, drive_number)
+        }
         .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// What is stored on each drive — answerable with every drive unplugged.
@@ -745,15 +758,17 @@ fn similar_photographs(
     let paths = state.paths.lock().unwrap().clone();
     let archive = open_archive(&paths)?;
     let repo = family_archive_core::search::SearchRepo::with_index_dir(&archive, paths.cache_dir());
-    repo.similar_to(
-        &file_id,
-        &SearchFilters {
-            limit: limit.unwrap_or(24),
-            include_offline: true,
-            ..Default::default()
-        },
-    )
-    .map_err(map_err)
+    let similar = repo
+        .similar_to(
+            &file_id,
+            &SearchFilters {
+                limit: limit.unwrap_or(24),
+                include_offline: true,
+                ..Default::default()
+            },
+        )
+        .map_err(map_err)?;
+    family_archive_core::search::fold_copies(&archive, similar).map_err(map_err)
 }
 
 #[tauri::command]
@@ -816,6 +831,8 @@ fn search_catalogue(
             .map_err(map_err)?;
         (results, text_only, understood)
     };
+    // A photograph on several drives is one result that names them all.
+    results = family_archive_core::search::fold_copies(&archive, results).map_err(map_err)?;
     // Populate a friendly date label from the stored range.
     for r in &mut results {
         if let Some((a, b)) = &r.date_range {

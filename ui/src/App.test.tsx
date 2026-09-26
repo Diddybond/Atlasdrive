@@ -13,10 +13,16 @@ beforeEach(() => {
   setMockScanError(null);
 });
 
+/// Scan activity lives under Drives.
+function openScanActivity() {
+  fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+  fireEvent.click(screen.getByRole("tab", { name: "Scan activity" }));
+}
+
 describe("AtlasDrive UI", () => {
   it("renders the main navigation and search screen", () => {
     render(<App />);
-    expect(screen.getByRole("heading", { name: "Search", level: 1 })).toBeDefined();
+    expect(screen.getByRole("heading", { name: "Find a photograph", level: 1 })).toBeDefined();
     expect(screen.getByRole("search")).toBeDefined();
   });
 
@@ -66,7 +72,7 @@ describe("AtlasDrive UI", () => {
     render(<App />);
     // The archive is browsable without having to guess a search term.
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+      expect(screen.getByRole("heading", { name: /pick a subject|All subjects/ })).toBeDefined();
     });
     const chip = screen.getByRole("button", { name: /Narrow to the 131 photographs showing wedding/ });
     fireEvent.click(chip);
@@ -88,7 +94,7 @@ describe("AtlasDrive UI", () => {
   it("shows subjects as words, not taxonomy ids", async () => {
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+      expect(screen.getByRole("heading", { name: /pick a subject|All subjects/ })).toBeDefined();
     });
     const chip = screen.getByRole("button", { name: /showing drinking glass/ });
     expect(chip.textContent).toContain("drinking glass");
@@ -100,7 +106,7 @@ describe("AtlasDrive UI", () => {
   it("says how many it found and shows every one", async () => {
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+      expect(screen.getByRole("heading", { name: /pick a subject|All subjects/ })).toBeDefined();
     });
     fireEvent.click(screen.getByRole("button", { name: /showing wedding/ }));
     await waitFor(() => {
@@ -113,9 +119,12 @@ describe("AtlasDrive UI", () => {
   it("a hyphenated subject still finds its photographs", async () => {
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+      expect(screen.getByRole("heading", { name: /pick a subject|All subjects/ })).toBeDefined();
     });
-    fireEvent.click(screen.getByRole("button", { name: /showing likely-scan/ }));
+    // Scans cover more than a quarter of the mock archive, so they are in the
+    // full list rather than the short one.
+    fireEvent.click(screen.getByRole("button", { name: "Show all subjects" }));
+    fireEvent.click(await screen.findByRole("button", { name: /showing likely-scan/ }));
     await waitFor(() => {
       expect(screen.getByText("old_scan.jpg")).toBeDefined();
     });
@@ -126,7 +135,7 @@ describe("AtlasDrive UI", () => {
   it("says plainly that picking two subjects requires both", async () => {
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+      expect(screen.getByRole("heading", { name: /pick a subject|All subjects/ })).toBeDefined();
     });
     fireEvent.click(screen.getByRole("button", { name: /showing wedding/ }));
     await waitFor(() => {
@@ -148,14 +157,14 @@ describe("AtlasDrive UI", () => {
   it("clears picked subjects when the drive changes", async () => {
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /What is in your photographs/ })).toBeDefined();
+      expect(screen.getByRole("heading", { name: /pick a subject|All subjects/ })).toBeDefined();
     });
     fireEvent.click(screen.getByRole("button", { name: /showing wedding/ }));
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /Stop narrowing to wedding/ })).toBeDefined();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /^Drive 2/ }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Look on" }), { target: { value: "2" } });
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: /Stop narrowing to/ })).toBeNull();
     });
@@ -166,10 +175,10 @@ describe("AtlasDrive UI", () => {
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "beach" } });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await waitFor(() => {
-      expect(screen.getByText(/appear to show: beach/i)).toBeDefined();
+      expect(screen.getByText(/Looking for: beach/i)).toBeDefined();
     });
     // Visual matches must never be presented as certainties.
-    expect(screen.getByText(/visual guesses/i)).toBeDefined();
+    expect(screen.getByText(/best guess/i)).toBeDefined();
   });
 
   it("says so plainly when a query carries no visual meaning", async () => {
@@ -177,7 +186,7 @@ describe("AtlasDrive UI", () => {
     fireEvent.change(screen.getByRole("searchbox"), { target: { value: "zzzz" } });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await waitFor(() => {
-      expect(screen.getByText(/No visual terms recognised/i)).toBeDefined();
+      expect(screen.getByText(/Searched names, folders and subjects/i)).toBeDefined();
     });
   });
 
@@ -199,7 +208,7 @@ describe("AtlasDrive UI", () => {
       expect(screen.getByText("portrait.jpg")).toBeDefined();
     });
     expect(screen.queryByRole("button", { name: /Show portrait.jpg in Finder/ })).toBeNull();
-    expect(screen.getByText(/Connect Drive 7 to open the original/)).toBeDefined();
+    expect(screen.getByText(/Plug in Drive 7 to open the original/)).toBeDefined();
   });
 
   it("exports a diagnostics file and says what it does not contain", async () => {
@@ -586,7 +595,7 @@ describe("Searching within an event", () => {
     fireEvent.click(screen.getByRole("button", { name: "Show photographs" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Search", level: 1 })).toBeDefined();
+      expect(screen.getByRole("heading", { name: "Find a photograph", level: 1 })).toBeDefined();
     });
     // The scope has to be visible, or a short list reads as a small archive.
     const scope = await screen.findByRole("status", { name: "Search scope" });
@@ -612,7 +621,7 @@ describe("Searching within an event", () => {
     fireEvent.click(screen.getByRole("button", { name: /Crown School/ }));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Search", level: 1 })).toBeDefined();
+      expect(screen.getByRole("heading", { name: "Find a photograph", level: 1 })).toBeDefined();
     });
     const scope = await screen.findByRole("status", { name: "Search scope" });
     expect(scope.textContent).toContain("everything for Crown School");
@@ -839,7 +848,7 @@ describe("Stopping a scan", () => {
   /// command line.
   it("offers a stop button while a scan is running", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /Scan activity/ }));
+    openScanActivity();
     const stop = await screen.findByRole("button", { name: /Stop scanning/ });
     expect(stop).toBeDefined();
 
@@ -859,7 +868,7 @@ describe("Stopping a scan", () => {
   it("gives a finished scan the time it took, not a clock still running", async () => {
     setMockScanning(false);
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /Scan activity/ }));
+    openScanActivity();
     await waitFor(() => {
       expect(screen.getByText("Ran for")).toBeDefined();
     });
@@ -875,7 +884,7 @@ describe("Stopping a scan", () => {
   /// Nothing about stopping should suggest work has been thrown away.
   it("says plainly that stopping loses nothing", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /Scan activity/ }));
+    openScanActivity();
     fireEvent.click(await screen.findByRole("button", { name: /Stop scanning/ }));
     await waitFor(() => {
       expect(screen.getByText(/Interrupting loses nothing/i)).toBeDefined();
@@ -1017,7 +1026,7 @@ describe("Scanning a drive from the Drives screen", () => {
 describe("Scan progress dashboard", () => {
   async function openScan() {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /Scan activity/ }));
+    openScanActivity();
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "Scan activity", level: 1 })).toBeDefined();
     });
@@ -1110,20 +1119,36 @@ describe("Faces nobody has named", () => {
   });
 });
 
-describe("Catalogue backup notice", () => {
+describe("Needs you", () => {
   /// The owner's catalogue of ~218,000 photographs had never been backed up,
-  /// and the only place that said so was a card in Settings.
-  it("says on every screen that the catalogue has never been backed up", async () => {
+  /// and the only place that said so was a card in Settings. It is the first
+  /// thing on the home screen now.
+  it("puts a missing backup first thing on the home screen, one click from fixing it", async () => {
     resetMockBackup();
     render(<App />);
-    expect(await screen.findByText(/never been backed up/)).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
-    expect(await screen.findByText(/never been backed up/)).toBeDefined();
+    const panel = await screen.findByRole("region", { name: "Needs you" });
+    expect(panel.textContent).toMatch(/never been backed up/);
 
-    // Its button leads to where the backup is set up, and the notice does not
-    // repeat itself there.
     fireEvent.click(screen.getByRole("button", { name: "Choose a backup folder" }));
     await screen.findByRole("heading", { name: /Settings/ });
-    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  /// Naming people and events is optional; they are never listed as chores.
+  it("never lists naming faces or events as something to do", async () => {
+    resetMockBackup();
+    render(<App />);
+    const panel = await screen.findByRole("region", { name: "Needs you" });
+    expect(panel.textContent).not.toMatch(/to name|unnamed|nobody has named|faces? waiting|events? waiting/i);
+  });
+
+  /// Once a search is showing results, the panel steps aside.
+  it("steps aside once there are results", async () => {
+    resetMockBackup();
+    render(<App />);
+    await screen.findByRole("region", { name: "Needs you" });
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "beach" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await screen.findByText("beach_1998.jpg");
+    expect(screen.queryByRole("region", { name: "Needs you" })).toBeNull();
   });
 });

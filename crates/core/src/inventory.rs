@@ -249,6 +249,45 @@ pub fn tags_on_drive(
     Ok(out)
 }
 
+/// Share of the photographs in view above which a subject stops being useful
+/// for finding anything.
+const USEFUL_SUBJECT_MAX_SHARE: f64 = 0.25;
+
+/// The subjects worth offering first: the most photographed ones that still
+/// narrow a search.
+///
+/// On the owner's archive "people" covered 124,426 of ~218,000 photographs and
+/// "adult" 119,590, and they led the list — picking either leaves more than
+/// half the archive, which is not finding. A subject on more than a quarter of
+/// the photographs in view is left out here (the full list is still one click
+/// away), so the first chips offered are the ones that lead somewhere: a
+/// bicycle, a cake, a church.
+pub fn useful_subjects(
+    conn: &Connection,
+    limit: usize,
+    drive_number: Option<i64>,
+) -> Result<Vec<TagCount>> {
+    let total: i64 = match drive_number {
+        Some(n) => conn.query_row(
+            "SELECT count(*) FROM files f JOIN drives d ON d.id = f.drive_id
+              WHERE f.status = 'complete' AND d.drive_number = ?1",
+            [n],
+            |r| r.get(0),
+        )?,
+        None => conn.query_row("SELECT count(*) FROM files WHERE status = 'complete'", [], |r| {
+            r.get(0)
+        })?,
+    };
+    let ceiling = ((total as f64) * USEFUL_SUBJECT_MAX_SHARE).floor() as i64;
+    // Everything, most photographed first, then keep what narrows.
+    let all = tags_on_drive(conn, usize::MAX >> 1, drive_number)?;
+    let mut useful: Vec<TagCount> = all.into_iter().filter(|t| t.count <= ceiling.max(1)).collect();
+    useful.sort_by(|a, b| b.count.cmp(&a.count).then(a.tag.cmp(&b.tag)));
+    useful.truncate(limit);
+    useful.sort_by_key(|t| t.tag.to_lowercase());
+    Ok(useful)
+}
+
 /// Which drives hold photographs matching a search, and how many each holds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriveMatch {
@@ -369,6 +408,7 @@ mod tests {
             date_label: None,
             matched: vec!["text".into()],
             score: 1.0,
+            also_on: Vec::new(),
         }
     }
 
@@ -1431,5 +1471,55 @@ mod running_scan_tests {
         )
         .unwrap();
         assert!(running_scans(&conn).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod useful_subject_tests {
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
+
+    /// "people" on nearly everything is left out; the subjects that actually
+    /// pick photographs out are offered, most photographed first, shown A–Z.
+    #[test]
+    fn subjects_on_most_photographs_are_not_offered_first() {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute_batch(
+            "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES ('d',1,'online','now');
+             INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r','d','','now');
+             INSERT INTO tags (id, name, tag_type, created_at) VALUES
+               ('t-people','people','automatic','now'), ('t-cake','cake','automatic','now'),
+               ('t-bike','bicycle','automatic','now'), ('t-kent','Kent','person','now');",
+        )
+        .unwrap();
+        for i in 0..20 {
+            let id = format!("f{i}");
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, status, created_at, updated_at)
+                 VALUES (?1,'d','r',?1,?1,1,1,'complete','now','now')",
+                [&id],
+            )
+            .unwrap();
+            let mut tags = vec!["t-people", "t-kent"];
+            if i < 4 {
+                tags.push("t-cake");
+            }
+            if i < 2 {
+                tags.push("t-bike");
+            }
+            for t in tags {
+                conn.execute(
+                    "INSERT INTO file_tags (file_id, tag_id, source, created_at) VALUES (?1,?2,'automatic','now')",
+                    rusqlite::params![id, t],
+                )
+                .unwrap();
+            }
+        }
+        let useful = useful_subjects(&conn, 20, None).unwrap();
+        let names: Vec<&str> = useful.iter().map(|t| t.tag.as_str()).collect();
+        assert_eq!(names, vec!["bicycle", "cake"], "people is on every photograph; Kent is a person");
+        // The full list still has everything that is not a person.
+        assert_eq!(tags_on_drive(&conn, 20, None).unwrap().len(), 3);
     }
 }

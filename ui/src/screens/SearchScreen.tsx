@@ -1,16 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { api, Drive, DriveMatch, SearchResult, subjectLabel, TagCount } from "../api";
 import type { SearchContext } from "../App";
+import { NeedsYou, Place } from "./NeedsYou";
 
 export function SearchScreen({
   context,
   onClearContext,
+  onGo,
 }: {
   context?: SearchContext | null;
   onClearContext?: () => void;
+  onGo?: (place: Place) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [includeOffline, setIncludeOffline] = useState(true);
+  // Every drive is always searched, plugged in or not — that is the point of
+  // the app. The switch to leave unplugged drives out was a way to get fewer,
+  // less useful answers.
+  const includeOffline = true;
   const [results, setResults] = useState<SearchResult[]>([]);
   const [understood, setUnderstood] = useState<string[]>([]);
   const [textOnly, setTextOnly] = useState(false);
@@ -21,6 +27,7 @@ export function SearchScreen({
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [tags, setTags] = useState<TagCount[]>([]);
+  const [allSubjects, setAllSubjects] = useState(false);
   // Bumped on every search, so thumbnails from an abandoned one are dropped.
   const searchToken = useRef(0);
   // Which drive is being browsed, and which subjects have been picked. Both
@@ -38,9 +45,12 @@ export function SearchScreen({
 
   // The subject list follows the selected drive, so every chip on screen leads
   // to photographs on the disk being browsed rather than to an empty result.
+  // A short list of subjects that narrow a search, until asked for all of them.
   useEffect(() => {
-    void api.catalogueTags(60, driveFilter ?? undefined).then(setTags);
-  }, [driveFilter]);
+    void api
+      .catalogueTags(allSubjects ? 60 : 16, driveFilter ?? undefined, !allSubjects)
+      .then(setTags);
+  }, [driveFilter, allSubjects]);
 
   // Arriving from Events with a filter should show that shoot immediately —
   // landing on an empty search box having just asked to see something would be
@@ -164,13 +174,20 @@ export function SearchScreen({
     }
   }
 
+  const driveName = (n: number) => {
+    const d = allDrives.find((x) => x.drive_number === n);
+    return d?.physical_location ? `kept in ${d.physical_location}` : null;
+  };
+
   return (
     <section aria-labelledby="search-heading">
-      <h1 id="search-heading">Search</h1>
+      <h1 id="search-heading">Find a photograph</h1>
       <p className="lede">
-        Search by what a photo shows, who is in it, or where it lives — even while the drive is
-        disconnected.
+        Describe it, name someone, or type a year. Every drive is searched, plugged in or not, and
+        each photograph tells you which drive holds it.
       </p>
+
+      {!searched && onGo && <NeedsYou onGo={onGo} />}
 
       {similarTo && (
         <p className="scope-bar" role="status" aria-label="Result scope">
@@ -196,11 +213,11 @@ export function SearchScreen({
         </p>
       )}
 
-      <form className="search-bar" onSubmit={run} role="search">
+      <form className="search-bar big" onSubmit={run} role="search">
         <input
           type="search"
           aria-label="Search photographs"
-          placeholder="Try: bikes, Christmas, family wedding, photos from the 1980s"
+          placeholder="e.g. bikes, Christmas 1998, a wedding in the rain"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -209,51 +226,36 @@ export function SearchScreen({
         </button>
       </form>
 
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={includeOffline}
-          onChange={(e) => setIncludeOffline(e.target.checked)}
-        />
-        Include photographs on disconnected drives
-      </label>
-
-      {allDrives.length > 0 && (
-        <div className="drive-filter">
-          <span className="filter-label">Look on</span>
-          <button
-            className={driveFilter === null ? "chip selected" : "chip"}
-            onClick={() => {
-              setDriveFilter(null);
+      {allDrives.length > 1 && (
+        <label className="inline-select">
+          Look on
+          <select
+            aria-label="Look on"
+            value={driveFilter ?? ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              setDriveFilter(v === "" ? null : Number(v));
+              // Subjects belong to the drive they were picked from; keeping
+              // them would silently search for something the new drive may
+              // not have and return nothing for no visible reason.
               setPickedTags([]);
             }}
           >
-            Every drive
-          </button>
-          {allDrives.map((d) => (
-            <button
-              key={d.id}
-              className={driveFilter === d.drive_number ? "chip selected" : "chip"}
-              onClick={() => {
-                setDriveFilter(d.drive_number);
-                // Subjects belong to the drive they were picked from; keeping
-                // them would silently search for something the new drive may
-                // not have and return nothing for no visible reason.
-                setPickedTags([]);
-              }}
-              title={d.friendly_name ?? undefined}
-            >
-              Drive {d.drive_number}
-              <span className="chip-count">{(d.image_count ?? 0).toLocaleString()}</span>
-            </button>
-          ))}
-        </div>
+            <option value="">Every drive</option>
+            {allDrives.map((d) => (
+              <option key={d.id} value={d.drive_number}>
+                Drive {d.drive_number}
+                {d.friendly_name ? ` — ${d.friendly_name}` : ""} ({(d.image_count ?? 0).toLocaleString()})
+              </option>
+            ))}
+          </select>
+        </label>
       )}
 
       {tags.length > 0 && (
-        <div className="card">
+        <div className="subjects">
           <div className="row-between">
-            <h2>What is in your photographs</h2>
+            <h2>{allSubjects ? "All subjects" : "Or pick a subject"}</h2>
             {pickedTags.length > 0 && (
               <button
                 className="ghost"
@@ -266,12 +268,6 @@ export function SearchScreen({
               </button>
             )}
           </div>
-          <p className="drive-meta subtle">
-            {driveFilter === null
-              ? "Everything AtlasDrive recognised across your drives."
-              : `Everything AtlasDrive recognised on Drive ${driveFilter}.`}{" "}
-            Click to add a subject — each one you add narrows the search further.
-          </p>
           <ul className="tag-cloud">
             {tags.map((t) => {
               const on = pickedTags.includes(t.tag);
@@ -285,11 +281,8 @@ export function SearchScreen({
                         ? pickedTags.filter((x) => x !== t.tag)
                         : [...pickedTags, t.tag];
                       setPickedTags(next);
-                      // Subjects are filters, not text. Clicking one used to
-                      // write it into the search box, and the leftover words
-                      // were then silently intersected with the next click —
-                      // "jeans" answered through the lens of "likely-scan".
-                      // The box now belongs to the owner's own typing.
+                      // Subjects are filters, not text: the box belongs to
+                      // the owner's own typing (see D-074).
                       void search(query, next);
                     }}
                     aria-label={
@@ -305,69 +298,50 @@ export function SearchScreen({
               );
             })}
           </ul>
-          <div className="row-between name-row">
-            <p className="panel-note">
-              Names come from text AtlasDrive read on things in the picture — a bottle, a shop
-              front, a van, a magazine. They are never guessed from the image itself.
-            </p>
-            <button
-              className="ghost"
-              disabled={findingNames}
-              onClick={() => {
-                setFindingNames(true);
-                setNameNote(null);
-                void api
-                  .findNames(driveFilter ?? undefined)
-                  .then((r) => {
-                    setNameNote(
-                      r.tagged === 0
-                        ? `Read the text of ${r.examined.toLocaleString()} photographs and found no names.`
-                        : `Found names in ${r.tagged.toLocaleString()} of ${r.examined.toLocaleString()} photographs: ${r.names
-                            .slice(0, 8)
-                            .map((b) => b.tag)
-                            .join(", ")}${r.names.length > 8 ? "…" : ""}`,
-                    );
-                    return api.catalogueTags(60, driveFilter ?? undefined).then(setTags);
-                  })
-                  .finally(() => setFindingNames(false));
-              }}
-            >
-              {findingNames ? "Reading…" : "Find names in photographs"}
-            </button>
-          </div>
-          {nameNote && (
-            <p className="search-note" role="status">
-              {nameNote}
-            </p>
-          )}
-
           {pickedTags.length > 1 && (
             <p className="panel-note">
               Showing only photographs that contain <strong>all</strong> of these:{" "}
               {pickedTags.map(subjectLabel).join(", ")}.
             </p>
           )}
+          <div className="row-between name-row">
+            <button className="ghost" onClick={() => setAllSubjects((v) => !v)}>
+              {allSubjects ? "Show fewer subjects" : "Show all subjects"}
+            </button>
+            {allSubjects && (
+              <button
+                className="ghost"
+                disabled={findingNames}
+                title="Names read on things in the picture — a van, a shop front, a bottle. Never guessed from the image."
+                onClick={() => {
+                  setFindingNames(true);
+                  setNameNote(null);
+                  void api
+                    .findNames(driveFilter ?? undefined)
+                    .then((r) => {
+                      setNameNote(
+                        r.tagged === 0
+                          ? `Read the text of ${r.examined.toLocaleString()} photographs and found no names.`
+                          : `Found names in ${r.tagged.toLocaleString()} of ${r.examined.toLocaleString()} photographs: ${r.names
+                              .slice(0, 8)
+                              .map((b) => b.tag)
+                              .join(", ")}${r.names.length > 8 ? "…" : ""}`,
+                      );
+                      return api.catalogueTags(60, driveFilter ?? undefined, false).then(setTags);
+                    })
+                    .finally(() => setFindingNames(false));
+                }}
+              >
+                {findingNames ? "Reading…" : "Find names in photographs"}
+              </button>
+            )}
+          </div>
+          {nameNote && (
+            <p className="search-note" role="status">
+              {nameNote}
+            </p>
+          )}
         </div>
-      )}
-
-      {searched && understood.length > 0 && (
-        <p className="search-note" role="status">
-          Looking for photographs that appear to show: {understood.join(", ")}. These are visual
-          guesses.
-        </p>
-      )}
-      {searched && textOnly && (
-        <p className="search-note" role="status">
-          No visual terms recognised in that wording — searched names, folders and tags only.
-        </p>
-      )}
-
-      {searched && results.length > 0 && (
-        <p className="search-note" role="status">
-          {pickedTags.length > 0
-            ? `${results.length.toLocaleString()} photograph${results.length === 1 ? "" : "s"} — every match, not a sample.`
-            : `${results.length.toLocaleString()} photograph${results.length === 1 ? "" : "s"} found.`}
-        </p>
       )}
 
       {searched && drives.length > 0 && (
@@ -382,7 +356,7 @@ export function SearchScreen({
                 </span>
                 {d.drive_name && <span className="drive-hit-name">{d.drive_name}</span>}
                 <span className={d.online ? "status online" : "status offline"}>
-                  {d.online ? "Connected" : "Disconnected"}
+                  {d.online ? "Plugged in" : "Not plugged in"}
                 </span>
                 {!d.online && d.physical_location && (
                   <span className="drive-hit-where">Kept in {d.physical_location}</span>
@@ -393,99 +367,114 @@ export function SearchScreen({
         </div>
       )}
 
+      {searched && results.length > 0 && (
+        <p className="search-note" role="status">
+          {pickedTags.length > 0
+            ? `${results.length.toLocaleString()} photograph${results.length === 1 ? "" : "s"} — every match, not a sample.`
+            : `${results.length.toLocaleString()} photograph${results.length === 1 ? "" : "s"} found.`}
+          {understood.length > 0 &&
+            ` Looking for: ${understood.join(", ")} (a best guess from the pictures).`}
+        </p>
+      )}
+
       {searched && results.length === 0 && (
-        <p className="empty">No matching photographs yet. Try a broader description.</p>
+        <p className="empty">Nothing matched. Try fewer words, a year, or pick a subject.</p>
+      )}
+      {searched && textOnly && (
+        <p className="search-note">Searched names, folders and subjects.</p>
       )}
 
       <ul className="results-grid" aria-label="Search results">
-        {results.map((r) => (
-          <li key={r.file_id} className="result-card">
-            <div className="thumb">
-              {thumbs[r.file_id] ? (
-                <img src={thumbs[r.file_id]} alt="" loading="lazy" />
-              ) : (
-                <span className="thumb-mark" aria-hidden>
-                  🖼
-                </span>
-              )}
-            </div>
-            <div className="result-body">
-              <div className="result-top">
-                <span className="drive-badge">Drive {r.drive_number}</span>
-                <span className={r.online ? "status online" : "status offline"}>
-                  {r.online ? "Online" : "Offline"}
-                </span>
+        {results.map((r) => {
+          const where = driveName(r.drive_number);
+          return (
+            <li key={r.file_id} className="result-card">
+              <div className="thumb">
+                {thumbs[r.file_id] ? (
+                  <img src={thumbs[r.file_id]} alt="" loading="lazy" />
+                ) : (
+                  <span className="thumb-mark" aria-hidden>
+                    🖼
+                  </span>
+                )}
               </div>
-              <p className="filename">{r.filename}</p>
-              <p className="date">{r.date_label ?? "Date uncertain"}</p>
-              {correcting === r.file_id ? (
-                <form className="form date-form" onSubmit={(e) => void saveDate(e, r.file_id)}>
-                  <label>
-                    Date taken (YYYY-MM-DD)
-                    <input name="earliest" placeholder="1998-08-12" required />
-                  </label>
-                  <label>
-                    If unsure, latest it could be
-                    <input name="latest" placeholder="1998-12-31" />
-                  </label>
-                  {dateError && (
-                    <p className="error" role="alert">
-                      {dateError}
-                    </p>
-                  )}
-                  <button type="submit">Save date</button>
-                  <button type="button" className="ghost" onClick={() => setCorrecting(null)}>
-                    Cancel
-                  </button>
-                </form>
-              ) : (
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setDateError(null);
-                    setCorrecting(r.file_id);
-                  }}
-                  aria-label={`Correct the date for ${r.filename}`}
-                >
-                  Correct this date
-                </button>
-              )}
-              <p className="matched">
-                Matched: {r.matched.join(", ")} · {(r.score * 100).toFixed(0)}% match
-              </p>
-              <button
-                className="ghost"
-                onClick={() => void findSimilar(r.file_id, r.filename)}
-                aria-label={`Find photographs that look like ${r.filename}`}
-              >
-                More like this
-              </button>
-              {r.online ? (
-                <button
-                  className="ghost"
-                  onClick={() => void reveal(r.file_id)}
-                  aria-label={`Show ${r.filename} in Finder`}
-                >
-                  Show in Finder
-                </button>
-              ) : (
-                <p className="offline-note">Connect Drive {r.drive_number} to open the original.</p>
-              )}
-              {revealed[r.file_id] && (
-                <p className="check-detail" role="status">
-                  {revealed[r.file_id]}
+              <div className="result-body">
+                <p className="where">
+                  <span className="drive-badge big">Drive {r.drive_number}</span>
+                  <span className={r.online ? "status online" : "status offline"}>
+                    {r.online ? "Plugged in" : where ?? "Not plugged in"}
+                  </span>
                 </p>
-              )}
-            </div>
-          </li>
-        ))}
+                {r.also_on && r.also_on.length > 0 && (
+                  <p className="also-on">Also on Drive {r.also_on.join(", ")}</p>
+                )}
+                <p className="filename" title={r.relative_path}>
+                  {r.filename}
+                </p>
+                <p className="date">{r.date_label ?? "Date unknown"}</p>
+                {r.online ? (
+                  <button
+                    onClick={() => void reveal(r.file_id)}
+                    aria-label={`Show ${r.filename} in Finder`}
+                  >
+                    Show in Finder
+                  </button>
+                ) : (
+                  <p className="offline-note">Plug in Drive {r.drive_number} to open the original.</p>
+                )}
+                {revealed[r.file_id] && (
+                  <p className="check-detail" role="status">
+                    {revealed[r.file_id]}
+                  </p>
+                )}
+                <details className="more">
+                  <summary>More</summary>
+                  <button
+                    className="ghost"
+                    onClick={() => void findSimilar(r.file_id, r.filename)}
+                    aria-label={`Find photographs that look like ${r.filename}`}
+                  >
+                    More like this
+                  </button>
+                  {correcting === r.file_id ? (
+                    <form className="form date-form" onSubmit={(e) => void saveDate(e, r.file_id)}>
+                      <label>
+                        Date taken (YYYY-MM-DD)
+                        <input name="earliest" placeholder="1998-08-12" required />
+                      </label>
+                      <label>
+                        If unsure, latest it could be
+                        <input name="latest" placeholder="1998-12-31" />
+                      </label>
+                      {dateError && (
+                        <p className="error" role="alert">
+                          {dateError}
+                        </p>
+                      )}
+                      <button type="submit">Save date</button>
+                      <button type="button" className="ghost" onClick={() => setCorrecting(null)}>
+                        Cancel
+                      </button>
+                    </form>
+                  ) : (
+                    <button
+                      className="ghost"
+                      onClick={() => {
+                        setDateError(null);
+                        setCorrecting(r.file_id);
+                      }}
+                      aria-label={`Correct the date for ${r.filename}`}
+                    >
+                      Correct the date
+                    </button>
+                  )}
+                  <p className="matched">Found by: {r.matched.join(", ")}</p>
+                </details>
+              </div>
+            </li>
+          );
+        })}
       </ul>
-      {results.length > 0 && (
-        <p className="footnote">
-          Visual matches are best guesses, not certainties. Confirmed names and tags always take
-          priority.
-        </p>
-      )}
     </section>
   );
 }

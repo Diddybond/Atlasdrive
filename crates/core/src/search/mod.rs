@@ -15,7 +15,7 @@ pub mod vecindex;
 /// without ranking the whole catalogue.
 const OVERFETCH: usize = 20;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -37,6 +37,10 @@ pub struct SearchResult {
     pub matched: Vec<String>,
     /// Match strength in [0,1]; probabilistic, never presented as certainty.
     pub score: f32,
+    /// Other drives holding this same photograph (same content), in drive
+    /// order. See [`fold_copies`].
+    #[serde(default)]
+    pub also_on: Vec<i64>,
 }
 
 /// Filters applicable to any search.
@@ -415,7 +419,7 @@ impl<'a> SearchRepo<'a> {
         Ok(merged)
     }
 
-    fn load_result(&self, file_id: &str) -> Result<Option<SearchResult>> {
+    pub(crate) fn load_result(&self, file_id: &str) -> Result<Option<SearchResult>> {
         let row = self.conn.query_row(
             "SELECT f.id, f.filename, f.relative_path, d.drive_number, d.friendly_name, d.status,
                     t.rel_path, de.earliest_date, de.latest_date
@@ -445,6 +449,7 @@ impl<'a> SearchRepo<'a> {
                     date_label: None,
                     matched: Vec::new(),
                     score: 0.0,
+                    also_on: Vec::new(),
                 })
             },
         );
@@ -454,6 +459,73 @@ impl<'a> SearchRepo<'a> {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Show each photograph once, however many drives hold a copy of it.
+///
+/// The question AtlasDrive answers is "which drive is it on?" — and for a
+/// photograph copied to two drives the honest answer is both, in one place.
+/// Listing it twice made a search look bigger than it was and hid that the
+/// photograph had a second copy at all. Copies are recognised by content hash,
+/// so a copy under a different folder or name is still the same photograph.
+///
+/// The copy kept is the one on a connected drive when there is one, so "Show
+/// in Finder" works, and otherwise the best-scoring; every other drive holding
+/// it — whether or not it matched the search — is listed in `also_on`. Order
+/// and scores are otherwise unchanged.
+pub fn fold_copies(conn: &Connection, results: Vec<SearchResult>) -> Result<Vec<SearchResult>> {
+    use std::collections::HashMap;
+    let repo = SearchRepo::new(conn);
+    let mut hash_of = conn.prepare("SELECT content_hash FROM files WHERE id = ?1")?;
+    let mut copies = conn.prepare(
+        "SELECT f.id, d.drive_number, d.status = 'online'
+           FROM files f JOIN drives d ON d.id = f.drive_id
+          WHERE f.content_hash = ?1 AND f.status = 'complete'
+          ORDER BY d.drive_number, f.id",
+    )?;
+
+    let mut out: Vec<SearchResult> = Vec::with_capacity(results.len());
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    for r in results {
+        let hash: Option<String> = hash_of
+            .query_row([&r.file_id], |row| row.get(0))
+            .optional()?
+            .flatten();
+        let Some(hash) = hash else {
+            out.push(r);
+            continue;
+        };
+        if seen.insert(hash.clone(), ()).is_some() {
+            continue; // a copy of a photograph already listed
+        }
+        let all: Vec<(String, i64, bool)> = copies
+            .query_map([&hash], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+
+        // Prefer a copy on a connected drive, even if it was a copy on a
+        // drive in a drawer that matched: the search is about where to look,
+        // and "here, now" is the best answer.
+        let mut shown = r;
+        if !shown.online {
+            if let Some((id, _, _)) = all.iter().find(|(_, _, online)| *online) {
+                if let Some(mut local) = repo.load_result(id)? {
+                    local.matched = std::mem::take(&mut shown.matched);
+                    local.score = shown.score;
+                    local.date_label = shown.date_label.take();
+                    shown = local;
+                }
+            }
+        }
+        let mut drives: Vec<i64> = all
+            .iter()
+            .map(|(_, n, _)| *n)
+            .filter(|&n| n != shown.drive_number)
+            .collect();
+        drives.dedup();
+        shown.also_on = drives;
+        out.push(shown);
+    }
+    Ok(out)
 }
 
 /// Resolve a catalogued file back to its original on disk, if the drive is
@@ -916,5 +988,56 @@ mod completeness_tests {
         let hits = repo.browse_by_tags(&filters).unwrap();
         assert_eq!(repo.count_by_tags(&filters).unwrap(), hits.len() as i64);
         assert_eq!(hits.len(), 2, "f1 and f2 are the Drive 1 weddings");
+    }
+}
+
+#[cfg(test)]
+mod fold_copies_tests {
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
+
+    fn archive() -> Connection {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute_batch(
+            "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES
+               ('d5',5,'offline','now'), ('d7',7,'online','now'), ('d9',9,'offline','now');
+             INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES
+               ('r5','d5','','now'), ('r7','d7','','now'), ('r9','d9','','now');
+             INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                source_mtime_ns, content_hash, status, created_at, updated_at) VALUES
+               ('a5','d5','r5','wedding/001.jpg','001.jpg',1,1,'hA','complete','now','now'),
+               ('a7','d7','r7','copies/aimee-001.jpg','aimee-001.jpg',1,1,'hA','complete','now','now'),
+               ('a9','d9','r9','old/001.jpg','001.jpg',1,1,'hA','complete','now','now'),
+               ('b9','d9','r9','old/002.jpg','002.jpg',1,1,'hB','complete','now','now');",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn hit(conn: &Connection, id: &str, score: f32) -> SearchResult {
+        let mut r = SearchRepo::new(conn).load_result(id).unwrap().unwrap();
+        r.score = score;
+        r.matched = vec!["text".into()];
+        r
+    }
+
+    /// One photograph on three drives is one result, shown from the drive that
+    /// is plugged in, naming the others — even though only unplugged copies
+    /// matched the search.
+    #[test]
+    fn a_photograph_on_several_drives_is_shown_once_from_the_connected_one() {
+        let conn = archive();
+        let results = vec![hit(&conn, "a5", 0.9), hit(&conn, "b9", 0.5), hit(&conn, "a9", 0.4)];
+        let folded = fold_copies(&conn, results).unwrap();
+
+        assert_eq!(folded.len(), 2, "{folded:?}");
+        assert_eq!(folded[0].file_id, "a7", "shown from the connected drive");
+        assert!(folded[0].online);
+        assert_eq!(folded[0].also_on, vec![5, 9]);
+        assert_eq!(folded[0].score, 0.9, "keeps the rank it earned");
+        assert_eq!(folded[0].matched, vec!["text".to_string()]);
+
+        assert_eq!(folded[1].file_id, "b9");
+        assert!(folded[1].also_on.is_empty(), "only one copy exists");
     }
 }

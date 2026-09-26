@@ -736,3 +736,42 @@ h2 {
   color: var(--ink);
 }
 .notice-bar button { flex: none; }
+
+/* Sub-sections within a section (Drives: all drives / scan activity). */
+.tabs { display: flex; gap: 4px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--ink-soft);
+  padding: 8px 14px;
+  font: inherit;
+  cursor: pointer;
+}
+.tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+
+/* ---- Find: the search is the app ---------------------------------------- */
+.search-bar.big input { font-size: 1.15rem; padding: 14px 16px; }
+.search-bar.big button { font-size: 1.05rem; padding: 0 22px; }
+.inline-select { display: inline-flex; align-items: center; gap: 10px; color: var(--ink-soft); margin: 4px 0 16px; }
+.inline-select select { width: auto; min-width: 16rem; }
+.subjects { margin: 8px 0 20px; }
+.subjects h2 { font-size: 1rem; margin: 0; color: var(--ink-soft); font-weight: 600; }
+
+/* The answer to "which drive?" is the biggest thing on each card. */
+.where { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 4px; }
+.drive-badge.big { font-size: 1rem; padding: 4px 10px; }
+.also-on { color: var(--ink-soft); font-size: 0.85rem; margin: 2px 0 4px; }
+.result-body > button { margin-top: 8px; }
+details.more { margin-top: 8px; }
+details.more summary { cursor: pointer; color: var(--link); font-size: 0.88rem; list-style: none; }
+details.more summary::-webkit-details-marker { display: none; }
+details.more[open] { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+
+/* ---- Needs you ---------------------------------------------------------- */
+.needs-you { border-color: var(--atlas-amber); }
+.needs-you h2 { margin-top: 0; }
+.needs-you ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.needs-you li { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.needs-you li button { flex: none; }

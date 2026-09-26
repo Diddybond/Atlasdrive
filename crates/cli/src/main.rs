@@ -814,6 +814,7 @@ fn search_cmd(ctx: &Ctx, args: SearchArgs) -> Result<()> {
     });
 
     let results = repo.natural_language_search(&args.query, visual, &filters)?;
+    let results = family_archive_core::search::fold_copies(&archive, results)?;
     if let Some(note) = visual_note {
         println!("{note}");
     }
@@ -852,6 +853,10 @@ fn search_cmd(ctx: &Ctx, args: SearchArgs) -> Result<()> {
             r.matched.join("+"),
             r.score * 100.0
         );
+        if !r.also_on.is_empty() {
+            let others: Vec<String> = r.also_on.iter().map(|n| n.to_string()).collect();
+            println!("      also on Drive {}", others.join(", "));
+        }
         if !r.online {
             println!("      -> Connect Drive {} to open the original.", r.drive_number);
         }

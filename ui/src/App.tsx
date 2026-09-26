@@ -1,22 +1,22 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { SearchScreen } from "./screens/SearchScreen";
 import { DrivesScreen } from "./screens/DrivesScreen";
 import { ScanScreen } from "./screens/ScanScreen";
 import { ReviewScreen } from "./screens/ReviewScreen";
 import { EventsScreen } from "./screens/EventsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
-import { api, runningInTauri, Settings } from "./api";
-import { backupWarning } from "./lib/backupWarning";
+import { runningInTauri } from "./api";
 
-type Section = "search" | "drives" | "review" | "events" | "scan" | "settings";
+type Section = "search" | "drives" | "review" | "events" | "settings";
 
+/// Five places, named for what you do there. Scan activity used to be a sixth
+/// section; it is part of looking after drives, so it lives under Drives.
 const NAV: { id: Section; label: string; hint: string }[] = [
-  { id: "search", label: "Search", hint: "Find any photograph" },
-  { id: "drives", label: "Drives", hint: "Your numbered drives" },
-  { id: "review", label: "People", hint: "Name faces, check suggestions" },
-  { id: "events", label: "Events", hint: "Weddings, shoots, clients" },
-  { id: "scan", label: "Scan activity", hint: "Indexing progress" },
-  { id: "settings", label: "Settings", hint: "Diagnostics and safety" },
+  { id: "search", label: "Find", hint: "Search every drive" },
+  { id: "drives", label: "Drives", hint: "Your drives and scans" },
+  { id: "review", label: "People", hint: "Name the people who matter" },
+  { id: "events", label: "Events", hint: "Weddings, shoots, occasions" },
+  { id: "settings", label: "Settings", hint: "Backup and more" },
 ];
 
 /// A filter handed from one screen to another — Events sending you to Search
@@ -29,16 +29,8 @@ export interface SearchContext {
 
 export function App() {
   const [section, setSection] = useState<Section>("search");
+  const [drivesTab, setDrivesTab] = useState<"drives" | "scan">("drives");
   const [context, setContext] = useState<SearchContext | null>(null);
-  // Re-read on every change of screen, so a backup made in Settings clears the
-  // notice as soon as you leave it — and a backup that stops happening brings
-  // it back.
-  const [settings, setSettings] = useState<Settings | null>(null);
-  useEffect(() => {
-    void api.getSettings().then(setSettings, () => setSettings(null));
-  }, [section]);
-  const warning = section === "settings" ? null : backupWarning(settings);
-
   /// Jumping to Search with a filter is the only cross-screen navigation in
   /// the app, so it is a callback rather than a router.
   function searchWithin(next: SearchContext) {
@@ -83,20 +75,37 @@ export function App() {
       </nav>
 
       <main className="content" aria-live="polite">
-        {warning && (
-          <div className="notice-bar" role="alert">
-            <span>{warning}</span>
-            <button onClick={() => setSection("settings")}>
-              {settings?.backup_destination ? "Back up now" : "Choose a backup folder"}
-            </button>
-          </div>
-        )}
         {section === "search" && (
-          <SearchScreen context={context} onClearContext={() => setContext(null)} />
+          <SearchScreen
+            context={context}
+            onClearContext={() => setContext(null)}
+            onGo={(place) => setSection(place)}
+          />
         )}
-        {section === "drives" && <DrivesScreen />}
+        {section === "drives" && (
+          <>
+            <div className="tabs" role="tablist" aria-label="Drives">
+              <button
+                role="tab"
+                aria-selected={drivesTab === "drives"}
+                className={drivesTab === "drives" ? "tab active" : "tab"}
+                onClick={() => setDrivesTab("drives")}
+              >
+                All drives
+              </button>
+              <button
+                role="tab"
+                aria-selected={drivesTab === "scan"}
+                className={drivesTab === "scan" ? "tab active" : "tab"}
+                onClick={() => setDrivesTab("scan")}
+              >
+                Scan activity
+              </button>
+            </div>
+            {drivesTab === "drives" ? <DrivesScreen /> : <ScanScreen />}
+          </>
+        )}
         {section === "review" && <ReviewScreen />}
-        {section === "scan" && <ScanScreen />}
         {section === "events" && <EventsScreen onSearchWithin={searchWithin} />}
         {section === "settings" && <SettingsScreen />}
       </main>

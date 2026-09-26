@@ -132,6 +132,8 @@ export interface SearchResult {
   date_label?: string | null;
   matched: string[];
   score: number;
+  /// Other drives holding the same photograph.
+  also_on?: number[];
 }
 
 export interface DriveMatch {
@@ -460,8 +462,8 @@ export const api = {
     }),
   photosOfPerson: (personId: string) => call<PersonPhoto[]>("photos_of_person", { personId }),
   findNames: (driveNumber?: number) => call<NameScan>("find_names", { driveNumber }),
-  catalogueTags: (limit?: number, driveNumber?: number) =>
-    call<TagCount[]>("catalogue_tags", { limit, driveNumber }),
+  catalogueTags: (limit?: number, driveNumber?: number, useful?: boolean) =>
+    call<TagCount[]>("catalogue_tags", { limit, driveNumber, useful }),
   photoThumbnail: (fileId: string, maxEdge?: number) =>
     call<string | null>("photo_thumbnail", { fileId, maxEdge }),
   pendingSuggestions: (personId: string, limit?: number) =>
@@ -750,8 +752,8 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       person.confirmed_faces += face ? face.group_size : 1;
       return Promise.resolve({ person, suggested: 2 } as unknown as T);
     }
-    case "catalogue_tags":
-      return Promise.resolve([
+    case "catalogue_tags": {
+      const all = [
         { tag: "people", count: 708 },
         { tag: "adult", count: 694 },
         { tag: "clothing", count: 588 },
@@ -760,7 +762,13 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         { tag: "wedding", count: 131 },
         { tag: "drinking_glass", count: 57 },
         { tag: "likely-scan", count: 995 },
-      ] as unknown as T);
+      ];
+      // The mock archive has 1,000 photographs; "useful" drops anything on
+      // more than a quarter of them, as the real one does.
+      return Promise.resolve(
+        (args?.useful ? all.filter((t) => t.count <= 250) : all) as unknown as T,
+      );
+    }
     case "photo_thumbnail": {
       const seed = String(args?.fileId ?? "").length * 47;
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="90"><rect width="120" height="90" fill="hsl(${seed % 360},40%,70%)"/></svg>`;
