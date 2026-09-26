@@ -720,8 +720,12 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       // Honour the event/client scope, or a test asserting that scoping works
       // would pass against a mock that ignores it.
       if (args?.eventId || args?.client) {
+        // No words: every photograph of the shoot or client, as the backend's
+        // browse returns. With words: just the matches within it.
+        const all = String(args?.query ?? "").trim() === "";
         return Promise.resolve({
-          results: mockResults.slice(0, 1),
+          results: all ? mockResults : mockResults.slice(0, 1),
+          total_matches: all ? mockResults.length : undefined,
           understood: ["scoped"],
           text_only: true,
           drives: [{ drive_number: 14, drive_name: "AtlasDrive A", online: true, count: 1 }],

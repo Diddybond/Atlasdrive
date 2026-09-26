@@ -1230,10 +1230,12 @@ async fn search_catalogue(
             ..Default::default()
         };
 
-        // An empty box with subjects picked is a browse, not a search: the tag
-        // rows answer it exactly, and routing it through free text told the owner
-        // a subject with 995 photographs had none.
-        let browsing = query.trim().is_empty() && !filters.tags.is_empty();
+        // An empty box with subjects picked, or an event or client chosen, is a
+        // browse, not a search: the catalogue answers it exactly. Routing it
+        // through free text told the owner a subject with 995 photographs had
+        // none, and showed a client's shoots as "closest matches to
+        // 'photograph'" rather than all of them.
+        let browsing = query.trim().is_empty() && filters.is_browse();
 
         let (mut results, text_only, understood) = if browsing {
             (repo.browse_by_tags(&filters).map_err(map_err)?, false, Vec::new())

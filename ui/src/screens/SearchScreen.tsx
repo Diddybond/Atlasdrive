@@ -69,7 +69,12 @@ export function SearchScreen({
   // landing on an empty search box having just asked to see something would be
   // a dead end.
   useEffect(() => {
-    if (context) void search(query || "photograph");
+    // Every photograph of that shoot or client: no search words, no subjects
+    // left over from an earlier search narrowing it.
+    if (context) {
+      setPickedTags([]);
+      void search("", []);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [context?.eventId, context?.client]);
   useEffect(() => {

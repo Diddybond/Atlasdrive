@@ -788,6 +788,11 @@ describe("Searching within an event", () => {
     });
     const scope = await screen.findByRole("status", { name: "Search scope" });
     expect(scope.textContent).toContain("everything for Crown School");
+    // Every photograph for the client, not the closest matches to a word.
+    for (const f of ["beach_1998.jpg", "portrait.jpg", "old_scan.jpg"]) {
+      expect(await screen.findByText(f)).toBeDefined();
+    }
+    expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("");
   });
 });
 

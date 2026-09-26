@@ -2819,3 +2819,13 @@ case and accents and compares numbers as numbers (`byName`, `Intl.Collator`).
 Which subjects are offered is still decided by usefulness (D-091). Drives stay
 in drive-number order, and faces to name stay biggest group first, because
 those orders carry meaning.
+
+## D-105 — A client or event click shows all of its photographs
+
+**Status:** settled. Clicking a client chip or "Show photographs" on an event
+used to search for the word "photograph" within it. That returned the closest
+visual matches, not the whole shoot. An event, a client or picked subjects now
+make an empty search a browse (`SearchFilters::is_browse`). The catalogue
+lists every photograph in it, newest first, with an exact count. Earlier
+search words and subjects are cleared on arrival, so nothing narrows it by
+accident. Typing words afterwards searches within the shoot as before.

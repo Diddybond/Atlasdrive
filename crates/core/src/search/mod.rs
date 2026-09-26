@@ -64,6 +64,13 @@ pub struct SearchFilters {
 }
 
 impl SearchFilters {
+    /// A filter that names a set of photographs outright — picked subjects,
+    /// an event, or a client — so an empty search box means "show me all of
+    /// them", not "search for nothing".
+    pub fn is_browse(&self) -> bool {
+        !self.tags.is_empty() || self.event_id.is_some() || self.client.is_some()
+    }
+
     pub fn limit_or(&self, default: usize) -> usize {
         if self.limit == 0 {
             default
@@ -135,7 +142,7 @@ impl<'a> SearchRepo<'a> {
     /// 995 photographs and was told there were none. The tag rows are the
     /// truth about tags; ask them directly.
     pub fn browse_by_tags(&self, filters: &SearchFilters) -> Result<Vec<SearchResult>> {
-        if filters.tags.is_empty() {
+        if !filters.is_browse() {
             return Ok(Vec::new());
         }
         let mut sql = String::from(
@@ -177,7 +184,7 @@ impl<'a> SearchRepo<'a> {
     /// about the other 471. A count on a chip is a promise, so the screen has
     /// to be able to state the true total and offer the rest.
     pub fn count_by_tags(&self, filters: &SearchFilters) -> Result<i64> {
-        if filters.tags.is_empty() {
+        if !filters.is_browse() {
             return Ok(0);
         }
         let mut sql = String::from(
@@ -1079,6 +1086,47 @@ mod browse_tests {
         let hits = repo.browse_by_tags(&filters).unwrap();
         assert_eq!(hits.len(), 1, "the tagged photograph must be found");
         assert!(hits[0].matched.contains(&"tag".to_string()));
+    }
+
+    /// Clicking a client shows every photograph of every shoot for them, with
+    /// no search words: the owner's clients listed "10" and showed a handful.
+    #[test]
+    fn browsing_a_client_or_event_returns_all_of_its_photographs() {
+        let conn = tag_filter_tests::catalogue();
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(ids.len() >= 2);
+        conn.execute_batch(
+            "INSERT INTO events (id, name, client, status, created_at, updated_at)
+               VALUES ('e1','Menu shoot','Food Photography','named','now','now'),
+                      ('e2','Other','Someone else','named','now','now');",
+        )
+        .unwrap();
+        for id in &ids[..ids.len() - 1] {
+            conn.execute(
+                "INSERT INTO event_files (event_id, file_id, created_at) VALUES ('e1', ?1, 'now')",
+                [id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO event_files (event_id, file_id, created_at) VALUES ('e2', ?1, 'now')",
+            [ids.last().unwrap()],
+        )
+        .unwrap();
+
+        let repo = SearchRepo::new(&conn);
+        let by_client = SearchFilters { client: Some("food photography".into()), ..Default::default() };
+        assert!(by_client.is_browse());
+        assert_eq!(repo.browse_by_tags(&by_client).unwrap().len(), ids.len() - 1);
+        assert_eq!(repo.count_by_tags(&by_client).unwrap(), ids.len() as i64 - 1);
+        let by_event = SearchFilters { event_id: Some("e2".into()), ..Default::default() };
+        assert_eq!(repo.browse_by_tags(&by_event).unwrap().len(), 1);
     }
 
     #[test]
