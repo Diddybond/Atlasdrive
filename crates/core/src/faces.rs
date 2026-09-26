@@ -1055,7 +1055,7 @@ impl<'a> FaceRepo<'a> {
             }
         }
 
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         let now = now_iso8601();
         for ((model_id, _), faces) in &partitions {
             let dim = faces[0].1.len();
@@ -1145,7 +1145,7 @@ impl<'a> FaceRepo<'a> {
         }
 
         let mut report = MergeReport::default();
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         let now = now_iso8601();
         for ((model_id, _), clusters) in by_model {
             // Biggest groups first, so each merge lands in the best-established one.
@@ -1230,7 +1230,7 @@ impl<'a> FaceRepo<'a> {
 
         let embeddings = self.load_embeddings(model_id, model_version, key)?;
 
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         // Clear only *unconfirmed* cluster assignments; keep confirmed links.
         tx.execute(
             "UPDATE faces SET cluster_id = NULL
@@ -1641,7 +1641,7 @@ impl<'a> FaceRepo<'a> {
             // Name already belongs to someone else: move this person's groups
             // across and drop the duplicate record.
             Some(target) => {
-                let tx = self.conn.unchecked_transaction()?;
+                let tx = crate::db::write_tx(self.conn)?;
                 tx.execute(
                     "UPDATE face_clusters SET person_id=?2 WHERE person_id=?1",
                     params![person_id, target],
@@ -1742,7 +1742,7 @@ impl<'a> FaceRepo<'a> {
 
     /// Name a cluster by confirming it belongs to a person (human confirmation).
     pub fn name_cluster(&self, cluster_id: &str, person_id: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         tx.execute(
             "UPDATE face_clusters SET status='confirmed', person_id=?2, updated_at=?3 WHERE id=?1",
             params![cluster_id, person_id, now_iso8601()],
@@ -1758,7 +1758,7 @@ impl<'a> FaceRepo<'a> {
 
     /// Merge two clusters (source folds into target).
     pub fn merge_clusters(&self, target: &str, source: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         tx.execute(
             "UPDATE faces SET cluster_id=?1 WHERE cluster_id=?2",
             params![target, source],
@@ -1774,7 +1774,7 @@ impl<'a> FaceRepo<'a> {
     /// Move a face out of its cluster into a new one (split).
     pub fn split_face(&self, face_id: &str) -> Result<String> {
         let new_cluster = new_uuid();
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         tx.execute(
             "INSERT INTO face_clusters (id, status, algorithm_version, created_at, updated_at)
              VALUES (?1,'unnamed',?2,?3,?3)",
@@ -1808,7 +1808,7 @@ impl<'a> FaceRepo<'a> {
 
     /// Delete a person's derived face data (privacy control).
     pub fn delete_person_face_data(&self, person_id: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         tx.execute(
             "DELETE FROM face_person_links WHERE person_id=?1",
             [person_id],

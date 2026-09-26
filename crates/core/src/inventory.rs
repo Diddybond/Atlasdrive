@@ -1229,7 +1229,7 @@ pub fn scan_for_names(conn: &Connection, drive_number: Option<i64>) -> Result<Na
     };
 
     let mut counts: std::collections::BTreeMap<String, i64> = Default::default();
-    let tx = conn.unchecked_transaction()?;
+    let tx = crate::db::write_tx(conn)?;
     for (file_id, text) in rows {
         out.examined += 1;
         let hits = crate::ai::names::detect(&text);

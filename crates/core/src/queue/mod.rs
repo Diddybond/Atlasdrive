@@ -61,7 +61,7 @@ impl<'a> Queue<'a> {
         root_id: &str,
         files: &[(DiscoveredFile, i64)], // (file, mtime_ns)
     ) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         let mut inserted = 0usize;
         {
             let mut stmt = tx.prepare(
@@ -111,7 +111,7 @@ impl<'a> Queue<'a> {
         root_id: &str,
         files: &[(DiscoveredFile, i64)],
     ) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         let mut updated = 0usize;
         {
             let mut clear_lease = tx.prepare(
@@ -136,7 +136,7 @@ impl<'a> Queue<'a> {
 
     /// Reclaim items whose lease has expired back to `queued`. Returns count.
     pub fn expire_leases(&self, now_ns: i64) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         let expired: Vec<String> = {
             let mut stmt =
                 tx.prepare("SELECT item_id FROM queue_leases WHERE expires_at_ns <= ?1")?;
@@ -172,7 +172,7 @@ impl<'a> Queue<'a> {
         // Reclaim abandoned work first.
         self.expire_leases(now_epoch_ns())?;
 
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         let lease_id = new_uuid();
         let now = now_epoch_ns();
         let expires = now + lease_ttl_seconds * 1_000_000_000;
@@ -233,7 +233,7 @@ impl<'a> Queue<'a> {
     /// mark perfectly good originals as failed for the crime of being on a
     /// drive that was unplugged.
     pub fn release(&self, item_id: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         tx.execute(
             "UPDATE queue_items SET state='queued', attempts = MAX(attempts - 1, 0) WHERE id=?1",
             [item_id],
@@ -244,7 +244,7 @@ impl<'a> Queue<'a> {
     }
 
     pub fn complete(&self, item_id: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         tx.execute(
             "UPDATE queue_items SET state='complete' WHERE id=?1",
             [item_id],
@@ -257,7 +257,7 @@ impl<'a> Queue<'a> {
     /// Record a failure. Retryable failures return to `queued`; terminal ones
     /// are marked `failed`.
     pub fn fail(&self, item_id: &str, code: &str, message: &str, retryable: bool) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         let rel: Option<String> = tx
             .query_row(
                 "SELECT relative_path FROM queue_items WHERE id=?1",
@@ -297,7 +297,7 @@ impl<'a> Queue<'a> {
     /// class of problem does not also retry files that failed for unrelated
     /// reasons.
     pub fn retry_failed(&self, drive_id: &str, only_code: Option<&str>) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.conn)?;
         // Leases are dropped alongside the state change so a revived item
         // cannot be claimed twice.
         let revived = match only_code {

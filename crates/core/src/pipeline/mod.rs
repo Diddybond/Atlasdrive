@@ -1263,7 +1263,7 @@ impl<'a> Pipeline<'a> {
         }
 
         // 9. Atomic commit to archive.db.
-        let tx = self.archive.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.archive)?;
         self.commit_file(&tx, drive, item, &analysed, exemplars)?;
         tx.commit()?;
 
@@ -1737,7 +1737,7 @@ impl<'a> Pipeline<'a> {
         // One transaction for the whole reconciliation: a drive re-scanned from
         // a different root marks every photograph on it, and one commit per row
         // is one disk sync per row.
-        let tx = self.archive.unchecked_transaction()?;
+        let tx = crate::db::write_tx(self.archive)?;
 
         for (file, mtime) in discovered {
             seen.insert(file.relative_path.as_str());

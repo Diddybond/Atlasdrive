@@ -216,7 +216,7 @@ pub fn backfill(conn: &Connection) -> Result<PlacesReport> {
         .collect::<std::result::Result<_, _>>()?;
     let mut report = PlacesReport::default();
     for chunk in rows.chunks(2000) {
-        let tx = conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(conn)?;
         for (file_id, raw_json) in chunk {
             let Ok(raw) = serde_json::from_str::<BTreeMap<String, String>>(raw_json) else { continue };
             if position_from_exif(&raw).is_none() {

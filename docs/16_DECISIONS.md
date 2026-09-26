@@ -2864,3 +2864,17 @@ accident. Typing words afterwards searches within the shoot as before.
   marked as family, otherwise of anyone named. There are at most six per year,
   newest year first, a photograph on two drives appears once, and the card is
   hidden on a day with nothing.
+
+## D-108 — Every write transaction takes the write lock at BEGIN
+
+**Status:** settled.
+
+- Seen on the live Mac: "The last scan stopped: database error: database is
+  locked", with the face upgrade and the places pass running beside a scan.
+- **Cause:** a deferred transaction starts as a reader and asks for the write
+  lock at its first write. In WAL mode, if another connection committed in
+  between, SQLite refuses at once (SQLITE_BUSY_SNAPSHOT). The busy timeout
+  does not apply to that refusal.
+- **Fix:** every write transaction in core now begins `IMMEDIATE`
+  (`db::write_tx`), so concurrent writers queue behind the 30 s busy timeout
+  instead of failing.

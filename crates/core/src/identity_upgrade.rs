@@ -106,7 +106,7 @@ pub fn embed_pending(
             .collect();
         let results = embed_all(model, &crops, workers, stop);
 
-        let tx = conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(conn)?;
         let repo_tx = FaceRepo::new(&tx);
         let now = now_iso8601();
         for (id, result) in ids.iter().zip(results) {
@@ -192,7 +192,7 @@ pub struct RegroupReport {
 pub fn regroup(conn: &Connection, key: &MasterKey) -> Result<RegroupReport> {
     let mut report = RegroupReport::default();
     {
-        let tx = conn.unchecked_transaction()?;
+        let tx = crate::db::write_tx(conn)?;
         tx.execute(
             "UPDATE faces SET cluster_id = NULL
               WHERE cluster_id IN (SELECT id FROM face_clusters WHERE status = 'unnamed')",

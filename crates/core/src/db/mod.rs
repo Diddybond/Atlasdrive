@@ -41,6 +41,18 @@ pub fn open_in_memory(kind: SchemaKind) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Begin a write transaction that claims the write lock at once (D-108).
+///
+/// A plain (deferred) transaction starts as a reader and asks for the write
+/// lock at its first write. If another connection has written in between —
+/// the face upgrade, the places pass and a scan all write — SQLite cannot
+/// grant it without losing the reader's view, and fails at once with
+/// "database is locked" instead of waiting: the busy timeout does not apply.
+/// Taking the lock at `BEGIN` makes writers queue, as the timeout intends.
+pub fn write_tx(conn: &Connection) -> Result<rusqlite::Transaction<'_>> {
+    Ok(rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?)
+}
+
 /// Apply the standard pragmas: WAL, foreign keys, busy timeout, sane sync.
 pub fn configure(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
