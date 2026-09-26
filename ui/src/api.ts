@@ -467,6 +467,8 @@ export const api = {
     call<GalleryFace[]>("face_gallery", { limit, driveNumber }),
   unnamedFaceCounts: () => call<UnnamedOnDrive[]>("unnamed_face_counts"),
   singleCopies: () => call<DriveCopies[]>("single_copies"),
+  lightroomAvailable: () => call<boolean>("lightroom_available"),
+  openOriginal: (fileId: string, app?: "lightroom") => call<string>("open_original", { fileId, app }),
   healthDue: () => call<[number, number][]>("health_due"),
   spotCheckDrive: (driveNumber: number) => call<string>("spot_check_drive", { driveNumber }),
   groupFaces: () => call<GroupingReport>("group_faces"),
@@ -743,6 +745,12 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         (only ? mockGallery.filter((f) => f.drive_number === only) : mockGallery) as unknown as T,
       );
     }
+    case "lightroom_available":
+      return Promise.resolve(true as unknown as T);
+    case "open_original":
+      return Promise.resolve(
+        (args?.app === "lightroom" ? "Opened it in Lightroom Classic." : "Opened it.") as unknown as T,
+      );
     case "health_due":
       return Promise.resolve([[14, 4213]] as unknown as T);
     case "spot_check_drive":

@@ -42,9 +42,16 @@ export function SearchScreen({
   const [nameNote, setNameNote] = useState<string | null>(null);
   const [findingNames, setFindingNames] = useState(false);
 
+  const [lightroom, setLightroom] = useState(false);
   useEffect(() => {
     void api.listDrives().then(setAllDrives);
+    void api.lightroomAvailable().then(setLightroom, () => setLightroom(false));
   }, []);
+
+  async function openWith(fileId: string, app?: "lightroom") {
+    const message = await api.openOriginal(fileId, app).catch((e) => String(e));
+    setRevealed((prev) => ({ ...prev, [fileId]: message }));
+  }
 
   // The subject list follows the selected drive, so every chip on screen leads
   // to photographs on the disk being browsed rather than to an empty result.
@@ -436,6 +443,24 @@ export function SearchScreen({
                 )}
                 <details className="more">
                   <summary>More</summary>
+                  {r.online && (
+                    <button
+                      className="ghost"
+                      onClick={() => void openWith(r.file_id)}
+                      aria-label={`Open ${r.filename}`}
+                    >
+                      Open
+                    </button>
+                  )}
+                  {r.online && lightroom && (
+                    <button
+                      className="ghost"
+                      onClick={() => void openWith(r.file_id, "lightroom")}
+                      aria-label={`Open ${r.filename} in Lightroom Classic`}
+                    >
+                      Open in Lightroom Classic
+                    </button>
+                  )}
                   <button
                     className="ghost"
                     onClick={() => void findSimilar(r.file_id, r.filename)}

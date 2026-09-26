@@ -1251,3 +1251,23 @@ describe("From a name to the photographs", () => {
     });
   });
 });
+
+describe("Opening an original", () => {
+  /// Where the photograph is edited: straight into Lightroom Classic when it
+  /// is installed, and only for a drive that is plugged in.
+  it("opens a plugged-in original in Lightroom Classic", async () => {
+    render(<App />);
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "beach" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open beach_1998.jpg in Lightroom Classic" }));
+    expect(await screen.findByText("Opened it in Lightroom Classic.")).toBeDefined();
+  });
+
+  it("does not offer to open an original whose drive is unplugged", async () => {
+    render(<App />);
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "portrait" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    await screen.findByText("portrait.jpg");
+    expect(screen.queryByRole("button", { name: /Open portrait.jpg/ })).toBeNull();
+  });
+});

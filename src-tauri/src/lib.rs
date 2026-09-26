@@ -1347,6 +1347,67 @@ async fn reveal_in_finder(state: State<'_, AppState>, file_id: String) -> Result
     .map_err(|e| e.to_string())?
 }
 
+/// Where Lightroom Classic lives when it is installed.
+const LIGHTROOM_CLASSIC: &str = "/Applications/Adobe Lightroom Classic/Adobe Lightroom Classic.app";
+
+/// Whether Lightroom Classic is installed, so the option is only offered when
+/// it can work.
+#[tauri::command]
+fn lightroom_available() -> bool {
+    std::path::Path::new(LIGHTROOM_CLASSIC).exists()
+}
+
+/// Open an original in its default app, or in Lightroom Classic.
+///
+/// Read-only from AtlasDrive's side: the file is handed to the other app by
+/// path and nothing here writes to it. Lightroom decides what to do with it —
+/// normally its own import dialog — and AtlasDrive never touches Lightroom's
+/// catalogue.
+#[tauri::command]
+async fn open_original(
+    state: State<'_, AppState>,
+    file_id: String,
+    app: Option<String>,
+) -> Result<String, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let archive = open_archive(&paths)?;
+        let drive_number: Option<i64> = archive
+            .query_row(
+                "SELECT d.drive_number FROM files f JOIN drives d ON d.id=f.drive_id WHERE f.id=?1",
+                [&file_id],
+                |r| r.get(0),
+            )
+            .ok();
+        let Some(path) =
+            family_archive_core::search::resolve_original(&archive, &file_id).map_err(map_err)?
+        else {
+            return Ok(match drive_number {
+                Some(n) => format!("Plug in Drive {n} to open the original."),
+                None => "That photograph is no longer in the catalogue.".to_string(),
+            });
+        };
+        let lightroom = app.as_deref() == Some("lightroom");
+        #[cfg(target_os = "macos")]
+        {
+            let mut cmd = std::process::Command::new("open");
+            if lightroom {
+                cmd.arg("-a").arg(LIGHTROOM_CLASSIC);
+            }
+            cmd.arg(&path)
+                .spawn()
+                .map_err(|e| format!("could not open the photograph: {e}"))?;
+        }
+        Ok(if lightroom {
+            format!("Opened {} in Lightroom Classic.", path.display())
+        } else {
+            format!("Opened {}.", path.display())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Write a privacy-redacted diagnostics bundle and return its path.
 ///
 /// There is no unredacted variant: the export is built from counts and check
@@ -2051,6 +2112,8 @@ pub fn run() {
             get_progress,
             run_verifier,
             unnamed_face_counts,
+            lightroom_available,
+            open_original,
             health_due,
             spot_check_drive,
             suggest_event_name,
