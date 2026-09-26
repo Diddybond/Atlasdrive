@@ -12,8 +12,20 @@ export function FaceUpgradeCard({ onFinished }: { onFinished: () => void }) {
   // card that silently vanished left the owner with no way to carry on.
   const [problem, setProblem] = useState<string | null>(null);
   const wasRunning = useRef(false);
+  // One question at a time: never queue a new one behind a slow answer.
+  const asking = useRef(false);
 
   async function refresh() {
+    if (asking.current) return;
+    asking.current = true;
+    try {
+      await ask();
+    } finally {
+      asking.current = false;
+    }
+  }
+
+  async function ask() {
     let next: FaceIdentityState | null = null;
     try {
       next = await api.faceIdentityState();

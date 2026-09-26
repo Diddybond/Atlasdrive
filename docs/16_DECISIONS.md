@@ -2891,3 +2891,8 @@ accident. Typing words afterwards searches within the shoot as before.
   temporary table, updates by rowid, and commits every 200 photographs. The
   People upgrade card shows an error when its state cannot be read, instead
   of disappearing.
+- Follow-up (live): the progress card went missing after the owner left
+  People and came back. The status query searched every face (slow on 228,000),
+  the card asked every 2 s, and the asks queued behind each other. Status is
+  now three counts (`faces with crops − upgraded − unreadable`), and the card
+  never sends a new ask while one is unanswered.

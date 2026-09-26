@@ -50,14 +50,31 @@ impl IdentityStatus {
 }
 
 pub fn status(conn: &Connection) -> Result<IdentityStatus> {
+    // Counted, not searched: the People screen asks every few seconds, and the
+    // exact "which faces are pending" query reads every face on a catalogue of
+    // 228,000 — slow enough that repeated asks queued up behind each other and
+    // the progress card vanished. Every upgraded face has a crop, and a face
+    // is either upgraded, unreadable, or pending, so arithmetic suffices.
     let id = identity::MODEL_ID;
-    let count = |sql: &str| -> Result<usize> {
-        Ok(conn.query_row(sql, [id], |r| r.get::<_, i64>(0))? as usize)
+    let count = |sql: &str, with_id: bool| -> Result<usize> {
+        let n: i64 = if with_id {
+            conn.query_row(sql, [id], |r| r.get(0))?
+        } else {
+            conn.query_row(sql, [], |r| r.get(0))?
+        };
+        Ok(n.max(0) as usize)
     };
+    let with_crops = count(
+        "SELECT count(*) FROM face_thumbnails t JOIN faces f ON f.id = t.face_id
+          WHERE f.is_false_detection = 0",
+        false,
+    )?;
+    let upgraded = count("SELECT count(*) FROM face_embeddings WHERE model_id = ?1", true)?;
+    let unreadable = count("SELECT count(*) FROM face_identity_skips WHERE model_id = ?1", true)?;
     Ok(IdentityStatus {
-        upgraded: count("SELECT count(*) FROM face_embeddings WHERE model_id = ?1")?,
-        pending: count(&format!("SELECT count(*) {PENDING}"))?,
-        unreadable: count("SELECT count(*) FROM face_identity_skips WHERE model_id = ?1")?,
+        upgraded,
+        pending: with_crops.saturating_sub(upgraded + unreadable),
+        unreadable,
     })
 }
 
