@@ -1768,3 +1768,50 @@ fn a_finished_scan_has_already_grouped_its_faces() {
         .unwrap();
     assert!(grouped > 0, "the fixture's look-alike faces were grouped by the scan");
 }
+
+/// D-090: a second scan of a drive is refused while the first is really
+/// alive — and only then.
+#[test]
+fn a_second_scan_of_the_same_drive_is_refused_only_while_the_first_is_alive() {
+    let (h, opts) = setup(no_disk_floor());
+    let p = pipeline(&h);
+    let drive_id: String = h
+        .archive
+        .query_row("SELECT id FROM drives WHERE drive_number = 14", [], |r| r.get(0))
+        .unwrap();
+    let other_run = |pid: u32, minutes_ago: i64| {
+        let beat = (chrono::Utc::now() - chrono::Duration::minutes(minutes_ago))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        h.archive.execute("DELETE FROM scan_runs WHERE id = 'other'", []).unwrap();
+        h.archive
+            .execute(
+                "INSERT INTO scan_runs (id, drive_id, drive_number, scan_root, mode, started_at, outcome, heartbeat_at, pid)
+                 VALUES ('other', ?1, 14, '/Volumes/X', 'initial', ?2, 'running', ?2, ?3)",
+                rusqlite::params![drive_id, beat, i64::from(pid)],
+            )
+            .unwrap();
+    };
+
+    // Another process, alive and beating: refused, with a reason.
+    let mut alive = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+    other_run(alive.id(), 1);
+    let err = p.run(&opts).expect_err("a live scan of the same drive must block a second");
+    assert!(format!("{err}").contains("already being scanned"), "{err}");
+    assert!(!err.is_hard_halt(), "being busy is not a safety event");
+
+    // The same process, silent for longer than a stall: not blocking.
+    other_run(alive.id(), crate::progress::STALL_AFTER_MINUTES + 1);
+    let summary = p.run(&opts).expect("a stalled scan must not block a new one");
+    assert_eq!(summary.files_done, 3);
+    let _ = alive.kill();
+    let _ = alive.wait();
+
+    // A process that has gone — killed a minute ago, heartbeat still fresh:
+    // not blocking either. This is the case that must never lock the owner out.
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    let gone_pid = gone.id();
+    gone.wait().unwrap();
+    other_run(gone_pid, 1);
+    p.run(&opts).expect("a dead scan must not block a new one");
+}

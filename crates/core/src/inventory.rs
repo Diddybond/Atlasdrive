@@ -666,6 +666,11 @@ pub struct RunningScan {
     /// Nothing heard for [`crate::progress::STALL_AFTER_MINUTES`]. Either the
     /// process died without saying so, or it is stuck.
     pub stale: bool,
+    /// The process running it, when recorded (runs from before D-090 are not).
+    pub pid: Option<i64>,
+    /// Still beating, and its process — when known — still exists on this Mac.
+    /// The one test for "is someone else scanning this drive right now?".
+    pub alive: bool,
 }
 
 /// Every scan the catalogue believes is still running, most recent first.
@@ -681,7 +686,7 @@ pub struct RunningScan {
 /// whichever wrote last.
 pub fn running_scans(conn: &Connection) -> Result<Vec<RunningScan>> {
     let mut stmt = conn.prepare(
-        "SELECT id, drive_number, started_at, heartbeat_at
+        "SELECT id, drive_number, started_at, heartbeat_at, pid
            FROM scan_runs
           WHERE outcome = 'running' AND mode <> 'dry-run'
           ORDER BY started_at DESC",
@@ -693,17 +698,42 @@ pub fn running_scans(conn: &Connection) -> Result<Vec<RunningScan>> {
         // which is a weaker but honest lower bound on its last sign of life.
         let silent_for_minutes =
             crate::util::age_minutes(heartbeat_at.as_deref().unwrap_or(&started_at));
+        let stale = silent_for_minutes.is_some_and(|m| m >= crate::progress::STALL_AFTER_MINUTES);
+        let pid: Option<i64> = r.get(4)?;
         Ok(RunningScan {
             run_id: r.get(0)?,
             drive_number: r.get(1)?,
             started_at,
             heartbeat_at,
             silent_for_minutes,
-            stale: silent_for_minutes
-                .is_some_and(|m| m >= crate::progress::STALL_AFTER_MINUTES),
+            stale,
+            pid,
+            alive: false, // decided below, outside the row mapping
         })
     })?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+    let mut runs: Vec<RunningScan> = rows.collect::<std::result::Result<_, _>>()?;
+    for run in &mut runs {
+        run.alive = !run.stale && run.pid.is_none_or(process_exists);
+    }
+    Ok(runs)
+}
+
+/// Whether a process with this id exists on this machine.
+///
+/// Asked of `ps` rather than through a system call, so no unsafe code is
+/// needed, under the same budget as every other external command (D-081). If
+/// `ps` cannot answer, the process is assumed alive: refusing a scan for a few
+/// minutes is recoverable, two scans of one drive racing each other is not.
+pub fn process_exists(pid: i64) -> bool {
+    if pid == i64::from(std::process::id()) {
+        return true;
+    }
+    let mut cmd = std::process::Command::new("ps");
+    cmd.args(["-p", &pid.to_string()]);
+    match crate::proc::output_within(&mut cmd, std::time::Duration::from_secs(5)) {
+        Ok(out) => out.success(),
+        Err(_) => true,
+    }
 }
 
 /// How long indexing a folder will take, so the time can be planned for.

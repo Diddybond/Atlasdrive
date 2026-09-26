@@ -117,7 +117,19 @@ const ARCHIVE_MIGRATIONS: &[Migration] = &[
         name: "camera_exposures_are_not_scans",
         sql: ARCHIVE_V7,
     },
+    Migration {
+        version: 8,
+        name: "scan_run_process",
+        sql: ARCHIVE_V8,
+    },
 ];
+
+/// Which process is running a scan, so a second scan of the same drive can be
+/// refused only while the first is really alive (D-090). A heartbeat alone
+/// cannot tell a live scan from one killed a minute ago.
+const ARCHIVE_V8: &str = r#"
+ALTER TABLE scan_runs ADD COLUMN pid INTEGER;
+"#;
 
 /// Take the scanned-print verdict back from photographs a camera took.
 ///

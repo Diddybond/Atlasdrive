@@ -602,13 +602,43 @@ impl<'a> Pipeline<'a> {
             .get_by_number(opts.drive_number)?
             .ok_or_else(|| Error::InvalidArgs(format!("drive {} not registered", opts.drive_number)))?;
         let root_id = drive_repo.ensure_root(&drive.id, "")?;
+
+        // One scan of a drive at a time. Two would claim each other's
+        // photographs — a lease lasts five minutes and one slow photograph can
+        // hold a batch far longer — and double every heartbeat and failure.
+        // Only a scan that is really alive blocks: its heartbeat is recent and
+        // its process still exists, so a scan killed a minute ago never locks
+        // the owner out of their own drive (D-090).
+        if !dry_run {
+            if let Some(other) = crate::inventory::running_scans(self.archive)?
+                .into_iter()
+                .find(|r| r.drive_number == opts.drive_number && r.alive && r.pid != Some(i64::from(std::process::id())))
+            {
+                return Err(Error::InvalidArgs(format!(
+                    "Drive {} is already being scanned (last activity {} minute(s) ago). \
+                     Wait for that scan to finish, or stop it first.",
+                    opts.drive_number,
+                    other.silent_for_minutes.unwrap_or(0)
+                )));
+            }
+        }
         drive_repo.set_status(&drive.id, "online")?;
 
         // Resume an existing run if requested and present. A run left in either
         // "running" or "interrupted" state is continued under its own id.
         let run_id = if opts.resume {
             match Progress::load(self.paths)? {
-                Some(p) if p.status == "running" || p.status == "interrupted" => p.run_id,
+                Some(p) if p.status == "running" || p.status == "interrupted" => {
+                    // The run is this process's now: say so, or anything
+                    // asking whether the drive is being scanned would read the
+                    // old process — or "interrupted" — and be wrong.
+                    let _ = self.archive.execute(
+                        "UPDATE scan_runs SET outcome = 'running', pid = ?2, heartbeat_at = ?3
+                          WHERE id = ?1",
+                        params![p.run_id, i64::from(std::process::id()), now_iso8601()],
+                    );
+                    p.run_id
+                }
                 _ => self.start_run(&drive.id, opts, dry_run)?,
             }
         } else {
@@ -1705,9 +1735,12 @@ impl<'a> Pipeline<'a> {
         let run_id = new_uuid();
         let mode = if dry_run { "dry-run" } else { "initial" };
         self.archive.execute(
-            "INSERT INTO scan_runs (id, drive_id, drive_number, scan_root, mode, started_at, outcome)
-             VALUES (?1,?2,?3,?4,?5,?6,'running')",
-            params![run_id, drive_id, opts.drive_number, opts.path.to_string_lossy(), mode, now_iso8601()],
+            "INSERT INTO scan_runs (id, drive_id, drive_number, scan_root, mode, started_at, outcome, pid)
+             VALUES (?1,?2,?3,?4,?5,?6,'running',?7)",
+            params![
+                run_id, drive_id, opts.drive_number, opts.path.to_string_lossy(), mode, now_iso8601(),
+                i64::from(std::process::id())
+            ],
         )?;
         Ok(run_id)
     }
