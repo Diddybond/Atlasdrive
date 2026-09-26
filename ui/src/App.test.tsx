@@ -950,13 +950,23 @@ describe("Managing scans from the Drives screen", () => {
   it("says which drive is busy instead of offering a second scan", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    // Said in words, not as a greyed-out button that looks broken.
     await waitFor(() => {
-      expect(screen.getAllByRole("button", { name: /Drive 14 is scanning/ }).length).toBeGreaterThan(
-        0,
-      );
+      expect(
+        screen.getAllByText(/Drive 14 is being scanned; this one can be scanned after it/).length,
+      ).toBeGreaterThan(0);
     });
-    const busy = screen.getAllByRole("button", { name: /Drive 14 is scanning/ })[0];
-    expect((busy as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: /Check Drive 7 for new photographs/ })).toBeNull();
+  });
+
+  /// What a drive failure would lose is on the card, in plain words.
+  it("says how many photographs exist only on each drive", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    expect(
+      await screen.findByText(/3,200 photographs exist only on this drive/),
+    ).toBeDefined();
+    expect(screen.getByText(/Every photograph here also exists on another drive/)).toBeDefined();
   });
 });
 
@@ -1139,6 +1149,21 @@ describe("Needs you", () => {
     render(<App />);
     const panel = await screen.findByRole("region", { name: "Needs you" });
     expect(panel.textContent).not.toMatch(/to name|unnamed|nobody has named|faces? waiting|events? waiting/i);
+  });
+
+  /// A drive left half-scanned is named with where it is kept, and a drive
+  /// that is plugged in is offered the one click that deals with it.
+  it("offers the right one-click job for each drive", async () => {
+    setMockScanning(false);
+    render(<App />);
+    const panel = await screen.findByRole("region", { name: "Needs you" });
+    await waitFor(() => {
+      expect(panel.textContent).toMatch(/Drive 7 is not fully scanned — 4,000 photographs still to read\. It is kept in Drawer 2/);
+    });
+    expect(panel.textContent).toMatch(/Drive 14 is plugged in\. Check it for photographs added/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Check for new photographs" }));
+    expect(await screen.findByText(/Looking for new photographs on Drive 14/)).toBeDefined();
   });
 
   /// Once a search is showing results, the panel steps aside.

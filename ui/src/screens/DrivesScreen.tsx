@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, FolderSummary, Drive, DriveContents, DriveCoverage, subjectLabel, Volume } from "../api";
+import { api, FolderSummary, Drive, DriveContents, DriveCopies, DriveCoverage, subjectLabel, Volume } from "../api";
 
 export function DrivesScreen() {
   const [coverage, setCoverage] = useState<Record<number, DriveCoverage>>({});
@@ -21,6 +21,8 @@ export function DrivesScreen() {
   const [editing, setEditing] = useState<string | null>(null);
   const [contents, setContents] = useState<Record<number, DriveContents>>({});
   const [rescanning, setRescanning] = useState<number | null>(null);
+  // What a failure of each drive would lose: photographs with no other copy.
+  const [copies, setCopies] = useState<Record<number, DriveCopies>>({});
 
   /// Scan a drive, or check an already-scanned one for new photographs.
   ///
@@ -150,6 +152,10 @@ export function DrivesScreen() {
     void api.driveCoverage().then((rows) => {
       setCoverage(Object.fromEntries(rows.map((c) => [c.drive_number, c])));
     });
+    void api.singleCopies().then(
+      (rows) => setCopies(Object.fromEntries(rows.map((c) => [c.drive_number, c]))),
+      () => undefined,
+    );
   }, []);
 
   async function register(e: React.FormEvent) {
@@ -297,10 +303,17 @@ export function DrivesScreen() {
               <p className="drive-name">{d.friendly_name || `Drive ${d.drive_number}`}</p>
               <p className="drive-meta">
                 <span className={d.status === "online" ? "status online" : "status offline"}>
-                  {d.status === "online" ? "Connected" : "Disconnected"}
+                  {d.status === "online" ? "Plugged in" : "Not plugged in"}
                 </span>
                 {d.image_count != null && <> · {d.image_count.toLocaleString()} photographs</>}
-                {d.physical_location && <> · {d.physical_location}</>}
+                {contents[d.drive_number]?.earliest_date && contents[d.drive_number]?.latest_date && (
+                  <>
+                    {" · "}
+                    {contents[d.drive_number].earliest_date!.slice(0, 4)}–
+                    {contents[d.drive_number].latest_date!.slice(0, 4)}
+                  </>
+                )}
+                {d.physical_location && <> · Kept in {d.physical_location}</>}
               </p>
               {coverage[d.drive_number] && (
                 <p
@@ -313,34 +326,13 @@ export function DrivesScreen() {
                   {coverage[d.drive_number].summary}
                 </p>
               )}
-              {d.categories && d.categories.length > 0 && (
-                <p className="drive-meta subtle">What's on it: {d.categories.join(", ")}</p>
-              )}
-              {contents[d.drive_number] && (
-                <p className="drive-meta subtle">
-                  {contents[d.drive_number].earliest_date && contents[d.drive_number].latest_date && (
-                    <>
-                      {contents[d.drive_number].earliest_date!.slice(0, 4)}–
-                      {contents[d.drive_number].latest_date!.slice(0, 4)}
-                      {" · "}
-                    </>
-                  )}
-                  {contents[d.drive_number].top_tags.length > 0 ? (
-                    <>
-                      Pictures of{" "}
-                      {contents[d.drive_number].top_tags
-                        .slice(0, 5)
-                        .map((t) => `${subjectLabel(t.tag)} (${t.count})`)
-                        .join(", ")}
-                    </>
-                  ) : (
-                    <>Nothing recognised yet — scan this drive to find out what is on it</>
-                  )}
+              {copies[d.drive_number] && copies[d.drive_number].photographs > 0 && (
+                <p className={copies[d.drive_number].only_here > 0 ? "copies at-risk" : "copies safe"}>
+                  {copies[d.drive_number].only_here > 0
+                    ? `${copies[d.drive_number].only_here.toLocaleString()} photographs exist only on this drive — if it failed, they would be gone.`
+                    : "✓ Every photograph here also exists on another drive."}
                 </p>
               )}
-              <p className="drive-meta subtle">
-                Last scanned: {d.last_scan_at ?? "never"}
-              </p>
 
               {editing === d.id ? (
                 <form className="form drive-edit" onSubmit={(e) => void saveDetails(e, d)}>
@@ -366,7 +358,7 @@ export function DrivesScreen() {
                   </button>
                 </form>
               ) : (
-                <>
+                <div className="drive-actions">
                   {scanningDrive === d.drive_number ? (
                     <button
                       className="secondary"
@@ -376,48 +368,84 @@ export function DrivesScreen() {
                     >
                       {stopPending ? "Stopping…" : "Stop scanning this drive"}
                     </button>
+                  ) : scanningDrive !== null ? (
+                    // One drive is read at a time. Saying so beats a button
+                    // that is greyed out for no visible reason.
+                    <p className="drive-meta subtle">
+                      Drive {scanningDrive} is being scanned; this one can be scanned after it.
+                    </p>
                   ) : (
-                  <button
-                    onClick={() => void rescan(d)}
-                    disabled={rescanning === d.drive_number || scanningDrive !== null}
-                    aria-label={
-                      scanningDrive !== null
-                        ? `Drive ${scanningDrive} is scanning — stop it before starting another`
-                        : coverage[d.drive_number] && coverage[d.drive_number].discovered === 0
+                    <button
+                      onClick={() => void rescan(d)}
+                      disabled={rescanning === d.drive_number}
+                      aria-label={
+                        coverage[d.drive_number] && coverage[d.drive_number].discovered === 0
                           ? `Scan Drive ${d.drive_number}`
                           : `Check Drive ${d.drive_number} for new photographs`
-                    }
-                  >
-                    {rescanning === d.drive_number
-                      ? "Starting…"
-                      : scanningDrive !== null
-                        ? `Drive ${scanningDrive} is scanning`
+                      }
+                    >
+                      {rescanning === d.drive_number
+                        ? "Starting…"
                         : coverage[d.drive_number] && coverage[d.drive_number].discovered === 0
                           ? "Scan this drive"
                           : "Check for new photographs"}
-                  </button>
+                    </button>
                   )}
-                  <button
-                    className="ghost"
-                    onClick={() => setEditing(d.id)}
-                    aria-label={`Edit location and categories for Drive ${d.drive_number}`}
-                  >
-                    Edit location &amp; categories
-                  </button>
-                  <button
-                    className="ghost"
-                    onClick={() =>
-                      folderView[d.drive_number]
-                        ? setFolderView((v) => ({ ...v, [d.drive_number]: null }))
-                        : void api
-                            .folderSummaries(d.drive_number)
-                            .then((f) => setFolderView((v) => ({ ...v, [d.drive_number]: f })))
-                    }
-                    aria-label={`What is in each folder on Drive ${d.drive_number}`}
-                  >
-                    {folderView[d.drive_number] ? "Hide folders" : "What's in each folder"}
-                  </button>
-                </>
+                  <details className="more">
+                    <summary>More</summary>
+                    {d.categories && d.categories.length > 0 && (
+                      <p className="drive-meta subtle">What's on it: {d.categories.join(", ")}</p>
+                    )}
+                    {contents[d.drive_number] && (
+                      <p className="drive-meta subtle">
+                        {contents[d.drive_number].top_tags.length > 0 ? (
+                          <>
+                            Pictures of{" "}
+                            {contents[d.drive_number].top_tags
+                              .slice(0, 5)
+                              .map((t) => `${subjectLabel(t.tag)} (${t.count})`)
+                              .join(", ")}
+                          </>
+                        ) : (
+                          <>Nothing recognised yet — scan this drive to find out what is on it</>
+                        )}
+                      </p>
+                    )}
+                    <p className="drive-meta subtle">Last scanned: {d.last_scan_at ?? "never"}</p>
+                    {copies[d.drive_number] && copies[d.drive_number].folders.length > 0 && (
+                      <div className="drive-meta subtle">
+                        Folders with no other copy:
+                        <ul className="plain-list">
+                          {copies[d.drive_number].folders.map((f) => (
+                            <li key={f.folder}>
+                              {f.folder || "(top level)"} — {f.photographs.toLocaleString()}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    <button
+                      className="ghost"
+                      onClick={() => setEditing(d.id)}
+                      aria-label={`Edit location and categories for Drive ${d.drive_number}`}
+                    >
+                      Edit location &amp; categories
+                    </button>
+                    <button
+                      className="ghost"
+                      onClick={() =>
+                        folderView[d.drive_number]
+                          ? setFolderView((v) => ({ ...v, [d.drive_number]: null }))
+                          : void api
+                              .folderSummaries(d.drive_number)
+                              .then((f) => setFolderView((v) => ({ ...v, [d.drive_number]: f })))
+                      }
+                      aria-label={`What is in each folder on Drive ${d.drive_number}`}
+                    >
+                      {folderView[d.drive_number] ? "Hide folders" : "What's in each folder"}
+                    </button>
+                  </details>
+                </div>
               )}
               {folderView[d.drive_number] && (
                 <ul className="folder-stories" aria-label={`Folders on Drive ${d.drive_number}`}>

@@ -231,6 +231,16 @@ export interface ClusterSummary {
   person_id?: string | null;
 }
 
+/// Photographs that exist on only one drive; see `copies.rs`.
+export interface DriveCopies {
+  drive_number: number;
+  drive_name: string | null;
+  photographs: number;
+  only_here: number;
+  only_here_bytes: number;
+  folders: { folder: string; photographs: number }[];
+}
+
 /// Faces nobody has named on one drive, counted in the catalogue.
 export interface UnnamedOnDrive {
   drive_number: number;
@@ -453,6 +463,7 @@ export const api = {
   faceGallery: (limit?: number, driveNumber?: number) =>
     call<GalleryFace[]>("face_gallery", { limit, driveNumber }),
   unnamedFaceCounts: () => call<UnnamedOnDrive[]>("unnamed_face_counts"),
+  singleCopies: () => call<DriveCopies[]>("single_copies"),
   groupFaces: () => call<GroupingReport>("group_faces"),
   faceThumbnail: (faceId: string) => call<string | null>("face_thumbnail", { faceId }),
   tagFace: (faceId: string, name: string) =>
@@ -727,6 +738,12 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         (only ? mockGallery.filter((f) => f.drive_number === only) : mockGallery) as unknown as T,
       );
     }
+    case "single_copies":
+      return Promise.resolve([
+        { drive_number: 7, drive_name: "Holidays 2004-2011", photographs: 8891, only_here: 3200, only_here_bytes: 41e9,
+          folders: [{ folder: "2009/Crete", photographs: 1400 }, { folder: "2011/Lakes", photographs: 900 }] },
+        { drive_number: 14, drive_name: "AtlasDrive A", photographs: 4213, only_here: 0, only_here_bytes: 0, folders: [] },
+      ] as unknown as T);
     case "unnamed_face_counts":
       // Deliberately larger than the gallery: the counts are the whole
       // catalogue, the gallery is its first two hundred tiles.

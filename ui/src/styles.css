@@ -775,3 +775,10 @@ details.more[open] { display: flex; flex-direction: column; align-items: flex-st
 .needs-you ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 .needs-you li { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .needs-you li button { flex: none; }
+
+/* ---- Drive cards --------------------------------------------------------- */
+.copies { font-size: 0.9rem; margin: 2px 0 6px; }
+.copies.at-risk { color: var(--atlas-amber); font-weight: 600; }
+.copies.safe { color: var(--ink-soft); }
+.drive-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 8px; }
+.plain-list { margin: 4px 0 6px; padding-left: 18px; }
