@@ -800,3 +800,24 @@ details.advanced > summary h2 { display: inline; }
 details.advanced > summary::after { content: " ▸"; color: var(--ink-soft); }
 details.advanced[open] > summary::after { content: " ▾"; }
 details.advanced h3 { margin: 20px 0 6px; }
+
+/* Photo viewer: one photograph, large, with every face boxed for naming. */
+.thumb-open { border: 0; padding: 0; width: 100%; cursor: zoom-in; border-radius: 0; }
+.thumb-open:focus-visible { outline: 3px solid var(--focus); outline-offset: -3px; }
+.viewer-backdrop { position: fixed; inset: 0; background: rgba(4, 7, 12, 0.82); display: grid; place-items: center; z-index: 50; padding: 24px; }
+.viewer { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); width: min(1100px, 100%); max-height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.viewer-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.viewer-title { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-stage { background: #05080d; display: grid; place-items: center; padding: 12px; min-height: 0; flex: 1; overflow: auto; }
+.viewer-frame { position: relative; display: inline-block; line-height: 0; }
+.viewer-frame img { max-width: 100%; max-height: 68vh; display: block; }
+.viewer-empty { padding: 80px; color: var(--ink-soft); line-height: 1.4; }
+.face-box { position: absolute; padding: 0; border: 2px solid rgba(255, 255, 255, 0.85); background: transparent; border-radius: 6px; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5); cursor: pointer; min-width: 14px; min-height: 14px; }
+.face-box:hover, .face-box.selected { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(61, 169, 252, 0.35); }
+.face-box.named { border-color: var(--ok); }
+.face-label { position: absolute; left: 50%; top: 100%; transform: translate(-50%, 4px); white-space: nowrap; font-size: 12px; line-height: 1.3; font-weight: 600; background: rgba(5, 8, 13, 0.85); color: var(--ink); padding: 2px 7px; border-radius: 6px; pointer-events: none; }
+.face-box.named .face-label { color: var(--ok); }
+.viewer-panel { padding: 14px 16px; border-top: 1px solid var(--line); }
+.viewer-form label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
+.viewer-form input { max-width: 420px; }
+.viewer-actions { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }

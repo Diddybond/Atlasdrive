@@ -474,3 +474,4 @@ Find (home and results), Drives, People, Events, Settings.
 - D-098: core 390 passed (1 ignored) incl. keystore refusal tests; CLI 2; clippy clean (workspace + src-tauri).
 - D-099: src-tauri clippy clean; face pictures now served over one shared connection.
 - D-100: core 391 passed; UI 100 passed; clippy clean.
+- D-101: core tests incl. naming_one_face_leaves_its_group_alone; UI 101 passed (photo viewer test); clippy clean.

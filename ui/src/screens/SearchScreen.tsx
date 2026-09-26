@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, Drive, DriveMatch, SearchResult, subjectLabel, TagCount } from "../api";
 import type { SearchContext } from "../App";
 import { NeedsYou, Place } from "./NeedsYou";
+import { PhotoViewer } from "./PhotoViewer";
 
 export function SearchScreen({
   context,
@@ -29,6 +30,8 @@ export function SearchScreen({
   const [searched, setSearched] = useState(false);
   const [revealed, setRevealed] = useState<Record<string, string>>({});
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
+  // The photograph open in the viewer, where its faces can be named.
+  const [viewing, setViewing] = useState<SearchResult | null>(null);
   const [tags, setTags] = useState<TagCount[]>([]);
   const [allSubjects, setAllSubjects] = useState(false);
   // Bumped on every search, so thumbnails from an abandoned one are dropped.
@@ -403,7 +406,12 @@ export function SearchScreen({
           const where = driveName(r.drive_number);
           return (
             <li key={r.file_id} className="result-card">
-              <div className="thumb">
+              <button
+                type="button"
+                className="thumb thumb-open"
+                onClick={() => setViewing(r)}
+                aria-label={`View ${r.filename} and name the people in it`}
+              >
                 {thumbs[r.file_id] ? (
                   <img src={thumbs[r.file_id]} alt="" loading="lazy" />
                 ) : (
@@ -411,7 +419,7 @@ export function SearchScreen({
                     🖼
                   </span>
                 )}
-              </div>
+              </button>
               <div className="result-body">
                 <p className="where">
                   <span className="drive-badge big">Drive {r.drive_number}</span>
@@ -447,7 +455,7 @@ export function SearchScreen({
                     <button
                       className="ghost"
                       onClick={() => void openWith(r.file_id)}
-                      aria-label={`Open ${r.filename}`}
+                      aria-label={`View ${r.filename} and name the people in it`}
                     >
                       Open
                     </button>
@@ -507,6 +515,17 @@ export function SearchScreen({
           );
         })}
       </ul>
+      {viewing && (
+        <PhotoViewer
+          fileId={viewing.file_id}
+          filename={viewing.filename}
+          driveNumber={viewing.drive_number}
+          online={viewing.online}
+          dateLabel={viewing.date_label}
+          preview={thumbs[viewing.file_id]}
+          onClose={() => setViewing(null)}
+        />
+      )}
     </section>
   );
 }

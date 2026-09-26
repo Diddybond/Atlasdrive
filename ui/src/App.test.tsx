@@ -273,6 +273,31 @@ describe("AtlasDrive UI", () => {
     });
   });
 
+  it("opens a photograph and names one of the faces in it", async () => {
+    render(<App />);
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "beach" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    fireEvent.click(
+      (await screen.findAllByRole("button", { name: /^View beach_1998\.jpg/ }, { timeout: 3000 }))[0],
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    expect(await screen.findByText(/2 faces in this photograph/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Face 2: not named" }));
+    fireEvent.change(screen.getByPlaceholderText("Type a name"), { target: { value: "Millie" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Tagged as Millie\. 3 more possible photographs/)).toBeDefined();
+    });
+    // Only that face is named; the other stays unnamed.
+    expect(screen.getByRole("button", { name: "Face 2: Millie" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Face 1: not named" })).toBeDefined();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(dialog.isConnected).toBe(false));
+  });
+
   it("offers a drive plugged in after the Drives screen was opened", async () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Drives/ }));

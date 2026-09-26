@@ -351,6 +351,18 @@ export interface FailureReason {
   example: string | null;
 }
 
+/// A face inside one photograph. The box is a fraction of the image, from the
+/// top-left corner.
+export interface PhotoFace {
+  face_id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  person_id?: string | null;
+  person_name?: string | null;
+}
+
 export interface NamedPerson {
   id: string;
   display_name: string;
@@ -505,6 +517,14 @@ export const api = {
       faceId,
       name,
     }),
+  facesInPhoto: (fileId: string) => call<PhotoFace[]>("faces_in_photo", { fileId }),
+  photoView: (fileId: string) => call<string | null>("photo_view", { fileId }),
+  nameFaceInPhoto: (faceId: string, name: string) =>
+    call<{ person: { id: string; display_name: string }; suggested: number }>(
+      "name_face_in_photo",
+      { faceId, name },
+    ),
+  notAFace: (faceId: string) => call<void>("not_a_face", { faceId }),
   photosOfPerson: (personId: string) => call<PersonPhoto[]>("photos_of_person", { personId }),
   findNames: (driveNumber?: number) => call<NameScan>("find_names", { driveNumber }),
   catalogueTags: (limit?: number, driveNumber?: number, useful?: boolean) =>
@@ -577,6 +597,7 @@ const mockClusters: ClusterSummary[] = [
   { cluster_id: "c-d4e5f6", status: "unnamed", face_count: 12 },
 ];
 const mockPeople: NamedPerson[] = [];
+const mockPhotoFaces: Record<string, PhotoFace[]> = {};
 
 let mockSettings: Settings = {
   backup_destination: null,
@@ -815,6 +836,39 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       }
       person.confirmed_faces += face ? face.group_size : 1;
       return Promise.resolve({ person, suggested: 2 } as unknown as T);
+    }
+    case "faces_in_photo": {
+      const id = String(args?.fileId ?? "");
+      mockPhotoFaces[id] ??= [
+        { face_id: `${id}-a`, x: 0.2, y: 0.2, w: 0.15, h: 0.2, person_name: null },
+        { face_id: `${id}-b`, x: 0.6, y: 0.25, w: 0.15, h: 0.2, person_name: null },
+      ];
+      return Promise.resolve(mockPhotoFaces[id] as unknown as T);
+    }
+    case "photo_view": {
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"><rect width="800" height="600" fill="#789"/></svg>`;
+      return Promise.resolve(`data:image/svg+xml;base64,${btoa(svg)}` as unknown as T);
+    }
+    case "name_face_in_photo": {
+      const name = String(args?.name ?? "").trim();
+      if (!name) return Promise.reject(new Error("a person needs a name"));
+      for (const faces of Object.values(mockPhotoFaces)) {
+        const f = faces.find((x) => x.face_id === args?.faceId);
+        if (f) f.person_name = name;
+      }
+      let person = mockPeople.find((p) => p.display_name.toLowerCase() === name.toLowerCase());
+      if (!person) {
+        person = { id: `p-${mockPeople.length + 1}`, display_name: name, confirmed_faces: 0, suggested_faces: 3 };
+        mockPeople.push(person);
+      }
+      person.confirmed_faces += 1;
+      return Promise.resolve({ person, suggested: 3 } as unknown as T);
+    }
+    case "not_a_face": {
+      for (const [k, faces] of Object.entries(mockPhotoFaces)) {
+        mockPhotoFaces[k] = faces.filter((x) => x.face_id !== args?.faceId);
+      }
+      return Promise.resolve(undefined as unknown as T);
     }
     case "catalogue_tags": {
       const all = [

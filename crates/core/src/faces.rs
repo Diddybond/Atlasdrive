@@ -324,6 +324,22 @@ pub struct GalleryFace {
     pub drive_name: Option<String>,
 }
 
+/// A face inside one photograph, where it is and who it is (when known).
+///
+/// The box is in normalised image coordinates, top-left origin, the same
+/// convention the face crops are cut with, so the interface can draw it over
+/// the preview as percentages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhotoFace {
+    pub face_id: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub person_id: Option<String>,
+    pub person_name: Option<String>,
+}
+
 /// A face the app believes is a named person, awaiting a yes or no.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuggestedFace {
@@ -589,6 +605,93 @@ impl<'a> FaceRepo<'a> {
             }
         };
         self.tag_cluster_with_name(&cluster_id, display_name)
+    }
+
+    /// Every face found in one photograph, left to right.
+    pub fn faces_in_file(&self, file_id: &str) -> Result<Vec<PhotoFace>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.id, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, p.id, p.display_name
+               FROM faces f
+               LEFT JOIN face_clusters c ON c.id = f.cluster_id AND c.status = 'confirmed'
+               LEFT JOIN people p        ON p.id = c.person_id
+              WHERE f.file_id = ?1 AND f.is_false_detection = 0
+              ORDER BY f.bbox_x",
+        )?;
+        let out = stmt
+            .query_map([file_id], |r| {
+                Ok(PhotoFace {
+                    face_id: r.get(0)?,
+                    x: r.get(1)?,
+                    y: r.get(2)?,
+                    w: r.get(3)?,
+                    h: r.get(4)?,
+                    person_id: r.get(5)?,
+                    person_name: r.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(out)
+    }
+
+    /// Name exactly this face, and no other.
+    ///
+    /// Naming from inside a photograph is a statement about one face. If its
+    /// group holds other faces, those are not assumed to be the same person —
+    /// the face moves to a group of its own first. The rest are offered
+    /// afterwards as suggestions, to accept or refuse. The People screen is
+    /// where a whole group is named at once.
+    pub fn name_one_face(&self, face_id: &str, display_name: &str) -> Result<Person> {
+        let name = display_name.trim();
+        if name.is_empty() {
+            return Err(Error::InvalidArgs("a person needs a name".into()));
+        }
+        let row: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT f.cluster_id, p.display_name
+                   FROM faces f
+                   LEFT JOIN face_clusters c ON c.id = f.cluster_id AND c.status = 'confirmed'
+                   LEFT JOIN people p        ON p.id = c.person_id
+                  WHERE f.id = ?1",
+                [face_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((cluster, current)) = row else {
+            return Err(Error::InvalidArgs("no such face".into()));
+        };
+        // Already this person: nothing to change.
+        if let (Some(c), Some(cur)) = (&cluster, &current) {
+            if cur.eq_ignore_ascii_case(name) {
+                let person_id: String = self.conn.query_row(
+                    "SELECT person_id FROM face_clusters WHERE id = ?1",
+                    [c],
+                    |r| r.get(0),
+                )?;
+                return self
+                    .get_person(&person_id)?
+                    .ok_or_else(|| Error::Other("person vanished".into()));
+            }
+        }
+        let alone = match &cluster {
+            None => true,
+            Some(c) => {
+                self.conn.query_row(
+                    "SELECT count(*) FROM faces WHERE cluster_id = ?1",
+                    [c],
+                    |r| r.get::<_, i64>(0),
+                )? <= 1
+            }
+        };
+        let target = if alone {
+            match cluster {
+                Some(c) => c,
+                None => self.split_face(face_id)?,
+            }
+        } else {
+            self.split_face(face_id)?
+        };
+        self.tag_cluster_with_name(&target, name)
     }
 
     /// The folders on disk holding a person's photographs.
@@ -1808,6 +1911,45 @@ mod tests {
         assert!(after >= 1);
         let p = repo.get_person(&person.id).unwrap().unwrap();
         assert_eq!(p.display_name, "Grandma");
+    }
+
+    /// Naming a face from inside a photograph names that face only; the rest
+    /// of its group is left alone, and renaming moves it to the new person.
+    #[test]
+    fn naming_one_face_leaves_its_group_alone() {
+        let (conn, _d, key) = setup();
+        add_file(&conn, "f1");
+        add_file(&conn, "f2");
+        let repo = FaceRepo::new(&conn);
+        let a = repo.insert_face("f1", (0.6, 0.1, 0.1, 0.1), 0.9, "m", "1", &[1.0, 0.0], &key).unwrap();
+        let b = repo.insert_face("f1", (0.1, 0.1, 0.1, 0.1), 0.9, "m", "1", &[0.0, 1.0], &key).unwrap();
+        let c = repo.insert_face("f2", (0.1, 0.1, 0.1, 0.1), 0.9, "m", "1", &[1.0, 0.0], &key).unwrap();
+        // a and c share a group.
+        let g = repo.split_face(&a).unwrap();
+        conn.execute("UPDATE faces SET cluster_id=?1 WHERE id=?2", params![g, c]).unwrap();
+
+        let in_photo = repo.faces_in_file("f1").unwrap();
+        assert_eq!(in_photo.len(), 2);
+        assert_eq!(in_photo[0].face_id, b, "left to right");
+        assert!(in_photo.iter().all(|f| f.person_name.is_none()));
+
+        let aimee = repo.name_one_face(&a, "Aimee").unwrap();
+        let named = repo.faces_in_file("f1").unwrap();
+        let fa = named.iter().find(|f| f.face_id == a).unwrap();
+        assert_eq!(fa.person_name.as_deref(), Some("Aimee"));
+        // c, grouped with a, is not assumed to be Aimee.
+        assert!(repo.faces_in_file("f2").unwrap()[0].person_name.is_none());
+
+        // Naming again with the same name changes nothing; a face with no
+        // group gets one.
+        assert_eq!(repo.name_one_face(&a, "aimee").unwrap().id, aimee.id);
+        repo.name_one_face(&b, "Kent").unwrap();
+        // A correction moves the face to the right person.
+        repo.name_one_face(&a, "Daisy").unwrap();
+        let after = repo.faces_in_file("f1").unwrap();
+        let names: Vec<_> = after.iter().map(|f| f.person_name.clone().unwrap()).collect();
+        assert_eq!(names, ["Kent", "Daisy"]);
+        assert!(repo.name_one_face(&a, "  ").is_err());
     }
 
     #[test]

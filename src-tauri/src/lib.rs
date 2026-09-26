@@ -439,6 +439,95 @@ async fn tag_face(state: State<'_, AppState>, face_id: String, name: String) -> 
     .map_err(|e| e.to_string())?
 }
 
+/// The photograph as large as it can be shown, for the viewer.
+///
+/// From the original when its drive is plugged in, decoded exactly as the scan
+/// decoded it so face boxes line up; otherwise the stored preview, which is
+/// smaller but always there.
+#[tauri::command]
+async fn photo_view(state: State<'_, AppState>, file_id: String) -> Result<Option<String>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let reader = state.reader.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
+        let original = with_reader(&reader, &paths, |archive| {
+            family_archive_core::search::resolve_original(archive, &file_id).map_err(map_err)
+        })?;
+        let img = match original.and_then(|abs| {
+            family_archive_core::pipeline::decode::open_rgb(&abs, &paths.cache_dir().join("decode")).ok()
+        }) {
+            Some(rgb) => image::DynamicImage::ImageRgb8(rgb),
+            None => {
+                let rel: Option<String> = with_reader(&reader, &paths, |archive| {
+                    Ok(archive
+                        .query_row("SELECT rel_path FROM thumbnails WHERE file_id = ?1", [&file_id], |r| r.get(0))
+                        .ok())
+                })?;
+                let Some(rel) = rel else { return Ok(None) };
+                let Ok(img) = image::open(paths.thumbnails_dir().join(rel)) else { return Ok(None) };
+                img
+            }
+        };
+        let small = img.thumbnail(1600, 1600);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut jpeg), 85)
+            .encode_image(&small.to_rgb8())
+            .map_err(|e| format!("could not encode photograph: {e}"))?;
+        Ok(Some(format!("data:image/jpeg;base64,{}", b64(&jpeg))))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The faces in one photograph, for tagging them where they stand.
+#[tauri::command]
+async fn faces_in_photo(state: State<'_, AppState>, file_id: String) -> Result<Vec<faces::PhotoFace>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let reader = state.reader.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        with_reader(&reader, &paths, |archive| {
+            faces::FaceRepo::new(archive).faces_in_file(&file_id).map_err(map_err)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Name one face seen in a photograph — that face only, never its whole group.
+/// Look-alikes elsewhere are then offered as suggestions to review.
+#[tauri::command]
+async fn name_face_in_photo(
+    state: State<'_, AppState>,
+    face_id: String,
+    name: String,
+) -> Result<TagResult, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<TagResult, String> {
+        let archive = open_archive(&paths)?;
+        let repo = faces::FaceRepo::new(&archive);
+        let person = repo.name_one_face(&face_id, &name).map_err(map_err)?;
+        let key = keystore::master_key(paths.keys_dir(), &archive).map_err(map_err)?;
+        let (model_id, model_version) = face_model_partition(&archive);
+        let suggested = repo
+            .suggest_for_person(&person.id, &model_id, &model_version, &key, faces::PERSON_MATCH_THRESHOLD)
+            .map_err(map_err)?;
+        Ok(TagResult { person, suggested })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Something the detector took for a face that is not one.
+#[tauri::command]
+async fn not_a_face(state: State<'_, AppState>, face_id: String) -> Result<(), String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let archive = open_archive(&paths)?;
+        faces::FaceRepo::new(&archive).mark_false_detection(&face_id).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The model partition most of this archive's faces were written under.
 fn face_model_partition(archive: &rusqlite::Connection) -> (String, String) {
     archive
@@ -622,7 +711,9 @@ async fn photo_thumbnail(
 
         let abs = paths.thumbnails_dir().join(rel);
         let Ok(img) = image::open(&abs) else { return Ok(None) };
-        let edge = max_edge.unwrap_or(240).clamp(64, 512);
+        // Up to 1600 for the photo viewer; a preview smaller than that is never
+        // enlarged (`thumbnail` only shrinks).
+        let edge = max_edge.unwrap_or(240).clamp(64, 1600);
         let small = img.thumbnail(edge, edge);
 
         let mut jpeg = Vec::new();
@@ -2175,6 +2266,10 @@ pub fn run() {
             face_gallery,
             face_thumbnail,
             tag_face,
+            faces_in_photo,
+            photo_view,
+            name_face_in_photo,
+            not_a_face,
             photos_of_person,
             copy_person_photos,
             write_sidecars_for_person,

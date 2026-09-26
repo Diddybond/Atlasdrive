@@ -2726,3 +2726,21 @@ read in it.
   same timer.
 - Found on the live archive: Drive 11 (BU A), registered moments earlier, read
   "Finished — all 3 photographs scanned. Safe to unplug." mid-scan.
+
+## D-101 — Faces can be named from inside a photograph
+
+**Status:** settled.
+
+- Clicking a search result opens the photograph in a viewer, with a box on
+  every face (`faces_in_photo`). Clicking a box names that face.
+- Naming from a photograph names **that face only** (`FaceRepo::name_one_face`).
+  If its group holds other faces, it moves to a group of its own first, because
+  the people in one group shot are different people even when the grouping
+  thinks two look alike. Look-alikes are then queued as suggestions for review
+  on People (`suggest_for_person`). The People screen remains the place to name
+  a whole group at once.
+- Naming a face that already belongs to someone else corrects it: the face
+  moves to the new person. "Not a face" marks a false detection.
+- The viewer shows the original, decoded exactly as the scan decoded it, when
+  its drive is plugged in (`photo_view`), and the 512px preview otherwise. Face
+  boxes are top-left-normalised in the same pixel space as both.
