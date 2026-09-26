@@ -470,3 +470,4 @@ Screens were also rendered in demo mode with Playwright/Chromium and looked at:
 Find (home and results), Drives, People, Events, Settings.
 
 - D-096: core 387 passed (1 ignored) + CLI 2; UI 97; workspace and src-tauri clippy clean.
+- D-097: settings tests 6 passed; UI 98 passed; clippy clean.

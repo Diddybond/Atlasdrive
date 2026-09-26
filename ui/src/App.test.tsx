@@ -445,6 +445,15 @@ describe("Backup", () => {
     expect(screen.getByText(/never connects to the internet/)).toBeDefined();
   });
 
+  it("warns when the backup sits on the same drive as the catalogue", async () => {
+    resetMockBackup("/Volumes/Samsung_X5/");
+    await openSettings();
+    await waitFor(() => {
+      expect(screen.getByText(/the same drive as the catalogue/)).toBeDefined();
+    });
+    resetMockBackup();
+  });
+
   it("backs up and then lists the backup it made", async () => {
     await openSettings();
     fireEvent.click(screen.getByRole("button", { name: /Choose|Change/ }));

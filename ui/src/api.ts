@@ -71,6 +71,12 @@ export interface Settings {
   last_backup_at?: string | null;
 }
 
+export type BackupPlace =
+  | { kind: "cloud"; name: string }
+  | { kind: "same_drive_as_catalogue"; name: string }
+  | { kind: "external_drive"; name: string }
+  | { kind: "this_mac" };
+
 export interface BackupReport {
   bundle: string;
   db_bytes: number;
@@ -367,8 +373,8 @@ export function setMockCoverage(c: DriveCoverage[] | null) {
 }
 
 /// Put the mock's catalogue backup back to "never backed up".
-export function resetMockBackup() {
-  mockSettings = { ...mockSettings, backup_destination: null, last_backup_at: null };
+export function resetMockBackup(destination: string | null = null) {
+  mockSettings = { ...mockSettings, backup_destination: destination, last_backup_at: null };
 }
 
 export function setMockScanning(v: boolean) {
@@ -461,7 +467,7 @@ export const api = {
   getSettings: () => call<Settings>("get_settings"),
   saveSettings: (settings: Settings) => call<void>("save_settings", { settings }),
   describeBackupDestination: (path: string) =>
-    call<string | null>("describe_backup_destination", { path }),
+    call<BackupPlace>("describe_backup_destination", { path }),
   backupNow: (destination?: string) => call<BackupReport>("backup_now", { destination }),
   listBackups: (destination?: string) => call<BackupInfo[]>("list_backups", { destination }),
   restoreBackup: (bundle: string) => call<RestoreReport>("restore_backup", { bundle }),
@@ -1041,12 +1047,18 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     }
     case "describe_backup_destination": {
       const p = String(args?.path ?? "");
-      const which = p.includes("GoogleDrive") || p.includes("Google Drive")
-        ? "Google Drive"
-        : p.includes("Dropbox")
-          ? "Dropbox"
-          : null;
-      return Promise.resolve(which as unknown as T);
+      const vol = /^\/Volumes\/([^/]+)/.exec(p)?.[1];
+      const place: BackupPlace =
+        p.includes("GoogleDrive") || p.includes("Google Drive")
+          ? { kind: "cloud", name: "Google Drive" }
+          : p.includes("Dropbox")
+            ? { kind: "cloud", name: "Dropbox" }
+            : vol === "Samsung_X5"
+              ? { kind: "same_drive_as_catalogue", name: vol }
+              : vol
+                ? { kind: "external_drive", name: vol }
+                : { kind: "this_mac" };
+      return Promise.resolve(place as unknown as T);
     }
     case "backup_now": {
       mockBackupSeq += 1;

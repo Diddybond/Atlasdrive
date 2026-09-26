@@ -1956,9 +1956,12 @@ async fn save_settings(
 /// Which cloud service, if any, appears to synchronise a folder. Advisory:
 /// the user is told whether a backup will leave this Mac, never prevented.
 #[tauri::command]
-fn describe_backup_destination(path: String) -> Option<String> {
-    family_archive_core::settings::is_cloud_synced(std::path::Path::new(&path))
-        .map(|s| s.to_string())
+fn describe_backup_destination(
+    state: State<'_, AppState>,
+    path: String,
+) -> family_archive_core::settings::BackupPlace {
+    let root = state.paths.lock().unwrap().root.clone();
+    family_archive_core::settings::backup_place(std::path::Path::new(&path), &root)
 }
 
 #[tauri::command]

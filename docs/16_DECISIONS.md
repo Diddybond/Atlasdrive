@@ -2670,3 +2670,14 @@ read in it.
   scanned; M could not be read. Safe to unplug." (`inventory::drive_coverage_with_queue`).
 - "Needs you" puts every unplugged drive with work left on one line, largest
   first, and sits below the search box so finding a photograph always comes first.
+
+## D-097 — Say where a backup really is
+
+**Status:** settled.
+
+- `settings::backup_place` classifies the backup folder: synchronised by a cloud
+  service, on the same external drive as the catalogue, on a different external
+  drive, or on this Mac. Symlinks are resolved first, so a catalogue linked onto
+  an external drive is recognised.
+- Settings says so in one sentence. A backup beside the catalogue is called out,
+  because one drive failure would take both.

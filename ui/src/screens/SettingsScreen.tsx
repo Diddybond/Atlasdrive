@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, BackupInfo, Settings, VerifierCheck } from "../api";
+import { api, BackupInfo, BackupPlace, Settings, VerifierCheck } from "../api";
 
 function mb(bytes: number): string {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
@@ -21,7 +21,7 @@ export function SettingsScreen() {
   const [exporting, setExporting] = useState(false);
 
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [cloud, setCloud] = useState<string | null>(null);
+  const [place, setPlace] = useState<BackupPlace | null>(null);
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [backingUp, setBackingUp] = useState(false);
   const [backupNote, setBackupNote] = useState<string | null>(null);
@@ -33,10 +33,10 @@ export function SettingsScreen() {
   async function refreshBackups(dest?: string | null) {
     if (!dest) {
       setBackups([]);
-      setCloud(null);
+      setPlace(null);
       return;
     }
-    setCloud(await api.describeBackupDestination(dest));
+    setPlace(await api.describeBackupDestination(dest));
     setBackups(await api.listBackups(dest));
   }
 
@@ -175,19 +175,11 @@ export function SettingsScreen() {
           </div>
         </dl>
 
-        {settings?.backup_destination &&
-          (cloud ? (
-            <p className="check-detail" role="status">
-              This folder is synchronised by {cloud}, so backups will leave this Mac. AtlasDrive
-              itself never connects to the internet — {cloud} does the uploading.
-            </p>
-          ) : (
-            <p className="check-detail" role="status">
-              This folder is not synchronised to any cloud service, so backups stay on this Mac. If
-              the Mac is lost, so is the backup. Choose a folder inside Google Drive, Dropbox or
-              iCloud Drive to keep a copy elsewhere.
-            </p>
-          ))}
+        {settings?.backup_destination && place && (
+          <p className="check-detail" role="status">
+            {placeSentence(place)}
+          </p>
+        )}
 
         <label className="checkbox">
           <input
@@ -396,4 +388,31 @@ const ENVIRONMENT_LABELS: Record<string, string> = {
 };
 function environmentLabel(key: string): string {
   return ENVIRONMENT_LABELS[key] ?? key.replace(/_/g, " ");
+}
+
+function placeSentence(place: BackupPlace): string {
+  switch (place.kind) {
+    case "cloud":
+      return (
+        `This folder is synchronised by ${place.name}, so backups will leave this Mac. ` +
+        `AtlasDrive itself never connects to the internet — ${place.name} does the uploading.`
+      );
+    case "same_drive_as_catalogue":
+      return (
+        `This folder is on ${place.name}, the same drive as the catalogue. If that drive fails, ` +
+        `the catalogue and this backup go together. Keep a second backup on another drive or ` +
+        `on this Mac.`
+      );
+    case "external_drive":
+      return (
+        `This folder is on the drive ${place.name}, separate from the catalogue, so one failed ` +
+        `drive cannot take both. Back up with ${place.name} plugged in.`
+      );
+    case "this_mac":
+      return (
+        "This folder is on this Mac and not synchronised to any cloud service. If the Mac is " +
+        "lost, so is the backup. Choose a folder on another drive, or inside Google Drive, " +
+        "Dropbox or iCloud Drive, to keep a copy elsewhere."
+      );
+  }
 }

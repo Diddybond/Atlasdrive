@@ -97,9 +97,65 @@ pub fn is_cloud_synced(dir: &Path) -> Option<&'static str> {
     }
 }
 
+/// Where a backup folder really is, in the terms that decide what it protects
+/// against. A backup on the drive that also holds the catalogue is lost with
+/// it, so it is worth saying so plainly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "name", rename_all = "snake_case")]
+pub enum BackupPlace {
+    Cloud(String),
+    SameDriveAsCatalogue(String),
+    ExternalDrive(String),
+    ThisMac,
+}
+
+/// The external volume a path lives on (`/Volumes/<name>/…`), if any.
+fn volume_of(path: &Path) -> Option<String> {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut parts = real.components().skip(1);
+    match (parts.next(), parts.next()) {
+        (Some(v), Some(name)) if v.as_os_str() == "Volumes" => {
+            Some(name.as_os_str().to_string_lossy().into_owned())
+        }
+        _ => None,
+    }
+}
+
+pub fn backup_place(dest: &Path, catalogue_root: &Path) -> BackupPlace {
+    if let Some(service) = is_cloud_synced(dest) {
+        return BackupPlace::Cloud(service.to_string());
+    }
+    match (volume_of(dest), volume_of(catalogue_root)) {
+        (Some(d), Some(c)) if d == c => BackupPlace::SameDriveAsCatalogue(d),
+        (Some(d), _) => BackupPlace::ExternalDrive(d),
+        _ => BackupPlace::ThisMac,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backup_beside_the_catalogue_is_called_out() {
+        let cat = Path::new("/Volumes/Samsung_X5/catalogue");
+        assert_eq!(
+            backup_place(Path::new("/Volumes/Samsung_X5/"), cat),
+            BackupPlace::SameDriveAsCatalogue("Samsung_X5".into())
+        );
+        assert_eq!(
+            backup_place(Path::new("/Volumes/Late 25 A/backups"), cat),
+            BackupPlace::ExternalDrive("Late 25 A".into())
+        );
+        assert_eq!(
+            backup_place(Path::new("/Users/wayne/Documents"), cat),
+            BackupPlace::ThisMac
+        );
+        assert_eq!(
+            backup_place(Path::new("/Users/w/Library/CloudStorage/Dropbox/x"), cat),
+            BackupPlace::Cloud("Dropbox".into())
+        );
+    }
 
     #[test]
     fn round_trips() {
