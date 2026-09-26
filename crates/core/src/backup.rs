@@ -450,7 +450,7 @@ pub fn restore(
         if key_path.exists() {
             let hex = std::fs::read_to_string(&key_path)?;
             let key = decode_hex_key(hex.trim())?;
-            crate::crypto::keystore::default_keystore(paths.keys_dir()).put(&key)?;
+            crate::crypto::keystore::replace_key(paths.keys_dir(), &key)?;
             report.key_restored = true;
         }
     }

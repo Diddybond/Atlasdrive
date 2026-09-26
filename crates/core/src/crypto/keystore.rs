@@ -71,19 +71,61 @@ Restore the key from a backup in Settings.";
 /// face data already exists and the key cannot be found, making a fresh key
 /// would silently orphan every face crop and embedding, so it is an error.
 pub fn master_key(keys_dir: std::path::PathBuf, conn: &rusqlite::Connection) -> Result<MasterKey> {
-    let store = default_keystore(keys_dir);
-    if let Some(k) = store.get()? {
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(k) = cached(&cache, &keys_dir) {
         return Ok(k);
     }
-    if holds_encrypted_data(conn)? {
-        return Err(Error::Encryption(MISSING_KEY.into()));
-    }
-    store.create()
+    let store = default_keystore(keys_dir.clone());
+    let key = match store.get()? {
+        Some(k) => k,
+        None if holds_encrypted_data(conn)? => {
+            return Err(Error::Encryption(MISSING_KEY.into()));
+        }
+        None => store.create()?,
+    };
+    *cache = Some((keys_dir, *key.as_bytes(), key.version));
+    Ok(key)
 }
 
 /// The stored key if there is one; never creates.
 pub fn existing_key(keys_dir: std::path::PathBuf) -> Result<Option<MasterKey>> {
-    default_keystore(keys_dir).get()
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(k) = cached(&cache, &keys_dir) {
+        return Ok(Some(k));
+    }
+    let key = default_keystore(keys_dir.clone()).get()?;
+    if let Some(k) = &key {
+        *cache = Some((keys_dir, *k.as_bytes(), k.version));
+    }
+    Ok(key)
+}
+
+/// Put a key back (restore) and make it the one handed out from now on.
+pub fn replace_key(keys_dir: std::path::PathBuf, key: &MasterKey) -> Result<()> {
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    default_keystore(keys_dir.clone()).put(key)?;
+    *cache = Some((keys_dir, *key.as_bytes(), key.version));
+    Ok(())
+}
+
+/// Forget the key held in memory, so the next request reads the store again.
+pub fn forget_cached_key() {
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// The key, read once per run and then held in memory.
+///
+/// The People screen asks for one face picture per tile, dozens at once. Each
+/// asking the Keychain separately raced macOS's access prompt; the losers got
+/// an error. One read, under one lock, means at most one prompt.
+type Cached = Option<(std::path::PathBuf, [u8; 32], i64)>;
+static CACHE: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
+
+fn cached(cache: &Cached, keys_dir: &std::path::Path) -> Option<MasterKey> {
+    match cache {
+        Some((dir, bytes, version)) if dir == keys_dir => Some(MasterKey::from_bytes(*bytes, *version)),
+        _ => None,
+    }
 }
 
 fn holds_encrypted_data(conn: &rusqlite::Connection) -> Result<bool> {
@@ -242,6 +284,7 @@ mod tests {
         // Face data exists and the key goes missing: refuse, and make nothing.
         conn.execute("INSERT INTO face_embeddings VALUES (1)", []).unwrap();
         std::fs::remove_file(keys.join("master.key")).unwrap();
+        forget_cached_key();
         let err = match master_key(keys.clone(), &conn) {
             Ok(_) => panic!("made a new key over existing face data"),
             Err(e) => e.to_string(),

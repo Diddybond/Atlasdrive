@@ -2697,3 +2697,8 @@ read in it.
   brand-new key. macOS then offered "Reset To Defaults", which would have wiped
   the login keychain. Had the new key been stored, it would have orphaned
   222,088 encrypted faces.
+- Follow-up: the key is read from the store once per run, under a lock, and
+  then held in memory (`keystore::CACHE`). The People screen requests dozens of
+  face pictures at once, and each one used to query the Keychain separately,
+  racing macOS's access prompt. Restore goes through `replace_key`, which
+  updates the cached key.
