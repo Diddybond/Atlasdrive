@@ -528,9 +528,15 @@ pub struct DriveCoverage {
     pub discovered: i64,
     /// Photographs fully indexed.
     pub complete: i64,
-    /// Discovered but not yet indexed.
+    /// Discovered but not yet indexed, and still worth trying: photographs the
+    /// scan gave up on are counted in `unreadable` instead.
     pub outstanding: i64,
     pub failed: i64,
+    /// Photographs the scan tried and gave up on (broken or unreadable files).
+    /// Plugging the drive in again will not change them, so they do not make a
+    /// drive unfinished.
+    #[serde(default)]
+    pub unreadable: i64,
     /// How the last scan ended, when it recorded an outcome.
     pub last_outcome: Option<String>,
     pub last_scan_at: Option<String>,
@@ -579,6 +585,12 @@ impl DriveCoverage {
                 self.percent(),
                 thousands(self.outstanding)
             )
+        } else if self.unreadable > 0 {
+            format!(
+                "Finished — {} photographs scanned; {} could not be read. Safe to unplug.",
+                thousands(self.complete),
+                thousands(self.unreadable)
+            )
         } else {
             format!(
                 "Finished — all {} photographs scanned. Safe to unplug.",
@@ -610,6 +622,26 @@ impl DriveCoverage {
 /// Ordered that way deliberately: the drive most in need of being plugged back
 /// in should be the one at the top of the list.
 pub fn drive_coverage(conn: &Connection) -> Result<Vec<DriveCoverage>> {
+    drive_coverage_with_queue(conn, None)
+}
+
+/// As [`drive_coverage`], counting the photographs each scan gave up on (from
+/// the queue) as unreadable rather than still to do.
+///
+/// Without this, a drive with six broken files read "6 photographs still to
+/// read — plug it in to finish" for ever: plugging it in changes nothing, and
+/// the owner's archive had eight drives saying so.
+pub fn drive_coverage_with_queue(
+    conn: &Connection,
+    queue: Option<&Connection>,
+) -> Result<Vec<DriveCoverage>> {
+    let given_up: std::collections::HashMap<String, i64> = match queue {
+        Some(q) => q
+            .prepare("SELECT drive_id, count(*) FROM queue_items WHERE state = 'failed' GROUP BY drive_id")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<std::result::Result<_, _>>()?,
+        None => Default::default(),
+    };
     let mut stmt = conn.prepare(
         "SELECT d.drive_number, d.friendly_name, d.last_scan_at,
                 (SELECT count(*) FROM files f
@@ -621,13 +653,18 @@ pub fn drive_coverage(conn: &Connection) -> Result<Vec<DriveCoverage>> {
                   ORDER BY sr.started_at DESC LIMIT 1),
                 (SELECT sr.outcome FROM scan_runs sr
                   WHERE sr.drive_id = d.id AND sr.mode <> 'dry-run'
-                  ORDER BY sr.started_at DESC LIMIT 1)
+                  ORDER BY sr.started_at DESC LIMIT 1),
+                d.id
            FROM drives d
           ORDER BY d.drive_number",
     )?;
     let rows = stmt.query_map([], |r| {
         let complete: i64 = r.get(3)?;
         let discovered: i64 = r.get::<_, Option<i64>>(5)?.unwrap_or(0);
+        let drive_id: String = r.get(7)?;
+        // Never more than was actually left over.
+        let remaining = (discovered - complete).max(0);
+        let unreadable = given_up.get(&drive_id).copied().unwrap_or(0).min(remaining);
         Ok(DriveCoverage {
             drive_number: r.get(0)?,
             drive_name: r.get(1)?,
@@ -636,7 +673,8 @@ pub fn drive_coverage(conn: &Connection) -> Result<Vec<DriveCoverage>> {
             failed: r.get(4)?,
             // A rescan can discover fewer files than are catalogued (photographs
             // deleted from the drive), so this must never go negative.
-            outstanding: (discovered - complete).max(0),
+            outstanding: remaining - unreadable,
+            unreadable,
             discovered,
             last_outcome: r.get(6)?,
             summary: String::new(),
@@ -1640,5 +1678,73 @@ mod name_recurrence_tests {
         let stats = scan_stats(&conn, 1, 10).unwrap();
         let f0 = stats.recent.iter().find(|r| r.file_id == "f0").unwrap();
         assert_eq!(f0.top_tag.as_deref(), Some("bicycle"));
+    }
+}
+
+#[cfg(test)]
+mod unreadable_tests {
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
+
+    /// Photographs the scan gave up on do not keep a drive "unfinished": the
+    /// owner's archive had eight drives saying "plug it in to finish" over a
+    /// handful of broken files each.
+    #[test]
+    fn photographs_given_up_on_do_not_leave_a_drive_unfinished() {
+        let archive = open_in_memory(SchemaKind::Archive).unwrap();
+        archive
+            .execute_batch(
+                "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES ('d5',5,'offline','now'), ('d2',2,'offline','now');
+                 INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r5','d5','','now'), ('r2','d2','','now');
+                 INSERT INTO scan_runs (id, drive_id, drive_number, scan_root, mode, started_at, outcome, files_discovered) VALUES
+                   ('s5','d5',5,'/x','initial','2026-01-01T00:00:00Z','success',10),
+                   ('s2','d2',2,'/x','initial','2026-01-01T00:00:00Z','interrupted',10);",
+            )
+            .unwrap();
+        for (drive, root, n) in [("d5", "r5", 4), ("d2", "r2", 4)] {
+            for i in 0..n {
+                archive
+                    .execute(
+                        "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                            source_mtime_ns, status, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?1, ?1, 1, 1, 'complete', 'now', 'now')",
+                        rusqlite::params![format!("{drive}-{i}"), drive, root],
+                    )
+                    .unwrap();
+            }
+        }
+        let queue = open_in_memory(SchemaKind::Queue).unwrap();
+        let item = |id: &str, drive: &str, state: &str| {
+            queue
+                .execute(
+                    "INSERT INTO queue_items
+                       (id, run_id, drive_id, drive_number, root_id, relative_path, abs_path,
+                        size_bytes, source_mtime_ns, state, attempts, enqueued_at, queue_key)
+                     VALUES (?1,'run',?2,5,'r',?1,?1,1,1,?3,3,'now',?1)",
+                    rusqlite::params![id, drive, state],
+                )
+                .unwrap();
+        };
+        for i in 0..6 {
+            item(&format!("bad{i}"), "d5", "failed");
+        }
+        for i in 0..2 {
+            item(&format!("bad2-{i}"), "d2", "failed");
+        }
+
+        let all = drive_coverage_with_queue(&archive, Some(&queue)).unwrap();
+        let d5 = all.iter().find(|c| c.drive_number == 5).unwrap();
+        assert_eq!((d5.outstanding, d5.unreadable), (0, 6));
+        assert!(d5.can_unplug);
+        assert!(d5.summary.contains("6 could not be read"), "{}", d5.summary);
+
+        // Drive 2 has two broken files and four never read: still unfinished.
+        let d2 = all.iter().find(|c| c.drive_number == 2).unwrap();
+        assert_eq!((d2.outstanding, d2.unreadable), (4, 2));
+        assert!(!d2.can_unplug);
+
+        // Without the queue, nothing is assumed.
+        let bare = drive_coverage(&archive).unwrap();
+        assert_eq!(bare.iter().find(|c| c.drive_number == 5).unwrap().outstanding, 6);
     }
 }

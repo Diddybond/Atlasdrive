@@ -81,25 +81,24 @@ export function NeedsYou({ onGo }: { onGo: (place: Place) => void }) {
   }
   if (!scanning) {
     const now = Date.now();
+    // Unplugged drives with photographs left are one line, not one item each:
+    // the owner's real archive had eight, and they pushed everything else off
+    // the screen. Plugged-in drives each get their own one-click job.
+    const waiting: { number: number; left: number; where?: string | null }[] = [];
     for (const d of drives) {
       const c = coverage.find((x) => x.drive_number === d.drive_number);
       const plugged = d.status === "online";
       if (c && c.outstanding > 0) {
-        items.push(
-          plugged
-            ? {
-                key: `drive-${d.drive_number}`,
-                text: `Drive ${d.drive_number} is plugged in and ${c.outstanding.toLocaleString()} of its photographs are still to be read.`,
-                action: "Finish scanning",
-                run: () => void scan(d.drive_number),
-              }
-            : {
-                key: `drive-${d.drive_number}`,
-                text: `Drive ${d.drive_number} is not fully scanned — ${c.outstanding.toLocaleString()} photographs still to read.${d.physical_location ? ` It is kept in ${d.physical_location}.` : ""} Plug it in to finish.`,
-                action: "See drives",
-                run: () => onGo("drives"),
-              },
-        );
+        if (plugged) {
+          items.push({
+            key: `drive-${d.drive_number}`,
+            text: `Drive ${d.drive_number} is plugged in and ${photos(c.outstanding)} still to be read.`,
+            action: "Finish scanning",
+            run: () => void scan(d.drive_number),
+          });
+        } else {
+          waiting.push({ number: d.drive_number, left: c.outstanding, where: d.physical_location });
+        }
         continue;
       }
       const last = d.last_scan_at ? new Date(d.last_scan_at).getTime() : NaN;
@@ -111,6 +110,21 @@ export function NeedsYou({ onGo }: { onGo: (place: Place) => void }) {
           run: () => void scan(d.drive_number),
         });
       }
+    }
+    if (waiting.length > 0) {
+      waiting.sort((a, b) => b.left - a.left);
+      const list = waiting
+        .map((w) => `Drive ${w.number} (${w.left.toLocaleString()}${w.where ? `, ${w.where}` : ""})`)
+        .join(", ");
+      items.push({
+        key: "unfinished",
+        text:
+          waiting.length === 1
+            ? `${list.replace(/ \(.*/, "")} is not fully scanned — ${photos(waiting[0].left)} still to read${waiting[0].where ? `. It is kept in ${waiting[0].where}` : ""}. Plug it in to finish.`
+            : `${waiting.length} drives have photographs still to read: ${list}. Plug one in to finish it.`,
+        action: "See drives",
+        run: () => onGo("drives"),
+      });
     }
   }
 
@@ -145,4 +159,9 @@ export function NeedsYou({ onGo }: { onGo: (place: Place) => void }) {
       </ul>
     </section>
   );
+}
+
+/// "1 photograph", "6 photographs".
+function photos(n: number): string {
+  return `${n.toLocaleString()} photograph${n === 1 ? "" : "s"}`;
 }

@@ -1695,7 +1695,12 @@ async fn drive_coverage(
     let paths = state.paths.lock().unwrap().clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::inventory::DriveCoverage>, String> {
         let archive = open_archive(&paths)?;
-        family_archive_core::inventory::drive_coverage(&archive).map_err(map_err)
+        // The queue says which photographs a scan gave up on; without it they
+        // would read as still to do for ever. A queue that cannot be opened
+        // leaves them counted as outstanding, which errs on the safe side.
+        let queue = open_queue(&paths).ok();
+        family_archive_core::inventory::drive_coverage_with_queue(&archive, queue.as_ref())
+            .map_err(map_err)
     })
     .await
     .map_err(|e| e.to_string())?

@@ -20,6 +20,8 @@ export interface DriveCoverage {
   complete: number;
   outstanding: number;
   failed: number;
+  /// Photographs the scan gave up on; they do not make a drive unfinished.
+  unreadable?: number;
   last_outcome?: string | null;
   last_scan_at?: string | null;
   /// The sentence to display. Computed in Rust so the rule exists once —
@@ -358,6 +360,12 @@ export interface NamedPerson {
 /// what the Drives screen offers when the machine is idle turn it off, rather
 /// than each quietly assuming the opposite of the other.
 export let mockScanRunning = true;
+let mockCoverage: DriveCoverage[] | null = null;
+/// Replace the mock's drive coverage (null restores the default).
+export function setMockCoverage(c: DriveCoverage[] | null) {
+  mockCoverage = c;
+}
+
 /// Put the mock's catalogue backup back to "never backed up".
 export function resetMockBackup() {
   mockSettings = { ...mockSettings, backup_destination: null, last_backup_at: null };
@@ -937,6 +945,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
           : []) as unknown as T,
       );
     case "drive_coverage":
+      if (mockCoverage) return Promise.resolve(mockCoverage as unknown as T);
       return Promise.resolve([
         { drive_number: 7, drive_name: "Holidays 2004-2011", discovered: 15000, complete: 11000, outstanding: 4000, failed: 0, last_outcome: "cancelled", last_scan_at: "2026-07-20", can_unplug: false, summary: "11,000 of 15,000 photographs scanned (73%). 4,000 still to read — keep it plugged in until the scan finishes." },
         { drive_number: 14, drive_name: "AtlasDrive A", discovered: 4213, complete: 4213, outstanding: 0, failed: 0, last_outcome: "ok", last_scan_at: "2026-07-24", can_unplug: true, summary: "Finished — all 4,213 photographs scanned. Safe to unplug." },

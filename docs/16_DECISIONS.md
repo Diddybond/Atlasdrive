@@ -2659,3 +2659,14 @@ read in it.
 - Opening an original in Lightroom Classic (when installed) or its default app
   hands the file over by path; AtlasDrive never writes to it or to Lightroom's
   catalogue.
+
+## D-096 — Photographs given up on do not leave a drive unfinished
+
+**Status:** settled.
+
+- A photograph the queue has given up on (`queue_items.state = 'failed'`) is
+  counted as *could not be read*, not as *still to read*. A drive whose only
+  remaining photographs are unreadable reads "Finished — N photographs
+  scanned; M could not be read. Safe to unplug." (`inventory::drive_coverage_with_queue`).
+- "Needs you" puts every unplugged drive with work left on one line, largest
+  first, and sits below the search box so finding a photograph always comes first.

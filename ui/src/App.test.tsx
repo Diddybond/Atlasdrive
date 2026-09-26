@@ -1,4 +1,4 @@
-import { resetMockBackup, setMockScanError, setMockScanning, setMockStopping } from "./api";
+import { resetMockBackup, setMockCoverage, setMockScanError, setMockScanning, setMockStopping } from "./api";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { App } from "./App";
 
@@ -1202,6 +1202,31 @@ describe("Needs you", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Check for new photographs" }));
     expect(await screen.findByText(/Looking for new photographs on Drive 14/)).toBeDefined();
+  });
+
+  /// Several unplugged drives with photographs left are one line, biggest
+  /// first — on the owner's archive eight separate items pushed the search
+  /// box off the screen.
+  it("puts every unplugged unfinished drive on one line", async () => {
+    setMockScanning(false);
+    const row = (n: number, left: number) => ({
+      drive_number: n, drive_name: null, discovered: 100, complete: 100 - left, outstanding: left,
+      failed: 0, unreadable: 0, last_outcome: "success", last_scan_at: "2026-09-01", can_unplug: false,
+      summary: "",
+    });
+    setMockCoverage([row(7, 9), row(22, 605)]);
+    try {
+      render(<App />);
+      const panel = await screen.findByRole("region", { name: "Needs you" });
+      await waitFor(() => {
+        expect(panel.textContent).toMatch(
+          /2 drives have photographs still to read: Drive 22 \(605, Box A\), Drive 7 \(9, Drawer 2\)/,
+        );
+      });
+      expect(screen.getAllByRole("button", { name: "See drives" }).length).toBe(1);
+    } finally {
+      setMockCoverage(null);
+    }
   });
 
   /// One item per drive: a drive due both a new-photographs check and a

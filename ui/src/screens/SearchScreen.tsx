@@ -201,8 +201,6 @@ export function SearchScreen({
         each photograph tells you which drive holds it.
       </p>
 
-      {!searched && onGo && <NeedsYou onGo={onGo} />}
-
       {similarTo && (
         <p className="scope-bar" role="status" aria-label="Result scope">
           Photographs that look like <strong>{similarTo}</strong>
@@ -239,6 +237,8 @@ export function SearchScreen({
           {loading ? "Searching…" : "Search"}
         </button>
       </form>
+
+      {!searched && onGo && <NeedsYou onGo={onGo} />}
 
       {allDrives.length > 1 && (
         <label className="inline-select">
