@@ -348,7 +348,7 @@ pub fn locate_matches(conn: &Connection, matches: &mut [DriveMatch]) -> Result<(
 /// "Found on Drives 1, 5 and 6. Drive 5 has the most (9) — kept in Drawer 2."
 pub fn where_to_look(matches: &[DriveMatch]) -> String {
     match matches.len() {
-        0 => "Not found on any indexed drive.".to_string(),
+        0 => "Not found on any scanned drive.".to_string(),
         _ => {
             let numbers: Vec<String> = {
                 let mut ns: Vec<i64> = matches.iter().map(|m| m.drive_number).collect();
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn nothing_found_says_so_plainly() {
-        assert_eq!(where_to_look(&[]), "Not found on any indexed drive.");
+        assert_eq!(where_to_look(&[]), "Not found on any scanned drive.");
     }
 
     #[test]
@@ -533,25 +533,41 @@ pub struct DriveCoverage {
     pub can_unplug: bool,
 }
 
+/// 12345 → "12,345", the way the rest of the app writes numbers.
+fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 {
+        out.insert(0, '-');
+    }
+    out
+}
+
 impl DriveCoverage {
     /// Fill in the computed fields. The only place the rule is written.
     fn finish(mut self) -> Self {
         let never_scanned = self.discovered == 0 && self.complete == 0;
         self.can_unplug = !never_scanned && !self.is_incomplete();
         self.summary = if never_scanned {
-            "Never indexed — press Scan this drive to start.".to_string()
+            "Not scanned yet — plug it in and press Scan this drive.".to_string()
         } else if self.is_incomplete() {
             format!(
-                "{} of {} indexed ({:.0}%). {} still to do — leave this drive connected.",
-                self.complete,
-                self.discovered,
+                "{} of {} photographs scanned ({:.0}%). {} still to read — keep it plugged in until the scan finishes.",
+                thousands(self.complete),
+                thousands(self.discovered),
                 self.percent(),
-                self.outstanding
+                thousands(self.outstanding)
             )
         } else {
             format!(
-                "Finished — all {} photographs indexed. Safe to unplug.",
-                self.complete
+                "Finished — all {} photographs scanned. Safe to unplug.",
+                thousands(self.complete)
             )
         };
         self
@@ -797,7 +813,8 @@ mod coverage_tests {
         assert!(all[0].is_incomplete());
         assert_eq!(all[0].outstanding, 4000);
         assert!((all[0].percent() - 73.3).abs() < 0.5, "{}", all[0].percent());
-        assert!(all[0].summary.contains("leave this drive connected"), "{}", all[0].summary);
+        assert!(all[0].summary.contains("keep it plugged in"), "{}", all[0].summary);
+        assert!(all[0].summary.contains("11,000 of 15,000"), "numbers read the way the app writes them: {}", all[0].summary);
         assert!(!all[0].can_unplug);
 
         // And the finished ones say so plainly.
@@ -832,7 +849,7 @@ mod coverage_tests {
         let all = drive_coverage(&conn).unwrap();
         // The bug this replaced: a drive that had never been touched reported
         // "Finished — all 0 photographs indexed. Safe to unplug."
-        assert!(all[0].summary.starts_with("Never indexed"), "{}", all[0].summary);
+        assert!(all[0].summary.starts_with("Not scanned yet"), "{}", all[0].summary);
         assert!(!all[0].summary.contains("Safe to unplug"), "{}", all[0].summary);
         assert!(!all[0].can_unplug, "a never-scanned drive is not finished");
     }

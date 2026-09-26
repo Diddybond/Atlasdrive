@@ -399,9 +399,12 @@ describe("AtlasDrive UI", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Run checks" }));
+    // In plain words: the verdict, and every check by what it means.
     await waitFor(() => {
-      expect(screen.getByText(/network isolation/i)).toBeDefined();
+      expect(screen.getByText(/All good/)).toBeDefined();
     });
+    expect(screen.getByText("Nothing sent over the network")).toBeDefined();
+    expect(screen.queryByText(/network_isolation|network isolation/)).toBeNull();
   });
 
   /// Opening Settings froze the app: it ran the whole-archive verifier on the
@@ -411,8 +414,8 @@ describe("AtlasDrive UI", () => {
     fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
     await screen.findByRole("button", { name: "Run checks" });
     await new Promise((r) => setTimeout(r, 50));
-    expect(screen.queryByText(/network isolation/i)).toBeNull();
-    expect(screen.getByText(/takes a few minutes on a large one/)).toBeDefined();
+    expect(screen.queryByText(/All good/)).toBeNull();
+    expect(screen.getByText(/Takes a few minutes on a large archive/)).toBeDefined();
   });
 });
 
@@ -452,7 +455,7 @@ describe("Backup", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Back up now" }));
     await waitFor(() => {
-      expect(screen.getByText(/new thumbnails/)).toBeDefined();
+      expect(screen.getByText(/new previews/)).toBeDefined();
     });
     // Only the genuinely new thumbnails are copied — that is what makes a
     // nightly cloud backup affordable.
@@ -742,7 +745,7 @@ describe("Knowing when a drive can be unplugged", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
     await waitFor(() => {
-      expect(screen.getByText(/Finished — all 4,213 photographs indexed/)).toBeDefined();
+      expect(screen.getByText(/Finished — all 4,213 photographs scanned/)).toBeDefined();
     });
     // Exactly one mock drive is finished. The others -- one part-indexed, one
     // never scanned -- must not claim to be.
@@ -753,9 +756,9 @@ describe("Knowing when a drive can be unplugged", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
     await waitFor(() => {
-      expect(screen.getByText(/Never indexed/)).toBeDefined();
+      expect(screen.getByText(/Not scanned yet/)).toBeDefined();
     });
-    const row = screen.getByText(/Never indexed/);
+    const row = screen.getByText(/Not scanned yet/);
     expect(row.textContent).not.toContain("Safe to unplug");
     // And it is styled as outstanding work, not as done.
     expect(row.className).toContain("working");
@@ -765,10 +768,10 @@ describe("Knowing when a drive can be unplugged", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
     await waitFor(() => {
-      expect(screen.getByText(/4,000 still to do/)).toBeDefined();
+      expect(screen.getByText(/4,000 still to read/)).toBeDefined();
     });
-    const row = screen.getByText(/4,000 still to do/);
-    expect(row.textContent).toContain("leave this drive connected");
+    const row = screen.getByText(/4,000 still to read/);
+    expect(row.textContent).toContain("keep it plugged in");
     // The reassuring phrase must never appear on unfinished work.
     expect(row.textContent).not.toContain("Safe to unplug");
     expect(row.textContent).toContain("73%");
@@ -1005,7 +1008,7 @@ describe("Scanning a drive from the Drives screen", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
     await waitFor(() => {
-      expect(screen.getByText(/Never indexed/)).toBeDefined();
+      expect(screen.getByText(/Not scanned yet/)).toBeDefined();
     });
   }
 

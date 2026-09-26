@@ -791,3 +791,12 @@ details.more[open] { display: flex; flex-direction: column; align-items: flex-st
 /* ---- Events -------------------------------------------------------------- */
 .event-preview { list-style: none; margin: 0 0 12px; padding: 0; display: flex; gap: 6px; overflow: hidden; }
 .event-preview img { width: 96px; height: 72px; object-fit: cover; border-radius: 6px; display: block; }
+
+/* ---- Settings ------------------------------------------------------------ */
+.health.ok { color: var(--ok); margin: 8px 0; }
+details.advanced > summary { cursor: pointer; list-style: none; }
+details.advanced > summary::-webkit-details-marker { display: none; }
+details.advanced > summary h2 { display: inline; }
+details.advanced > summary::after { content: " ▸"; color: var(--ink-soft); }
+details.advanced[open] > summary::after { content: " ▾"; }
+details.advanced h3 { margin: 20px 0 6px; }

@@ -58,7 +58,7 @@ export function SettingsScreen() {
     try {
       const r = await api.backupNow();
       setBackupNote(
-        `Backed up ${mb(r.db_bytes)}. ${r.thumbnails_copied} new thumbnails ` +
+        `Backed up ${mb(r.db_bytes)}. ${r.thumbnails_copied} new previews ` +
           `(${mb(r.thumbnail_bytes_copied)}), ${r.thumbnails_present} already there.`,
       );
       const s = await api.getSettings();
@@ -134,13 +134,14 @@ export function SettingsScreen() {
 
   const badge = (s: VerifierCheck["status"]) =>
     s === "Pass" ? "ok" : s === "Warn" ? "warn" : "fail";
+  const problems = checks.filter((c) => c.status !== "Pass");
 
   return (
     <section aria-labelledby="settings-heading">
-      <h1 id="settings-heading">Settings &amp; diagnostics</h1>
+      <h1 id="settings-heading">Settings</h1>
       <p className="lede">
-        Everything runs on this Mac. These checks confirm your archive is safe, consistent and fully
-        offline.
+        Your catalogue's backup, and a check that everything is healthy. Everything runs on this
+        Mac.
       </p>
 
       <div className="card">
@@ -212,7 +213,7 @@ export function SettingsScreen() {
               settings && void persist({ ...settings, backup_after_indexing: e.target.checked })
             }
           />
-          Back up automatically after indexing a drive
+          Back up automatically after scanning a drive
         </label>
 
         {backupNote && (
@@ -263,77 +264,136 @@ export function SettingsScreen() {
 
       <div className="card">
         <div className="row-between">
-          <h2>Reclaim disk space</h2>
+          <h2>Archive health</h2>
+          <button onClick={runChecks} disabled={running}>
+            {running ? "Checking…" : "Run checks"}
+          </button>
+        </div>
+        {checks.length === 0 ? (
+          <p className="panel-note">
+            {running
+              ? "Reading every preview and every plugged-in original. On a large archive this takes a few minutes; the rest of AtlasDrive keeps working."
+              : "Checks that every preview opens, that no original has been changed, that the catalogue is intact and that nothing was sent over the network. Takes a few minutes on a large archive."}
+          </p>
+        ) : problems.length === 0 ? (
+          <p className="health ok" role="status">
+            ✓ All good — every preview opens, originals are unchanged, the catalogue is intact and
+            nothing was sent over the network.
+          </p>
+        ) : (
+          <ul className="check-list" aria-label="Needs attention">
+            {problems.map((c) => (
+              <li key={c.name} className="check-row">
+                <span className={`pill ${badge(c.status)}`}>
+                  {c.status === "Warn" ? "Worth a look" : "Problem"}
+                </span>
+                <span className="check-name">{checkLabel(c.name)}</span>
+                <span className="check-detail">{c.detail}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {checks.length > 0 && (
+          <details className="more">
+            <summary>Show every check</summary>
+            <ul className="check-list">
+              {checks.map((c) => (
+                <li key={c.name} className="check-row">
+                  <span className={`pill ${badge(c.status)}`}>{c.status === "Pass" ? "OK" : c.status}</span>
+                  <span className="check-name">{checkLabel(c.name)}</span>
+                  <span className="check-detail">{c.detail}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+
+      {/* Tools that are rarely needed, kept out of the way. */}
+      <details className="card advanced">
+        <summary>
+          <h2>Advanced</h2>
+        </summary>
+
+        <div className="row-between">
+          <h3>Reclaim disk space</h3>
           <button onClick={compact} disabled={compacting}>
             {compacting ? "Working…" : "Compact"}
           </button>
         </div>
-        <p className="lede">
-          Re-encodes thumbnails written by older versions and compacts the catalogue. Nothing you
-          can see changes. On a large archive this can take a while — it is safe to leave running.
+        <p className="panel-note">
+          Re-encodes previews written by older versions and compacts the catalogue. Nothing you can
+          see changes. On a large archive this can take a while — it is safe to leave running.
         </p>
         {compactNote && (
           <p className="check-detail" role="status">
             {compactNote}
           </p>
         )}
-      </div>
 
-      <div className="card">
-        <h2>Environment</h2>
+        <h3>This Mac</h3>
         <dl className="kv">
           {Object.entries(doctor).map(([k, v]) => (
             <div key={k}>
-              <dt>{k.replace(/_/g, " ")}</dt>
+              <dt>{environmentLabel(k)}</dt>
               <dd>{v}</dd>
             </div>
           ))}
         </dl>
-      </div>
 
-      <div className="card">
         <div className="row-between">
-          <h2>Safety checks</h2>
-          <button onClick={runChecks} disabled={running}>
-            {running ? "Checking…" : "Run checks"}
-          </button>
-        </div>
-        {checks.length === 0 && (
-          <p className="panel-note">
-            {running
-              ? "Reading every thumbnail and every connected original. On a large archive this takes a few minutes; the rest of AtlasDrive keeps working."
-              : "Confirms every thumbnail opens, every connected original is unchanged, the catalogue is intact and nothing reached the network. Reads the whole archive, so it takes a few minutes on a large one."}
-          </p>
-        )}
-        <ul className="check-list">
-          {checks.map((c) => (
-            <li key={c.name} className="check-row">
-              <span className={`pill ${badge(c.status)}`}>{c.status}</span>
-              <span className="check-name identifier">{c.name.replace(/_/g, " ")}</span>
-              <span className="check-detail">{c.detail}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      <div className="card">
-        <div className="row-between">
-          <h2>Share a diagnostics file</h2>
+          <h3>Share a diagnostics file</h3>
           <button onClick={exportDiagnostics} disabled={exporting}>
             {exporting ? "Writing…" : "Create diagnostics file"}
           </button>
         </div>
-        <p className="lede">
-          Creates a file you can send with a bug report. It contains counts, version numbers and
-          the results of the safety checks — never your file names, folders, dates, tags, people or
-          photographs.
+        <p className="panel-note">
+          A file to send with a bug report: counts, version numbers and the health check results —
+          never your file names, folders, dates, tags, people or photographs.
         </p>
         {exported && (
           <p className="check-detail" role="status">
             Saved to {exported}
           </p>
         )}
-      </div>
+      </details>
     </section>
   );
+}
+
+/// The health checks, named for what they mean rather than how they run.
+const CHECK_LABELS: Record<string, string> = {
+  db_integrity: "The catalogue is intact",
+  integrity_db_corruption: "The catalogue is damaged",
+  catalogue_rows: "Every photograph has its details",
+  hashes: "Every photograph has a fingerprint",
+  thumbnail_rows: "Every photograph has a preview",
+  thumbnail_files: "Every preview opens",
+  originals_unchanged: "No original has been changed",
+  originals_modified: "An original has been changed",
+  output_path_containment: "Nothing written outside AtlasDrive's own folder",
+  output_path_escape: "Something was written outside AtlasDrive's folder",
+  network_isolation: "Nothing sent over the network",
+  network_isolation_violated: "Something tried to use the network",
+  disk_floor: "Enough free disk space",
+  disk_floor_breach: "This Mac is running out of disk space",
+  throughput: "Scanning speed",
+  heartbeat: "Scans report that they are alive",
+  queue_consistency: "The list of photographs to scan is in order",
+  face_pipeline: "Face data is sound",
+  face_encryption_failure: "Face data cannot be read",
+};
+function checkLabel(name: string): string {
+  return CHECK_LABELS[name] ?? name.replace(/_/g, " ");
+}
+
+const ENVIRONMENT_LABELS: Record<string, string> = {
+  keystore: "Where the face-data key is kept",
+  key: "Face-data key",
+  archive_integrity: "Catalogue",
+  ai_offline: "Works without the internet",
+  image_recognition: "Image recognition",
+};
+function environmentLabel(key: string): string {
+  return ENVIRONMENT_LABELS[key] ?? key.replace(/_/g, " ");
 }

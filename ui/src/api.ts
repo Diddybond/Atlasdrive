@@ -644,7 +644,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
           ? `Drive ${numbers[0]}`
           : `Drives ${numbers.slice(0, -1).join(", ")} and ${numbers[numbers.length - 1]}`;
       const offline = drives.filter((d) => !d.online);
-      let where = drives.length === 0 ? "Not found on any indexed drive." : `Found on ${list}.`;
+      let where = drives.length === 0 ? "Not found on any scanned drive." : `Found on ${list}.`;
       if (drives.length > 1) where += ` Drive ${drives[0].drive_number} has the most (${drives[0].match_count}).`;
       if (offline.length > 0) {
         where += ` Connect ${offline
@@ -920,9 +920,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       );
     case "drive_coverage":
       return Promise.resolve([
-        { drive_number: 7, drive_name: "Holidays 2004-2011", discovered: 15000, complete: 11000, outstanding: 4000, failed: 0, last_outcome: "cancelled", last_scan_at: "2026-07-20", can_unplug: false, summary: "11,000 of 15,000 indexed (73%). 4,000 still to do — leave this drive connected." },
-        { drive_number: 14, drive_name: "AtlasDrive A", discovered: 4213, complete: 4213, outstanding: 0, failed: 0, last_outcome: "ok", last_scan_at: "2026-07-24", can_unplug: true, summary: "Finished — all 4,213 photographs indexed. Safe to unplug." },
-        { drive_number: 22, drive_name: "Scanned prints", discovered: 0, complete: 0, outstanding: 0, failed: 0, last_outcome: null, last_scan_at: null, can_unplug: false, summary: "Never indexed — press Scan this drive to start." },
+        { drive_number: 7, drive_name: "Holidays 2004-2011", discovered: 15000, complete: 11000, outstanding: 4000, failed: 0, last_outcome: "cancelled", last_scan_at: "2026-07-20", can_unplug: false, summary: "11,000 of 15,000 photographs scanned (73%). 4,000 still to read — keep it plugged in until the scan finishes." },
+        { drive_number: 14, drive_name: "AtlasDrive A", discovered: 4213, complete: 4213, outstanding: 0, failed: 0, last_outcome: "ok", last_scan_at: "2026-07-24", can_unplug: true, summary: "Finished — all 4,213 photographs scanned. Safe to unplug." },
+        { drive_number: 22, drive_name: "Scanned prints", discovered: 0, complete: 0, outstanding: 0, failed: 0, last_outcome: null, last_scan_at: null, can_unplug: false, summary: "Not scanned yet — plug it in and press Scan this drive." },
       ] as unknown as T);
     case "estimate_index": {
       const files = 14320;

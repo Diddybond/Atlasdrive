@@ -139,11 +139,11 @@ export function ScanScreen() {
       <section aria-labelledby="scan-heading">
         <h1 id="scan-heading">Scan activity</h1>
         <p className="lede">
-          Indexing reads your photographs without ever changing them, and can be safely paused at
-          any batch boundary.
+          Scanning reads your photographs without ever changing them. It can be stopped at any
+          time and picks up where it left off.
         </p>
         <p className="empty">
-          No scan has run yet. Go to <strong>Drives</strong> to register a drive and start indexing.
+          No scan has run yet. Go to <strong>All drives</strong> to add a drive and scan it.
         </p>
       </section>
     );
@@ -180,8 +180,8 @@ export function ScanScreen() {
     <section aria-labelledby="scan-heading">
       <h1 id="scan-heading">Scan activity</h1>
       <p className="lede">
-        Indexing reads your photographs without ever changing them, and can be safely paused at any
-        batch boundary.
+        Scanning reads your photographs without ever changing them. It can be stopped at any time
+        and picks up where it left off.
       </p>
 
       {stopNote && (
@@ -224,7 +224,7 @@ export function ScanScreen() {
                 ? "Reading photographs from this drive"
                 : isLive
                   ? statusLabel(progress.status)
-                  : "Not being read now — showing what is already catalogued"}
+                  : "Not being read now — showing what has already been read"}
             </p>
           </div>
           <span className="head-actions">
@@ -337,14 +337,14 @@ export function ScanScreen() {
               aria-valuenow={pct}
               aria-valuemin={0}
               aria-valuemax={100}
-              aria-label={`Indexing progress: ${pct}%`}
+              aria-label={`Scan progress: ${pct}%`}
             >
               <div className="bar-fill" style={{ width: `${pct}%` }} />
             </div>
             <div className="bar-legend">
               <span>
                 <strong>{catalogued.toLocaleString()}</strong> / {driveTotal.toLocaleString()} photographs
-                catalogued
+                read
               </span>
               {stats && <span>{gb(stats.bytes)} read</span>}
             </div>
@@ -453,7 +453,7 @@ export function ScanScreen() {
                 </button>
                 <p className="panel-note">
                   Worth doing after AtlasDrive has been updated: a file it could not read before may
-                  read perfectly now. Nothing already catalogued is redone.
+                  read perfectly now. Nothing already read is redone.
                 </p>
               </>
             )}
