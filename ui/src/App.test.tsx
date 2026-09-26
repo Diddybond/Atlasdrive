@@ -1,4 +1,4 @@
-import { resetMockBackup, setMockCoverage, setMockExtraVolumes, setMockFaceThumbError, setMockScanError, setMockScanning, setMockStopping } from "./api";
+import { resetMockBackup, resetMockFaces, setMockCoverage, setMockExtraVolumes, setMockFaceThumbError, setMockScanError, setMockScanning, setMockStopping } from "./api";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { App } from "./App";
 
@@ -11,6 +11,7 @@ beforeEach(() => {
   setMockScanning(true);
   setMockStopping(false);
   setMockScanError(null);
+  resetMockFaces();
 });
 
 /// Scan activity lives under Drives.
@@ -356,6 +357,30 @@ describe("AtlasDrive UI", () => {
     expect(screen.getByText(/might also be Aimee/)).toBeDefined();
     expect(screen.getByText(/34 photographs/)).toBeDefined();
     expect(screen.getByRole("button", { name: /Review 2 possible matches for Aimee/ })).toBeDefined();
+  });
+
+  it("tags a suggested face as someone else while reviewing", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /People/ }));
+    await waitFor(() => {
+      expect(screen.getAllByRole("button", { name: /Unnamed face/ }).length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: /Unnamed face/ })[0]);
+    fireEvent.change(screen.getByLabelText(/^Name$/), { target: { value: "Daisy" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Review 2 possible matches for Daisy/ }));
+
+    const others = await screen.findAllByRole("button", { name: "This is someone else, not Daisy" });
+    expect(others).toHaveLength(2);
+    fireEvent.click(others[1]);
+    fireEvent.change(screen.getByLabelText("Who is it?"), { target: { value: "Millie" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Tagged as Millie\./)).toBeDefined();
+    });
+    // That suggestion is answered and gone; the other is still waiting.
+    expect(screen.getAllByRole("button", { name: "This is someone else, not Daisy" })).toHaveLength(1);
   });
 
   it("gathers a named person's photographs and says which drive is missing", async () => {

@@ -33,6 +33,9 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
   // Why face pictures are not showing, when they are not — never a silent 🙂.
   const [thumbNote, setThumbNote] = useState<string | null>(null);
   const [people, setPeople] = useState<NamedPerson[]>([]);
+  // The suggestion being answered "someone else", and the name typed for it.
+  const [otherFor, setOtherFor] = useState<string | null>(null);
+  const [otherName, setOtherName] = useState("");
   const [selected, setSelected] = useState<GalleryFace | null>(null);
   const [name, setName] = useState("");
   const [status, setStatus] = useState<string | null>(null);
@@ -183,6 +186,26 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
   async function answer(s: SuggestedFace, isThem: boolean) {
     await api.resolveSuggestion(s.cluster_id, isThem);
     setQueue((q) => q.filter((x) => x.cluster_id !== s.cluster_id));
+    setPeople(await api.listPeople());
+  }
+
+  /// "No — this is someone else": refuse the guess, then name this face.
+  ///
+  /// Only this face is named, as when naming from a photograph: its group was
+  /// just shown to be wrong about one person, so it is not trusted about the
+  /// next.
+  async function answerSomeoneElse(s: SuggestedFace, name: string) {
+    const who = name.trim();
+    if (!who) return;
+    await api.resolveSuggestion(s.cluster_id, false);
+    const r = await api.nameFaceInPhoto(s.face_id, who);
+    setQueue((q) => q.filter((x) => x.cluster_id !== s.cluster_id));
+    setOtherFor(null);
+    setOtherName("");
+    setStatus(
+      `Tagged as ${r.person.display_name}.` +
+        (r.suggested > 0 ? ` ${r.suggested} more possible to review for ${r.person.display_name}.` : ""),
+    );
     setPeople(await api.listPeople());
   }
 
@@ -452,6 +475,11 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
               <p className="drive-meta subtle">
                 Strongest matches first — stop whenever they start looking wrong.
               </p>
+              <datalist id="review-people">
+                {people.map((p) => (
+                  <option key={p.id} value={p.display_name} />
+                ))}
+              </datalist>
               <ul className="suggestion-list">
                 {queue.map((s) => (
                   <li key={s.cluster_id} className="suggestion">
@@ -479,6 +507,41 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
                     >
                       No
                     </button>
+                    {otherFor === s.cluster_id ? (
+                      <form
+                        className="someone-else"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void answerSomeoneElse(s, otherName);
+                        }}
+                      >
+                        <input
+                          autoFocus
+                          list="review-people"
+                          value={otherName}
+                          onChange={(e) => setOtherName(e.target.value)}
+                          placeholder="Who is it?"
+                          aria-label="Who is it?"
+                        />
+                        <button type="submit" disabled={!otherName.trim()}>
+                          Save
+                        </button>
+                        <button type="button" className="ghost" onClick={() => setOtherFor(null)}>
+                          Cancel
+                        </button>
+                      </form>
+                    ) : (
+                      <button
+                        className="ghost"
+                        onClick={() => {
+                          setOtherFor(s.cluster_id);
+                          setOtherName("");
+                        }}
+                        aria-label={`This is someone else, not ${reviewing.display_name}`}
+                      >
+                        Someone else…
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>

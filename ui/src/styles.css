@@ -507,7 +507,7 @@ h2 {
 
 /* A guess is asked as a question and never styled like a name. */
 .suggestion-list { list-style: none; margin: 12px 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.suggestion { display: flex; align-items: center; gap: 12px; padding: 8px; border: 1px dashed var(--line); border-radius: 10px; }
+.suggestion { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 8px; border: 1px dashed var(--line); border-radius: 10px; }
 .suggestion img { border-radius: 8px; object-fit: cover; }
 
 /* Subjects as chips. The count is what makes them worth clicking — it says
@@ -821,3 +821,5 @@ details.advanced h3 { margin: 20px 0 6px; }
 .viewer-form label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
 .viewer-form input { max-width: 420px; }
 .viewer-actions { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.someone-else { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.someone-else input { width: 200px; }

@@ -2744,3 +2744,6 @@ read in it.
 - The viewer shows the original, decoded exactly as the scan decoded it, when
   its drive is plugged in (`photo_view`), and the 512px preview otherwise. Face
   boxes are top-left-normalised in the same pixel space as both.
+- Follow-up: every suggestion under "Review N possible" also has **Someone
+  else…**. It refuses the guess and names that face as whoever is typed
+  (`name_face_in_photo`), again that face only.

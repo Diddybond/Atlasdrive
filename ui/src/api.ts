@@ -390,6 +390,13 @@ export function resetMockBackup(destination: string | null = null) {
   mockSettings = { ...mockSettings, backup_destination: destination, last_backup_at: null };
 }
 
+/// Put every mock face back to unnamed, so each test has faces to name. The
+/// people already named are kept: several tests build on one another's.
+export function resetMockFaces() {
+  for (const f of mockGallery) f.person_name = null;
+  for (const k of Object.keys(mockPhotoFaces)) delete mockPhotoFaces[k];
+}
+
 let mockExtraVolumes: string[] = [];
 export function setMockExtraVolumes(names: string[]) {
   mockExtraVolumes = names;
