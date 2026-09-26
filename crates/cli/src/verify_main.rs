@@ -47,7 +47,7 @@ fn main() -> ExitCode {
         }
     };
     let queue = db::open(&paths.queue_db(), db::SchemaKind::Queue).ok();
-    let key = keystore::default_keystore(paths.keys_dir()).get_or_create().ok();
+    let key = keystore::existing_key(paths.keys_dir()).ok().flatten();
 
     let mut config = Config::default();
     if !args.enforce_disk_floor {

@@ -2681,3 +2681,19 @@ read in it.
   an external drive is recognised.
 - Settings says so in one sentence. A backup beside the catalogue is called out,
   because one drive failure would take both.
+
+## D-098 — Never make a new face key over existing face data
+
+**Status:** settled. Supersedes the create-on-any-error behaviour of the keystore.
+
+- `KeyStore::get` returns `None` only when the store definitively has no key
+  (macOS `errSecItemNotFound`, or no key file). Any other failure, such as a
+  missing or locked login keychain or a refused prompt, is an error.
+- `keystore::master_key` creates a key only for a catalogue with no encrypted
+  face data. Otherwise it refuses and tells the user to restore the key from a
+  backup. Read-only paths (face pictures, verification, doctor, backup) use
+  `existing_key` and never create.
+- Found on the live Mac: the app met a keychain error and tried to store a
+  brand-new key. macOS then offered "Reset To Defaults", which would have wiped
+  the login keychain. Had the new key been stored, it would have orphaned
+  222,088 encrypted faces.

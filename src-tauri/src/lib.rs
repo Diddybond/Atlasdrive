@@ -323,9 +323,7 @@ async fn group_faces(state: State<'_, AppState>) -> Result<faces::GroupingReport
     let paths = state.paths.lock().unwrap().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let archive = open_archive(&paths)?;
-        let key = keystore::default_keystore(paths.keys_dir())
-            .get_or_create()
-            .map_err(map_err)?;
+        let key = keystore::master_key(paths.keys_dir(), &archive).map_err(map_err)?;
         let repo = faces::FaceRepo::new(&archive);
         let mut total = faces::GroupingReport::default();
         for drive in DriveRepo::new(&archive).list().map_err(map_err)? {
@@ -350,9 +348,9 @@ async fn face_thumbnail(state: State<'_, AppState>, face_id: String) -> Result<O
     let paths = state.paths.lock().unwrap().clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
         let archive = open_archive(&paths)?;
-        let key = keystore::default_keystore(paths.keys_dir())
-            .get_or_create()
-            .map_err(map_err)?;
+        let key = keystore::existing_key(paths.keys_dir())
+            .map_err(map_err)?
+            .ok_or_else(|| keystore::MISSING_KEY.to_string())?;
         let crop = faces::FaceRepo::new(&archive)
             .thumbnail(&face_id, &key)
             .map_err(map_err)?;
@@ -396,9 +394,7 @@ async fn tag_face(state: State<'_, AppState>, face_id: String, name: String) -> 
 
         // Immediately answer "who else is this?" rather than leaving the user to
         // find the same person's other groups by eye.
-        let key = keystore::default_keystore(paths.keys_dir())
-            .get_or_create()
-            .map_err(map_err)?;
+        let key = keystore::master_key(paths.keys_dir(), &archive).map_err(map_err)?;
         let (model_id, model_version) = face_model_partition(&archive);
         let suggested = repo
             .suggest_for_person(
@@ -1047,9 +1043,7 @@ fn start_index(
         let result = (|| -> Result<(), String> {
             let archive = open_archive(&paths)?;
             let queue = open_queue(&paths)?;
-            let key = keystore::default_keystore(paths.keys_dir())
-                .get_or_create()
-                .map_err(map_err)?;
+            let key = keystore::master_key(paths.keys_dir(), &archive).map_err(map_err)?;
             let pipeline = Pipeline {
                 archive: &archive,
                 queue: &queue,
@@ -1185,7 +1179,7 @@ fn verify_catalogue(paths: &AppPaths) -> Result<Vec<Check>, String> {
     let paths = paths.clone();
     let archive = open_archive(&paths)?;
     let queue = open_queue(&paths)?;
-    let key = keystore::default_keystore(paths.keys_dir()).get_or_create().ok();
+    let key = keystore::existing_key(paths.keys_dir()).ok().flatten();
     let config = Config { free_space_floor_bytes: 0, ..Default::default() };
     let ctx = verifier::VerifyContext {
         archive: &archive,
@@ -1445,7 +1439,7 @@ fn doctor_report(paths: AppPaths) -> Result<std::collections::BTreeMap<String, S
     let mut out = std::collections::BTreeMap::new();
     let ks = keystore::default_keystore(paths.keys_dir());
     out.insert("keystore".into(), ks.backend_name().into());
-    out.insert("key".into(), if ks.get_or_create().is_ok() { "available".into() } else { "error".into() });
+    out.insert("key".into(), match ks.get() { Ok(Some(_)) => "available".into(), Ok(None) => "missing".into(), Err(_) => "error".into() });
     let archive = open_archive(&paths)?;
     out.insert(
         "archive_integrity".into(),

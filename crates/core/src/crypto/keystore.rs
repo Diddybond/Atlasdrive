@@ -21,8 +21,22 @@ const ACCOUNT: &str = "master-v1";
 
 /// Anything that can persist and retrieve the wrapped master key.
 pub trait KeyStore {
+    /// The stored key. `Ok(None)` only when the store answers, definitely, that
+    /// there is no key; any other failure (a locked or missing keychain, a
+    /// refused prompt) is an error, never a reason to make a new key.
+    fn get(&self) -> Result<Option<MasterKey>>;
+    /// Generate and persist a new key.
+    fn create(&self) -> Result<MasterKey>;
     /// Return the existing master key, or generate+persist a new one.
-    fn get_or_create(&self) -> Result<MasterKey>;
+    ///
+    /// Only safe when nothing has been encrypted yet; the application goes
+    /// through [`master_key`], which checks.
+    fn get_or_create(&self) -> Result<MasterKey> {
+        match self.get()? {
+            Some(k) => Ok(k),
+            None => self.create(),
+        }
+    }
     /// Overwrite the stored key with `key`.
     ///
     /// Only restore uses this. Face embeddings and face crops are encrypted
@@ -46,6 +60,40 @@ pub fn default_keystore(keys_dir: std::path::PathBuf) -> Box<dyn KeyStore> {
     }
 }
 
+/// What a missing key means for a catalogue that already holds face data.
+pub const MISSING_KEY: &str = "The key that protects face data is not in this Mac's Keychain. \
+AtlasDrive will not make a new one, because that would lock the existing faces away for good. \
+Restore the key from a backup in Settings.";
+
+/// The master key for this catalogue.
+///
+/// A new key is made only for a catalogue with nothing encrypted in it. If
+/// face data already exists and the key cannot be found, making a fresh key
+/// would silently orphan every face crop and embedding, so it is an error.
+pub fn master_key(keys_dir: std::path::PathBuf, conn: &rusqlite::Connection) -> Result<MasterKey> {
+    let store = default_keystore(keys_dir);
+    if let Some(k) = store.get()? {
+        return Ok(k);
+    }
+    if holds_encrypted_data(conn)? {
+        return Err(Error::Encryption(MISSING_KEY.into()));
+    }
+    store.create()
+}
+
+/// The stored key if there is one; never creates.
+pub fn existing_key(keys_dir: std::path::PathBuf) -> Result<Option<MasterKey>> {
+    default_keystore(keys_dir).get()
+}
+
+fn holds_encrypted_data(conn: &rusqlite::Connection) -> Result<bool> {
+    let any = |table: &str| -> Result<bool> {
+        Ok(conn
+            .query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| r.get::<_, bool>(0))?)
+    };
+    Ok(any("face_embeddings")? || any("face_thumbnails")?)
+}
+
 fn decode_key(bytes: &[u8]) -> Result<MasterKey> {
     if bytes.len() != 32 {
         return Err(Error::Encryption("stored key is not 32 bytes".into()));
@@ -64,17 +112,20 @@ pub struct KeychainKeyStore;
 
 #[cfg(target_os = "macos")]
 impl KeyStore for KeychainKeyStore {
-    fn get_or_create(&self) -> Result<MasterKey> {
-        use security_framework::passwords::{get_generic_password, set_generic_password};
+    fn get(&self) -> Result<Option<MasterKey>> {
+        use security_framework::passwords::get_generic_password;
+        // errSecItemNotFound: the keychain answered and has no such item.
+        const ITEM_NOT_FOUND: i32 = -25300;
         match get_generic_password(SERVICE, ACCOUNT) {
-            Ok(bytes) => decode_key(&bytes),
-            Err(_) => {
-                let key = MasterKey::generate(1);
-                set_generic_password(SERVICE, ACCOUNT, key.as_bytes())
-                    .map_err(|e| Error::Encryption(format!("keychain store: {e}")))?;
-                Ok(key)
-            }
+            Ok(bytes) => decode_key(&bytes).map(Some),
+            Err(e) if e.code() == ITEM_NOT_FOUND => Ok(None),
+            Err(e) => Err(Error::Encryption(format!("keychain read: {e}"))),
         }
+    }
+    fn create(&self) -> Result<MasterKey> {
+        let key = MasterKey::generate(1);
+        self.put(&key)?;
+        Ok(key)
     }
     fn put(&self, key: &MasterKey) -> Result<()> {
         use security_framework::passwords::set_generic_password;
@@ -103,25 +154,17 @@ pub struct FileKeyStore {
 }
 
 impl KeyStore for FileKeyStore {
-    fn get_or_create(&self) -> Result<MasterKey> {
-        use std::io::Write;
-        std::fs::create_dir_all(&self.keys_dir)?;
+    fn get(&self) -> Result<Option<MasterKey>> {
         let path = self.keys_dir.join("master.key");
-        if path.exists() {
-            let bytes = std::fs::read(&path)?;
-            return decode_key(&bytes);
+        match std::fs::read(&path) {
+            Ok(bytes) => decode_key(&bytes).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
         }
+    }
+    fn create(&self) -> Result<MasterKey> {
         let key = MasterKey::generate(1);
-        let mut f = std::fs::File::create(&path)?;
-        f.write_all(key.as_bytes())?;
-        f.sync_all()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&path)?.permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(&path, perms)?;
-        }
+        self.put(&key)?;
         Ok(key)
     }
     fn put(&self, key: &MasterKey) -> Result<()> {
@@ -177,6 +220,46 @@ mod tests {
         ks.put(&replacement).unwrap();
 
         assert_eq!(ks.get_or_create().unwrap().as_bytes(), replacement.as_bytes());
+    }
+
+    /// A catalogue that already holds face data never gets a fresh key: that
+    /// would make every existing crop and embedding unreadable.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_missing_key_is_not_replaced_once_faces_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE face_embeddings (x); CREATE TABLE face_thumbnails (x);",
+        )
+        .unwrap();
+
+        // Empty catalogue: a key is made, and the same one comes back.
+        let first = master_key(keys.clone(), &conn).unwrap();
+        assert_eq!(master_key(keys.clone(), &conn).unwrap().as_bytes(), first.as_bytes());
+
+        // Face data exists and the key goes missing: refuse, and make nothing.
+        conn.execute("INSERT INTO face_embeddings VALUES (1)", []).unwrap();
+        std::fs::remove_file(keys.join("master.key")).unwrap();
+        let err = match master_key(keys.clone(), &conn) {
+            Ok(_) => panic!("made a new key over existing face data"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("will not make a new one"), "{err}");
+        assert!(!keys.join("master.key").exists());
+    }
+
+    /// An unreadable key is an error, not "no key".
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_key_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        std::fs::create_dir_all(keys.join("master.key")).unwrap(); // a directory: read fails
+        let ks = FileKeyStore { keys_dir: keys };
+        assert!(ks.get().is_err());
+        assert!(ks.get_or_create().is_err());
     }
 
     /// The key file must not be world-readable.

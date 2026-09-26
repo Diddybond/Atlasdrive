@@ -204,8 +204,7 @@ pub fn create(
     // The key, unless declined.
     let mut key_included = false;
     if options.include_key {
-        let store = crate::crypto::keystore::default_keystore(paths.keys_dir());
-        if let Ok(key) = store.get_or_create() {
+        if let Ok(Some(key)) = crate::crypto::keystore::existing_key(paths.keys_dir()) {
             let hex: String = key.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
             let key_path = bundle.join(KEY_FILE);
             let mut f = std::fs::File::create(&key_path)?;

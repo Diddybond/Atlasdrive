@@ -725,7 +725,7 @@ fn index_cmd(ctx: &Ctx, args: IndexArgs) -> Result<()> {
 
     let archive = ctx.open_archive()?;
     let queue = ctx.open_queue()?;
-    let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create()?;
+    let key = keystore::master_key(ctx.paths.keys_dir(), &archive)?;
 
     let mut config = ctx.config.clone();
     config.free_space_floor_bytes = Config::parse_size(&args.free_space_floor)?;
@@ -867,7 +867,7 @@ fn search_cmd(ctx: &Ctx, args: SearchArgs) -> Result<()> {
 fn verify_cmd(ctx: &Ctx, args: VerifyArgs) -> Result<()> {
     let archive = ctx.open_archive()?;
     let queue = ctx.open_queue()?;
-    let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create().ok();
+    let key = keystore::existing_key(ctx.paths.keys_dir()).ok().flatten();
 
     let mut config = ctx.config.clone();
     if !args.full {
@@ -946,7 +946,7 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
             Ok(())
         }
         FaceAction::Group { drive } => {
-            let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create()?;
+            let key = keystore::master_key(ctx.paths.keys_dir(), &archive)?;
             let drives = DriveRepo::new(&archive).list()?;
             for d in drives.iter().filter(|d| drive.is_none_or(|n| n == d.drive_number)) {
                 let r = repo.group_ungrouped(Some(&d.id), &key)?;
@@ -963,7 +963,7 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
             Ok(())
         }
         FaceAction::Rebuild { threshold } => {
-            let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create()?;
+            let key = keystore::master_key(ctx.paths.keys_dir(), &archive)?;
             // Cluster the partition the faces were actually written under, and
             // use the threshold that suits that model's embedding space.
             let (model_id, model_version): (String, String) = archive
@@ -995,7 +995,7 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
         }
         FaceAction::BackfillThumbnails { limit } => {
             let queue = ctx.open_queue()?;
-            let key = keystore::default_keystore(ctx.paths.keys_dir()).get_or_create()?;
+            let key = keystore::master_key(ctx.paths.keys_dir(), &archive)?;
             let pipeline = build_pipeline(ctx, &archive, &queue, &key);
             let (done, skipped) = pipeline.backfill_face_thumbnails(limit)?;
             println!("Generated {done} face picture(s); {skipped} skipped.");
@@ -1485,8 +1485,9 @@ fn doctor_cmd(ctx: &Ctx) -> Result<()> {
     println!("  data root: {}", ctx.paths.root.display());
     let ks = keystore::default_keystore(ctx.paths.keys_dir());
     println!("  keystore:  {}", ks.backend_name());
-    match ks.get_or_create() {
-        Ok(_) => println!("  key:       available"),
+    match ks.get() {
+        Ok(Some(_)) => println!("  key:       available"),
+        Ok(None) => println!("  key:       missing"),
         Err(e) => println!("  key:       ERROR {e}"),
     }
     // What the last scan is doing, in the same words the app uses. A run that
