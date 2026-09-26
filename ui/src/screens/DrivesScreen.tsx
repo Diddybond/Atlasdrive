@@ -139,7 +139,12 @@ export function DrivesScreen() {
 
   useEffect(() => {
     void refreshScanState();
-    const t = window.setInterval(() => void refreshScanState(), 3000);
+    // Drives are plugged in and out while this screen is open; the picker has
+    // to follow, or a drive plugged in afterwards can never be chosen.
+    const t = window.setInterval(() => {
+      void refreshScanState();
+      void api.connectedVolumes().then(setVolumes, () => undefined);
+    }, 3000);
     return () => window.clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -215,6 +220,7 @@ export function DrivesScreen() {
             Which drive?
             <select
               value={volumes.some((v) => v.path === path) ? path : ""}
+              onFocus={() => void api.connectedVolumes().then(setVolumes, () => undefined)}
               onChange={(e) => void pickVolume(e.target.value)}
             >
               <option value="">Choose a connected drive…</option>

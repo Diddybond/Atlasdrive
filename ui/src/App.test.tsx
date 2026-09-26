@@ -1,4 +1,4 @@
-import { resetMockBackup, setMockCoverage, setMockFaceThumbError, setMockScanError, setMockScanning, setMockStopping } from "./api";
+import { resetMockBackup, setMockCoverage, setMockExtraVolumes, setMockFaceThumbError, setMockScanError, setMockScanning, setMockStopping } from "./api";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { App } from "./App";
 
@@ -271,6 +271,24 @@ describe("AtlasDrive UI", () => {
     await waitFor(() => {
       expect(screen.getByText("Taken on 1998-08-12")).toBeDefined();
     });
+  });
+
+  it("offers a drive plugged in after the Drives screen was opened", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Register a drive" }));
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: "Late 25 B" })).toBeDefined();
+    });
+    expect(screen.queryByRole("option", { name: "BU A" })).toBeNull();
+    setMockExtraVolumes(["BU A"]);
+    await waitFor(
+      () => {
+        expect(screen.getByRole("option", { name: "BU A" })).toBeDefined();
+      },
+      { timeout: 5000 },
+    );
+    setMockExtraVolumes([]);
   });
 
   it("says why face pictures are missing instead of showing blank faces", async () => {

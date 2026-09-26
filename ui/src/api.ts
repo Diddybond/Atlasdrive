@@ -377,6 +377,11 @@ export function resetMockBackup(destination: string | null = null) {
   mockSettings = { ...mockSettings, backup_destination: destination, last_backup_at: null };
 }
 
+let mockExtraVolumes: string[] = [];
+export function setMockExtraVolumes(names: string[]) {
+  mockExtraVolumes = names;
+}
+
 let mockFaceThumbError: string | null = null;
 export function setMockFaceThumbError(msg: string | null) {
   mockFaceThumbError = msg;
@@ -949,6 +954,9 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         { name: "Late 25 B", path: "/Volumes/Late 25 B", is_startup_disk: false, registered_as: null, is_read_only: false },
         { name: "New Volume", path: "/Volumes/New Volume", is_startup_disk: false, registered_as: null, is_read_only: true },
         { name: "Macintosh HD", path: "/Volumes/Macintosh HD", is_startup_disk: true, registered_as: null, is_read_only: false },
+        ...mockExtraVolumes.map((name) => ({
+          name, path: `/Volumes/${name}`, is_startup_disk: false, registered_as: null, is_read_only: false,
+        })),
       ] as unknown as T);
     case "likely_photo_folders":
       return Promise.resolve(

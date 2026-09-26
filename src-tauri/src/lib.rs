@@ -1502,11 +1502,15 @@ async fn connected_volumes(
     state: State<'_, AppState>,
 ) -> Result<Vec<family_archive_core::volumes::Volume>, String> {
     let paths = state.paths.lock().unwrap().clone();
+    let reader = state.reader.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<family_archive_core::volumes::Volume>, String> {
         // The catalogue is only needed to say which volumes are already registered;
-        // the picker must still work before one exists.
-        let archive = open_archive(&paths).ok();
-        family_archive_core::volumes::connected(archive.as_ref()).map_err(map_err)
+        // the picker must still work before one exists. Asked every few seconds
+        // while Drives is open, so it uses the shared connection.
+        with_reader(&reader, &paths, |archive| {
+            family_archive_core::volumes::connected(Some(archive)).map_err(map_err)
+        })
+        .or_else(|_| family_archive_core::volumes::connected(None).map_err(map_err))
     })
     .await
     .map_err(|e| e.to_string())?
