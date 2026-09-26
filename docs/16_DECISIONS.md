@@ -2810,3 +2810,12 @@ read in it.
   the whole photograph in the viewer.
 - Needs identity-model embeddings: with fewer than four, the panel says it
   becomes available once the upgrade has finished.
+
+## D-104 — Name lists are alphabetical
+
+**Status:** settled. Clients, named events, named people (and the name
+suggestions when tagging) and subject chips are shown A–Z. Sorting ignores
+case and accents and compares numbers as numbers (`byName`, `Intl.Collator`).
+Which subjects are offered is still decided by usefulness (D-091). Drives stay
+in drive-number order, and faces to name stay biggest group first, because
+those orders carry meaning.
