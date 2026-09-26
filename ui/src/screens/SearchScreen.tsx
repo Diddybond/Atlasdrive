@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { api, Drive, DriveMatch, SearchResult, subjectLabel, TagCount } from "../api";
+import { api, Drive, DriveMatch, PlaceCount, SearchResult, subjectLabel, TagCount } from "../api";
 import type { SearchContext } from "../App";
 import { NeedsYou, Place } from "./NeedsYou";
 import { PhotoViewer } from "./PhotoViewer";
+import { OnThisDay } from "./OnThisDay";
 
 export function SearchScreen({
   context,
@@ -32,6 +33,11 @@ export function SearchScreen({
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   // The photograph open in the viewer, where its faces can be named.
   const [viewing, setViewing] = useState<SearchResult | null>(null);
+  // Places photographs were taken, from their GPS (D-106).
+  const [places, setPlaces] = useState<PlaceCount[]>([]);
+  useEffect(() => {
+    void api.topPlaces(24).then(setPlaces, () => undefined);
+  }, []);
   const [tags, setTags] = useState<TagCount[]>([]);
   const [allSubjects, setAllSubjects] = useState(false);
   // Bumped on every search, so thumbnails from an abandoned one are dropped.
@@ -76,7 +82,7 @@ export function SearchScreen({
       void search("", []);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context?.eventId, context?.client]);
+  }, [context?.eventId, context?.client, context?.year]);
   useEffect(() => {
     if (asked) void search(asked.query);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -173,6 +179,7 @@ export function SearchScreen({
         tags: picked ?? pickedTags,
         eventId: context?.eventId,
         client: context?.client,
+        year: context?.year,
       });
       setResults(r.results);
       setUnderstood(r.understood);
@@ -272,6 +279,40 @@ export function SearchScreen({
             ))}
           </select>
         </label>
+      )}
+
+      {!searched && !context && <OnThisDay onOpen={setViewing} />}
+
+      {places.length > 0 && (
+        <div className="subjects places">
+          <h2>Or pick a place</h2>
+          <ul className="tag-cloud">
+            {places.map((p) => {
+              const on = pickedTags.includes(p.name);
+              return (
+                <li key={p.name}>
+                  <button
+                    className={on ? "tag-chip selected" : "tag-chip"}
+                    aria-pressed={on}
+                    onClick={() => {
+                      const next = on ? pickedTags.filter((x) => x !== p.name) : [...pickedTags, p.name];
+                      setPickedTags(next);
+                      void search(query, next);
+                    }}
+                    aria-label={
+                      on
+                        ? `Stop narrowing to ${p.name}`
+                        : `Narrow to the ${p.photographs} photographs taken in ${p.name}`
+                    }
+                  >
+                    {p.name}
+                    <span className="tag-count">{p.photographs.toLocaleString()}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
 
       {tags.length > 0 && (

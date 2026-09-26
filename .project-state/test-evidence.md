@@ -477,3 +477,4 @@ Find (home and results), Drives, People, Events, Settings.
 - D-101: core tests incl. naming_one_face_leaves_its_group_alone; UI 101 passed (photo viewer test); clippy clean.
 - D-102: core 399 passed (1 ignored) + real-face end-to-end test passing with ATLASDRIVE_FACE_TEST_PHOTO; UI 103 passed; workspace + src-tauri clippy clean.
 - D-103: core checking_a_person_finds_the_stranger_among_them; UI 104 passed; clippy clean.
+- D-106/D-107: core 406 passed (places, years, on-this-day tests); UI 108 passed; clippy clean.

@@ -796,6 +796,42 @@ describe("Searching within an event", () => {
   });
 });
 
+describe("Places, years and this day", () => {
+  it("offers places A to Z as chips", async () => {
+    render(<App />);
+    const chips = await screen.findAllByRole("button", { name: /photographs taken in/ });
+    expect(chips.map((c) => c.textContent?.replace(/[\d,]+$/, ""))).toEqual([
+      "Cornwall",
+      "England",
+      "Manchester",
+      "United Kingdom",
+    ]);
+    fireEvent.click(chips[0]);
+    expect(await screen.findByRole("button", { name: "Stop narrowing to Cornwall" })).toBeDefined();
+  });
+
+  it("shows which drives hold each year, and opens a year's photographs", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "Years" }));
+    expect(await screen.findByText("5,120 photographs")).toBeDefined();
+    expect(screen.getByText("Undated")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Show the photographs from 2014" }));
+    const scope = await screen.findByRole("status", { name: "Search scope" });
+    expect(scope.textContent).toContain("photographs from 2014");
+    expect(await screen.findByText("old_scan.jpg")).toBeDefined();
+  });
+
+  it("shows photographs from this day in earlier years", async () => {
+    render(<App />);
+    const ago = new Date().getFullYear() - 2019;
+    expect(await screen.findByText(`2019 · ${ago} years ago`)).toBeDefined();
+    expect(screen.getByText(/Mark people as family on People/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: /Open beach_1998\.jpg from 2019, on Drive 14/ }));
+    expect(await screen.findByRole("dialog")).toBeDefined();
+  });
+});
+
 describe("More like this", () => {
   it("finds visually similar photographs and says that is what it did", async () => {
     render(<App />);

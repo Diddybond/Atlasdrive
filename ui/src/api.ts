@@ -351,6 +351,22 @@ export interface FailureReason {
   example: string | null;
 }
 
+export interface PlaceCount {
+  name: string;
+  photographs: number;
+}
+
+export interface YearRow {
+  year: number | null;
+  photographs: number;
+  drives: { drive_number: number; drive_name?: string | null; photographs: number }[];
+}
+
+export interface OnThisDay {
+  family_only: boolean;
+  memories: { year: number; result: SearchResult }[];
+}
+
 export interface DoubtfulFace {
   face_id: string;
   file_id: string;
@@ -500,8 +516,14 @@ export const api = {
       eventId?: string;
       client?: string;
       tags?: string[];
+      year?: number;
     },
   ) => call<SearchResponse>("search_catalogue", { query, ...opts }),
+  topPlaces: (limit?: number) =>
+    call<PlaceCount[]>("top_places", { limit }).then((ps) => ps.sort((a, b) => byName(a.name, b.name))),
+  yearsOverview: () => call<YearRow[]>("years_overview"),
+  onThisDay: (monthDay: string, thisYear: number) =>
+    call<OnThisDay>("on_this_day", { monthDay, thisYear }),
   // Starts a background run and returns immediately; poll getProgress().
   startIndex: (input: { drive: number; path: string; dryRun: boolean; resume: boolean }) =>
     call<void>("start_index", input),
@@ -719,7 +741,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     case "search_catalogue": {
       // Honour the event/client scope, or a test asserting that scoping works
       // would pass against a mock that ignores it.
-      if (args?.eventId || args?.client) {
+      if (args?.eventId || args?.client || args?.year) {
         // No words: every photograph of the shoot or client, as the backend's
         // browse returns. With words: just the matches within it.
         const all = String(args?.query ?? "").trim() === "";
@@ -914,6 +936,27 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
       person.confirmed_faces += face ? face.group_size : 1;
       return Promise.resolve({ person, suggested: 2 } as unknown as T);
     }
+    case "top_places":
+      return Promise.resolve([
+        { name: "United Kingdom", photographs: 3120 },
+        { name: "England", photographs: 3050 },
+        { name: "Cornwall", photographs: 412 },
+        { name: "Manchester", photographs: 1890 },
+      ] as unknown as T);
+    case "years_overview":
+      return Promise.resolve([
+        { year: 2014, photographs: 5120, drives: [{ drive_number: 14, drive_name: "AtlasDrive A", photographs: 4213 }, { drive_number: 7, drive_name: "Holidays 2004-2011", photographs: 907 }] },
+        { year: 1998, photographs: 1, drives: [{ drive_number: 14, drive_name: "AtlasDrive A", photographs: 1 }] },
+        { year: null, photographs: 88, drives: [{ drive_number: 22, drive_name: "Scanned prints", photographs: 88 }] },
+      ] as unknown as T);
+    case "on_this_day":
+      return Promise.resolve({
+        family_only: false,
+        memories: [
+          { year: 2019, result: mockResults[0] },
+          { year: 2016, result: mockResults[1] },
+        ],
+      } as unknown as T);
     case "check_person": {
       const id = String(args?.personId ?? "");
       mockDoubtful[id] ??= [

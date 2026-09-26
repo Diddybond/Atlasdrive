@@ -4,6 +4,7 @@ import { DrivesScreen } from "./screens/DrivesScreen";
 import { ScanScreen } from "./screens/ScanScreen";
 import { ReviewScreen } from "./screens/ReviewScreen";
 import { EventsScreen } from "./screens/EventsScreen";
+import { YearsScreen } from "./screens/YearsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { runningInTauri } from "./api";
 
@@ -24,12 +25,13 @@ const NAV: { id: Section; label: string; hint: string }[] = [
 export interface SearchContext {
   eventId?: string;
   client?: string;
+  year?: number;
   label: string;
 }
 
 export function App() {
   const [section, setSection] = useState<Section>("search");
-  const [drivesTab, setDrivesTab] = useState<"drives" | "scan">("drives");
+  const [drivesTab, setDrivesTab] = useState<"drives" | "scan" | "years">("drives");
   const [context, setContext] = useState<SearchContext | null>(null);
   // A search asked for from another screen ("Find their photographs"). The
   // counter makes asking twice for the same name run it twice.
@@ -110,8 +112,22 @@ export function App() {
               >
                 Scan activity
               </button>
+              <button
+                role="tab"
+                aria-selected={drivesTab === "years"}
+                className={drivesTab === "years" ? "tab active" : "tab"}
+                onClick={() => setDrivesTab("years")}
+              >
+                Years
+              </button>
             </div>
-            {drivesTab === "drives" ? <DrivesScreen /> : <ScanScreen />}
+            {drivesTab === "drives" ? (
+              <DrivesScreen />
+            ) : drivesTab === "scan" ? (
+              <ScanScreen />
+            ) : (
+              <YearsScreen onSearchWithin={searchWithin} />
+            )}
           </>
         )}
         {section === "review" && <ReviewScreen onFind={findFor} />}

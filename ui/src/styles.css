@@ -831,3 +831,19 @@ details.advanced h3 { margin: 20px 0 6px; }
 .upgrade-card .bar { margin: 10px 0; }
 .face-open { padding: 0; border: 0; background: none; cursor: zoom-in; border-radius: 8px; line-height: 0; }
 .face-open:focus-visible { outline: 3px solid var(--focus); }
+
+/* Places, years, on this day (D-106, D-107). */
+.places { margin-top: 12px; }
+.years-list { list-style: none; padding: 0; margin: 16px 0 0; display: flex; flex-direction: column; gap: 8px; }
+.year-row { display: grid; grid-template-columns: 120px 170px 1fr auto; align-items: center; gap: 14px; padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.year-label { font-size: 1.35rem; font-weight: 700; }
+.year-count { color: var(--ink-soft); }
+.year-drives { display: flex; flex-wrap: wrap; gap: 6px; }
+.badge-count { font-weight: 400; opacity: 0.8; }
+.on-this-day .otd-year { margin-top: 10px; }
+.otd-label { font-weight: 600; margin: 0 0 6px; }
+.otd-strip { list-style: none; padding: 0; margin: 0; display: flex; gap: 10px; overflow-x: auto; }
+.otd-photo { position: relative; padding: 0; border: 0; background: var(--panel-sunken); border-radius: 10px; overflow: hidden; width: 150px; height: 112px; cursor: zoom-in; display: grid; place-items: center; }
+.otd-photo img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.otd-drive { position: absolute; left: 6px; bottom: 6px; font-size: 11px; font-weight: 700; background: var(--accent); color: var(--accent-ink); padding: 1px 6px; border-radius: 6px; }
+.otd-years { display: flex; flex-wrap: wrap; gap: 8px 28px; }

@@ -143,7 +143,7 @@ pub fn drive_contents(conn: &Connection, drive_number: Option<i64>) -> Result<Ve
                FROM file_tags ft
                JOIN tags t ON t.id = ft.tag_id
                JOIN files f ON f.id = ft.file_id
-              WHERE f.drive_id = ?1 AND f.status='complete' AND t.tag_type <> 'person'
+              WHERE f.drive_id = ?1 AND f.status='complete' AND t.tag_type NOT IN ('person', 'place')
               GROUP BY t.name
               ORDER BY n DESC, t.name ASC
               LIMIT ?2",
@@ -226,7 +226,7 @@ pub fn tags_on_drive(
              JOIN tags t  ON t.id = ft.tag_id
              JOIN files f ON f.id = ft.file_id
              JOIN drives d ON d.id = f.drive_id
-            WHERE f.status = 'complete' AND t.tag_type <> 'person'{}
+            WHERE f.status = 'complete' AND t.tag_type NOT IN ('person', 'place'){}
             GROUP BY t.name
             -- A name read in fewer than {min} photographs is more likely an
             -- OCR misreading than a name (pipparts, lomp); it stays
@@ -1106,7 +1106,7 @@ pub fn scan_stats(conn: &Connection, drive_number: i64, recent_limit: usize) -> 
                     -- What the picture shows before text read in it: a
                     -- misread name is 0.9 confident and would win otherwise.
                     (SELECT t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-                      WHERE ft.file_id = f.id AND t.tag_type <> 'person'
+                      WHERE ft.file_id = f.id AND t.tag_type NOT IN ('person', 'place')
                       ORDER BY (ft.source = 'name'), ft.confidence DESC LIMIT 1)
                FROM files f
               WHERE f.drive_id = ?1 AND f.status = 'complete'
@@ -1796,5 +1796,131 @@ mod unreadable_tests {
         // Without the queue, nothing is assumed.
         let bare = drive_coverage(&archive).unwrap();
         assert_eq!(bare.iter().find(|c| c.drive_number == 5).unwrap().outstanding, 6);
+    }
+}
+
+/// One drive's share of a year.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct YearDrive {
+    pub drive_number: i64,
+    pub drive_name: Option<String>,
+    pub photographs: i64,
+}
+
+/// A year of the archive and where its photographs are (D-107).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct YearRow {
+    /// `None` for photographs whose year is not known.
+    pub year: Option<i32>,
+    /// Photographs taken that year; a photograph on two drives counts once.
+    pub photographs: i64,
+    /// The drives holding them, most first.
+    pub drives: Vec<YearDrive>,
+}
+
+/// Every year in the archive, newest first, with the drives that hold it —
+/// "which drive is 2016 on?" answered at a glance. Undated photographs come
+/// last.
+pub fn years(conn: &Connection) -> Result<Vec<YearRow>> {
+    use crate::search::YEAR_SQL;
+    let mut rows: std::collections::BTreeMap<Option<i32>, YearRow> = Default::default();
+    let mut totals = conn.prepare(&format!(
+        "SELECT {YEAR_SQL} AS y, count(DISTINCT coalesce(f.content_hash, f.id))
+           FROM files f WHERE f.status = 'complete' GROUP BY y"
+    ))?;
+    for row in totals.query_map([], |r| Ok((r.get::<_, Option<i32>>(0)?, r.get::<_, i64>(1)?)))? {
+        let (year, photographs) = row?;
+        rows.insert(year, YearRow { year, photographs, drives: Vec::new() });
+    }
+    let mut per_drive = conn.prepare(&format!(
+        "SELECT {YEAR_SQL} AS y, d.drive_number, d.friendly_name, count(*)
+           FROM files f JOIN drives d ON d.id = f.drive_id
+          WHERE f.status = 'complete'
+          GROUP BY y, d.drive_number
+          ORDER BY count(*) DESC"
+    ))?;
+    for row in per_drive.query_map([], |r| {
+        Ok((
+            r.get::<_, Option<i32>>(0)?,
+            YearDrive { drive_number: r.get(1)?, drive_name: r.get(2)?, photographs: r.get(3)? },
+        ))
+    })? {
+        let (year, drive) = row?;
+        if let Some(y) = rows.get_mut(&year) {
+            y.drives.push(drive);
+        }
+    }
+    let mut out: Vec<YearRow> = rows.into_values().collect();
+    // Newest first; undated (None sorts first in a BTreeMap) goes last.
+    out.sort_by(|a, b| match (a.year, b.year) {
+        (Some(x), Some(y)) => y.cmp(&x),
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    Ok(out)
+}
+
+#[cfg(test)]
+mod year_tests {
+    use super::*;
+    use crate::search::{SearchFilters, SearchRepo};
+
+    fn catalogue() -> Connection {
+        let conn = crate::db::open_in_memory(crate::db::SchemaKind::Archive).unwrap();
+        conn.execute_batch(
+            "INSERT INTO drives (id, drive_number, friendly_name, status, first_seen_at)
+               VALUES ('d1',1,'Late 25 A','online','now'), ('d9',9,NULL,'offline','now');
+             INSERT INTO roots (id, drive_id, relative_root, created_at)
+               VALUES ('r1','d1','','now'), ('r9','d9','','now');",
+        )
+        .unwrap();
+        let file = |id: &str, drive: &str, root: &str, hash: &str| {
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, content_hash, status, created_at, updated_at)
+                 VALUES (?1,?2,?3,?1,?1,1,1,?4,'complete','now','now')",
+                params![id, drive, root, hash],
+            )
+            .unwrap();
+        };
+        file("a", "d1", "r1", "h-a");
+        file("b", "d1", "r1", "h-b");
+        file("a2", "d9", "r9", "h-a"); // a copy of a on drive 9
+        file("c", "d9", "r9", "h-c");
+        file("u", "d9", "r9", "h-u");
+        file("junk", "d9", "r9", "h-j");
+        conn.execute_batch(
+            "INSERT INTO metadata (file_id, exif_capture_date) VALUES
+               ('a','2014-06-21'), ('a2','2014-06-21'), ('b','2014-12-01'), ('junk','2088-01-01');
+             INSERT INTO date_estimates (file_id, earliest_date, latest_date, confidence, method_version,
+                                         evidence_json, is_user_confirmed, created_at, updated_at)
+               VALUES ('c','2016-01-01','2016-12-31',0.5,'v','[]',0,'now','now'),
+                      ('u','1990-01-01','1999-12-31',0.2,'v','[]',0,'now','now'),
+                      ('b','2015-03-01','2015-03-01',1.0,'v','[]',1,'now','now');",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn each_year_says_which_drives_hold_it() {
+        let conn = catalogue();
+        let ys = years(&conn).unwrap();
+        let summary: Vec<(Option<i32>, i64)> = ys.iter().map(|y| (y.year, y.photographs)).collect();
+        // b's corrected date (2015) beats its camera date; the copy of a counts
+        // once; a decade-wide guess and the year 2088 are "unknown".
+        assert_eq!(summary, [(Some(2016), 1), (Some(2015), 1), (Some(2014), 1), (None, 2)]);
+        let y2014 = &ys[2];
+        let drives: Vec<i64> = y2014.drives.iter().map(|d| d.drive_number).collect();
+        assert_eq!(drives.len(), 2);
+        assert!(drives.contains(&1) && drives.contains(&9));
+
+        // Browsing a year returns exactly its photographs.
+        let repo = SearchRepo::new(&conn);
+        let f = SearchFilters { year: Some(2014), ..Default::default() };
+        let mut ids: Vec<String> = repo.browse_by_tags(&f).unwrap().into_iter().map(|r| r.file_id).collect();
+        ids.sort();
+        assert_eq!(ids, ["a", "a2"]);
     }
 }

@@ -2829,3 +2829,38 @@ make an empty search a browse (`SearchFilters::is_browse`). The catalogue
 lists every photograph in it, newest first, with an exact count. Earlier
 search words and subjects are cleared on arrival, so nothing narrows it by
 accident. Typing words afterwards searches within the shoot as before.
+
+## D-106 — Photographs are searchable by the place they were taken
+
+**Status:** settled.
+
+- A photograph's GPS position (already kept in its stored EXIF) is turned into
+  place names offline. The nearest of GeoNames' 144,563 places with at least
+  1,000 people gives the town, county, region and country (`places`). Farther
+  than 30 km from any town gives no place: a wrong town is worse than none.
+  A 0,0 position (no fix) is ignored.
+- Names are stored as `place` tags, so typing "Cornwall" finds them through
+  the search text, and chips under **Or pick a place** browse them exactly.
+  Place tags are kept out of the Subjects list and drive summaries.
+- Existing photographs are placed in a background pass at app start
+  (`places::backfill`: idempotent, needs no drive). New scans place each
+  photograph as it is committed. CLI: `atlasdrive places`.
+- The data (2.1 MB gzipped) is bundled in the binary; attribution is in
+  `crates/core/data/README.md` (CC BY 4.0).
+
+## D-107 — Years at a glance, and On this day
+
+**Status:** settled.
+
+- **Year of a photograph** (`search::YEAR_SQL`): in order of preference, a
+  date the owner corrected, the camera's date, or an estimate narrow enough to
+  name one year. Years outside 1850–now (e.g. 2088) count as undated.
+- **Drives → Years** lists every year, newest first. Each shows its photograph
+  count (a copy on two drives counts once) and the drives holding it, most
+  first. **Show photographs** opens Find scoped to that year
+  (`SearchFilters::year`, a browse). CLI: `atlasdrive years`.
+- **On this day** (Find, before any search) shows photographs taken on
+  today's date in earlier years. They are photographs of family when anyone is
+  marked as family, otherwise of anyone named. There are at most six per year,
+  newest year first, a photograph on two drives appears once, and the card is
+  hidden on a day with nothing.

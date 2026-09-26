@@ -55,6 +55,11 @@ enum Command {
     },
     /// Environment and catalogue diagnostics.
     Doctor,
+    /// Name the places photographs were taken, from their stored GPS (no
+    /// drives needed), and list the places with the most photographs.
+    Places,
+    /// Every year of the archive and which drives hold it.
+    Years,
     /// Correct the date of a photograph. Your correction always wins.
     Date {
         /// File id, as shown by `atlasdrive search`.
@@ -488,6 +493,25 @@ fn run(cli: Cli) -> Result<()> {
         Command::Verify(args) => verify_cmd(&ctx, args),
         Command::Faces { action } => faces_cmd(&ctx, action),
         Command::Doctor => doctor_cmd(&ctx),
+        Command::Places => {
+            let archive = ctx.open_archive()?;
+            let r = family_archive_core::places::backfill(&archive)?;
+            println!("{} photographs had a GPS position; {} newly placed.", r.with_position, r.placed);
+            for p in family_archive_core::places::top_places(&archive, 30)? {
+                println!("  {:>7}  {}", p.photographs, p.name);
+            }
+            Ok(())
+        }
+        Command::Years => {
+            let archive = ctx.open_archive()?;
+            for y in family_archive_core::inventory::years(&archive)? {
+                let drives: Vec<String> =
+                    y.drives.iter().map(|d| format!("Drive {} ({})", d.drive_number, d.photographs)).collect();
+                let label = y.year.map_or("Undated".to_string(), |v| v.to_string());
+                println!("{label:>8}  {:>7}  {}", y.photographs, drives.join(", "));
+            }
+            Ok(())
+        }
         Command::Date { file, from, to, clear } => date_cmd(&ctx, &file, &from, to.as_deref(), clear),
         Command::Backup { action } => backup_cmd(&ctx, action),
         Command::Events { action } => events_cmd(&ctx, action),

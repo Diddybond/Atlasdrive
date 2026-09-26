@@ -42,6 +42,8 @@ zeroize = { version = "1.7.0", features = ["derive"] }
 # Pure-Rust ONNX inference for the face identity model (D-102): no native
 # runtime to install, nothing downloaded while the app runs.
 tract-onnx = "0.23.8"
+# Reads the bundled place list (D-106).
+flate2 = "1.1.9"
 
 [profile.release]
 opt-level = 3

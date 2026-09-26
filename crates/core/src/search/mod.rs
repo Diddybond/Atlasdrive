@@ -43,6 +43,20 @@ pub struct SearchResult {
     pub also_on: Vec<i64>,
 }
 
+/// A photograph taken on this day in an earlier year.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memory {
+    pub year: i32,
+    pub result: SearchResult,
+}
+
+/// What "on this day" found, and whether it is limited to family.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OnThisDay {
+    pub family_only: bool,
+    pub memories: Vec<Memory>,
+}
+
 /// Filters applicable to any search.
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilters {
@@ -61,14 +75,33 @@ pub struct SearchFilters {
     pub tags: Vec<String>,
     pub scanned_only: bool,
     pub limit: usize,
+    /// Only photographs taken in this year (D-107).
+    pub year: Option<i32>,
 }
+
+/// The year a photograph was taken, as SQL over `files f`: a date the owner
+/// corrected, else the camera's own date, else an estimate narrow enough to
+/// name a single year. Years no camera could have written (0000, 2088) are
+/// treated as unknown.
+pub const YEAR_SQL: &str = "(SELECT CAST(y AS INTEGER) FROM (
+        SELECT CASE
+            WHEN de.is_user_confirmed = 1 AND substr(de.earliest_date,1,4) = substr(de.latest_date,1,4)
+                THEN substr(de.earliest_date,1,4)
+            WHEN m.exif_capture_date IS NOT NULL THEN substr(m.exif_capture_date,1,4)
+            WHEN substr(de.earliest_date,1,4) = substr(de.latest_date,1,4) THEN substr(de.earliest_date,1,4)
+        END AS y
+        FROM files fy
+        LEFT JOIN metadata m ON m.file_id = fy.id
+        LEFT JOIN date_estimates de ON de.file_id = fy.id
+        WHERE fy.id = f.id)
+      WHERE CAST(y AS INTEGER) BETWEEN 1850 AND CAST(strftime('%Y','now') AS INTEGER))";
 
 impl SearchFilters {
     /// A filter that names a set of photographs outright — picked subjects,
     /// an event, or a client — so an empty search box means "show me all of
     /// them", not "search for nothing".
     pub fn is_browse(&self) -> bool {
-        !self.tags.is_empty() || self.event_id.is_some() || self.client.is_some()
+        !self.tags.is_empty() || self.event_id.is_some() || self.client.is_some() || self.year.is_some()
     }
 
     pub fn limit_or(&self, default: usize) -> usize {
@@ -579,6 +612,52 @@ impl<'a> SearchRepo<'a> {
         Ok(merged)
     }
 
+    /// Photographs taken on this day in earlier years, of the people who
+    /// matter (D-107): family when anyone is marked as family, otherwise anyone
+    /// the owner has named. Newest year first, at most `per_year` from each.
+    /// `month_day` is `MM-DD`.
+    pub fn on_this_day(&self, month_day: &str, this_year: i32, per_year: usize) -> Result<OnThisDay> {
+        let family_only: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM people WHERE relationship = 'family')",
+            [],
+            |r| r.get(0),
+        )?;
+        let who = if family_only { "AND p.relationship = 'family'" } else { "" };
+        let sql = format!(
+            "SELECT min(f.id), CAST(substr(m.exif_capture_date,1,4) AS INTEGER) AS y
+               FROM files f
+               JOIN metadata m ON m.file_id = f.id
+              WHERE f.status = 'complete'
+                AND substr(m.exif_capture_date,6,5) = ?1
+                AND y BETWEEN 1850 AND ?2 - 1
+                AND EXISTS (SELECT 1 FROM faces fa
+                              JOIN face_clusters c ON c.id = fa.cluster_id AND c.status = 'confirmed'
+                              JOIN people p ON p.id = c.person_id
+                             WHERE fa.file_id = f.id {who})
+              -- A photograph on two drives is one memory.
+              GROUP BY coalesce(f.content_hash, f.id)
+              ORDER BY y DESC, min(f.id)"
+        );
+        let rows: Vec<(String, i32)> = self
+            .conn
+            .prepare(&sql)?
+            .query_map(params![month_day, this_year], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut memories = Vec::new();
+        let mut taken: std::collections::HashMap<i32, usize> = Default::default();
+        for (id, year) in rows {
+            let n = taken.entry(year).or_default();
+            if *n >= per_year {
+                continue;
+            }
+            if let Some(result) = self.load_result(&id)? {
+                *n += 1;
+                memories.push(Memory { year, result });
+            }
+        }
+        Ok(OnThisDay { family_only, memories })
+    }
+
     pub(crate) fn load_result(&self, file_id: &str) -> Result<Option<SearchResult>> {
         let row = self.conn.query_row(
             "SELECT f.id, f.filename, f.relative_path, d.drive_number, d.friendly_name, d.status,
@@ -760,6 +839,9 @@ fn passes_filters(res: &SearchResult, filters: &SearchFilters) -> bool {
 fn push_filter_sql(sql: &mut String, filters: &SearchFilters) {
     if let Some(dn) = filters.drive_number {
         sql.push_str(&format!(" AND d.drive_number = {dn}"));
+    }
+    if let Some(y) = filters.year {
+        sql.push_str(&format!(" AND {YEAR_SQL} = {y}"));
     }
     // One EXISTS per tag, so the conditions intersect rather than union.
     for tag in &filters.tags {
@@ -1341,5 +1423,70 @@ mod people_search_tests {
     fn part_of_a_name_is_not_a_name() {
         let conn = archive();
         assert!(ids(&conn, "aim").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod on_this_day_tests {
+    use super::*;
+
+    #[test]
+    fn shows_the_people_who_matter_from_this_day_in_earlier_years() {
+        let conn = crate::db::open_in_memory(crate::db::SchemaKind::Archive).unwrap();
+        conn.execute_batch(
+            "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES ('d1',1,'online','now');
+             INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r1','d1','','now');",
+        )
+        .unwrap();
+        let photo = |id: &str, date: &str| {
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, status, created_at, updated_at)
+                 VALUES (?1,'d1','r1',?1,?1,1,1,'complete','now','now')",
+                [id],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO metadata (file_id, exif_capture_date) VALUES (?1, ?2)", [id, date])
+                .unwrap();
+        };
+        photo("daisy2019", "2019-09-26");
+        photo("client2019", "2019-09-26");
+        photo("daisy2021", "2021-09-26");
+        photo("daisy_other_day", "2021-09-27");
+        photo("daisy_this_year", "2026-09-26");
+        conn.execute_batch(
+            "INSERT INTO people (id, display_name, aliases_json, relationship, created_at, updated_at)
+               VALUES ('p1','Daisy','[]',NULL,'now','now'), ('p2','A Client','[]',NULL,'now','now');
+             INSERT INTO face_clusters (id, status, person_id, created_at, updated_at)
+               VALUES ('c1','confirmed','p1','now','now'), ('c2','confirmed','p2','now','now');",
+        )
+        .unwrap();
+        for (i, (file, cluster)) in [
+            ("daisy2019", "c1"), ("client2019", "c2"), ("daisy2021", "c1"),
+            ("daisy_other_day", "c1"), ("daisy_this_year", "c1"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO faces (id, file_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, created_at)
+                 VALUES (?1, ?2, 0.1, 0.1, 0.2, 0.2, ?3, 'now')",
+                params![format!("face{i}"), file, cluster],
+            )
+            .unwrap();
+        }
+        let repo = SearchRepo::new(&conn);
+        let ids = |d: &OnThisDay| d.memories.iter().map(|m| (m.year, m.result.file_id.clone())).collect::<Vec<_>>();
+
+        // Nobody marked as family: anyone named counts.
+        let all = repo.on_this_day("09-26", 2026, 5).unwrap();
+        assert!(!all.family_only);
+        assert_eq!(ids(&all), [(2021, "daisy2021".into()), (2019, "client2019".into()), (2019, "daisy2019".into())]);
+
+        // Daisy is family: only her.
+        conn.execute("UPDATE people SET relationship='family' WHERE id='p1'", []).unwrap();
+        let family = repo.on_this_day("09-26", 2026, 5).unwrap();
+        assert!(family.family_only);
+        assert_eq!(ids(&family), [(2021, "daisy2021".into()), (2019, "daisy2019".into())]);
     }
 }

@@ -500,6 +500,55 @@ async fn photo_view(state: State<'_, AppState>, file_id: String) -> Result<Optio
     .map_err(|e| e.to_string())?
 }
 
+/// The places with the most photographs, for chips on Find (D-106).
+#[tauri::command]
+async fn top_places(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<family_archive_core::places::PlaceCount>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    let reader = state.reader.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        with_reader(&reader, &paths, |archive| {
+            family_archive_core::places::top_places(archive, limit.unwrap_or(24)).map_err(map_err)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Every year of the archive and the drives holding it (D-107).
+#[tauri::command]
+async fn years_overview(
+    state: State<'_, AppState>,
+) -> Result<Vec<family_archive_core::inventory::YearRow>, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive = open_archive(&paths)?;
+        family_archive_core::inventory::years(&archive).map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Photographs of the people who matter, taken on this day in earlier years.
+#[tauri::command]
+async fn on_this_day(
+    state: State<'_, AppState>,
+    month_day: String,
+    this_year: i32,
+) -> Result<family_archive_core::search::OnThisDay, String> {
+    let paths = state.paths.lock().unwrap().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive = open_archive(&paths)?;
+        family_archive_core::search::SearchRepo::new(&archive)
+            .on_this_day(&month_day, this_year, 6)
+            .map_err(map_err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The faces in one photograph, for tagging them where they stand.
 #[tauri::command]
 async fn faces_in_photo(state: State<'_, AppState>, file_id: String) -> Result<Vec<faces::PhotoFace>, String> {
@@ -1209,6 +1258,8 @@ async fn search_catalogue(
     // How many results to return. The screen raises this when the owner asks
     // to see the rest.
     limit: Option<usize>,
+    // Only photographs taken in this year.
+    year: Option<i32>,
 ) -> Result<SearchResponse, String> {
     let paths = state.paths.lock().unwrap().clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<SearchResponse, String> {
@@ -1227,6 +1278,7 @@ async fn search_catalogue(
             client,
             tags: tags.unwrap_or_default(),
             limit: limit.unwrap_or(100).clamp(1, 5000),
+            year,
             ..Default::default()
         };
 
@@ -2357,6 +2409,16 @@ pub fn run() {
             // Ensure both databases exist and are migrated at startup.
             let _ = db::open(&paths.archive_db(), db::SchemaKind::Archive);
             let _ = db::open(&paths.queue_db(), db::SchemaKind::Queue);
+            // Name the places of photographs already catalogued, from the GPS
+            // in their stored EXIF (D-106). Quick, idempotent, needs no drive.
+            {
+                let paths = paths.clone();
+                std::thread::spawn(move || {
+                    if let Ok(archive) = open_archive(&paths) {
+                        let _ = family_archive_core::places::backfill(&archive);
+                    }
+                });
+            }
             app.manage(AppState {
                 paths: Mutex::new(paths),
                 running: Arc::new(Mutex::new(None)),
@@ -2434,6 +2496,9 @@ pub fn run() {
             face_thumbnail,
             tag_face,
             faces_in_photo,
+            top_places,
+            years_overview,
+            on_this_day,
             face_identity_state,
             start_face_upgrade,
             stop_face_upgrade,

@@ -38,6 +38,7 @@ pub mod inventory;
 pub mod logging;
 pub mod net;
 pub mod pipeline;
+pub mod places;
 pub mod proc;
 pub mod progress;
 pub mod queue;

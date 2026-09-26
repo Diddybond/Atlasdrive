@@ -1159,6 +1159,7 @@ dependencies = [
  "aes-gcm",
  "blake3",
  "chrono",
+ "flate2",
  "fs2",
  "hex",
  "image",

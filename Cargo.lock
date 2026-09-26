@@ -542,6 +542,7 @@ dependencies = [
  "blake3",
  "chrono",
  "filetime",
+ "flate2",
  "fs2",
  "hex",
  "image",

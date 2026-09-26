@@ -1468,6 +1468,9 @@ impl<'a> Pipeline<'a> {
             )?;
         }
 
+        // Where it was taken, from its GPS position (D-106).
+        crate::places::tag_file(tx, file_id, &a.md.raw)?;
+
         if scan_art.likely_scanned_print {
             let tag_id = self.upsert_tag(tx, "likely-scan", "system")?;
             tx.execute(
