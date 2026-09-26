@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, ArchiveEvent, SplitPoint } from "../api";
+import { api, ArchiveEvent, byName, SplitPoint } from "../api";
 import type { SearchContext } from "../App";
 
 /// A proposal is described by its size until someone names it.
@@ -187,7 +187,9 @@ export function EventsScreen({
     }
   }
 
-  const named = events.filter((e) => e.status === "named");
+  const named = events
+    .filter((e) => e.status === "named")
+    .sort((a, b) => byName(a.name ?? "", b.name ?? ""));
   const proposedCount = events.filter((e) => e.status === "proposed").length;
 
   return (

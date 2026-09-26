@@ -365,6 +365,13 @@ export interface PersonCheck {
   doubtful: DoubtfulFace[];
 }
 
+/// Alphabetical, the way a person reads it: case and accents ignored, and
+/// numbers in order ("Drive 2" before "Drive 10").
+const collator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
+export function byName(a: string, b: string): number {
+  return collator.compare(a.trim(), b.trim());
+}
+
 export interface FaceIdentityState {
   model_installed: boolean;
   status: { upgraded: number; pending: number; unreadable: number };
@@ -532,7 +539,8 @@ export const api = {
   nameEvent: (eventId: string, name: string, client?: string) =>
     call<void>("name_event", { eventId, name, client }),
   forgetEvent: (eventId: string) => call<void>("forget_event", { eventId }),
-  eventClients: () => call<[string, number][]>("event_clients"),
+  eventClients: () =>
+    call<[string, number][]>("event_clients").then((cs) => cs.sort((a, b) => byName(a[0], b[0]))),
   eventFiles: (eventId: string) => call<string[]>("event_files", { eventId }),
   eventSplitPoints: (eventId: string, limit?: number) =>
     call<SplitPoint[]>("event_split_points", { eventId, limit }),
@@ -550,7 +558,10 @@ export const api = {
   exportDiagnostics: () => call<string>("export_diagnostics"),
   tagFaceCluster: (clusterId: string, name: string) =>
     call<{ id: string; display_name: string }>("tag_face_cluster", { clusterId, name }),
-  listPeople: () => call<NamedPerson[]>("list_people"),
+  listPeople: () =>
+    call<NamedPerson[]>("list_people").then((ps) =>
+      ps.sort((a, b) => byName(a.display_name, b.display_name)),
+    ),
   setPersonRelationship: (personId: string, relationship?: string) =>
     call<void>("set_person_relationship", { personId, relationship }),
   personRelationships: () => call<[string, number][]>("person_relationships"),
@@ -585,8 +596,11 @@ export const api = {
   notAFace: (faceId: string) => call<void>("not_a_face", { faceId }),
   photosOfPerson: (personId: string) => call<PersonPhoto[]>("photos_of_person", { personId }),
   findNames: (driveNumber?: number) => call<NameScan>("find_names", { driveNumber }),
+  // The backend picks which subjects are worth offering; they are shown A–Z.
   catalogueTags: (limit?: number, driveNumber?: number, useful?: boolean) =>
-    call<TagCount[]>("catalogue_tags", { limit, driveNumber, useful }),
+    call<TagCount[]>("catalogue_tags", { limit, driveNumber, useful }).then((ts) =>
+      ts.sort((a, b) => byName(subjectLabel(a.tag), subjectLabel(b.tag))),
+    ),
   photoThumbnail: (fileId: string, maxEdge?: number) =>
     call<string | null>("photo_thumbnail", { fileId, maxEdge }),
   pendingSuggestions: (personId: string, limit?: number) =>
