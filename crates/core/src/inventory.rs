@@ -228,13 +228,20 @@ pub fn tags_on_drive(
              JOIN drives d ON d.id = f.drive_id
             WHERE f.status = 'complete' AND t.tag_type <> 'person'{}
             GROUP BY t.name
+            -- A name read in fewer than {min} photographs is more likely an
+            -- OCR misreading than a name (pipparts, lomp); it stays
+            -- searchable as text, but is not offered as a subject. A name
+            -- from the known-brand list is trusted from one sighting.
+            HAVING n >= {min} OR sum(ft.source <> 'name') > 0 OR max(ft.confidence) >= {brand}
             ORDER BY n DESC, t.name ASC
             LIMIT ?1
          ) ORDER BY name COLLATE NOCASE ASC",
         match drive_number {
             Some(_) => " AND d.drive_number = ?2",
             None => "",
-        }
+        },
+        min = MIN_NAME_RECURRENCE,
+        brand = crate::ai::names::KNOWN_BRAND_CONFIDENCE
     );
     let mut stmt = conn.prepare(&sql)?;
     let row = |r: &rusqlite::Row| Ok(TagCount { tag: r.get(0)?, count: r.get(1)? });
@@ -248,6 +255,14 @@ pub fn tags_on_drive(
     };
     Ok(out)
 }
+
+/// Photographs a name must be read in before it is offered as a subject.
+///
+/// Every name tag is text read off something in a photograph (D-061), and a
+/// misread is indistinguishable from an unusual name in any one photograph.
+/// What separates them is recurrence: the paint brand on a studio wall, the
+/// pub a reception was held in, turn up again and again; "autospor" does not.
+pub const MIN_NAME_RECURRENCE: i64 = 3;
 
 /// Share of the photographs in view above which a subject stops being useful
 /// for finding anything.
@@ -1001,9 +1016,11 @@ pub fn scan_stats(conn: &Connection, drive_number: i64, recent_limit: usize) -> 
         let mut stmt = conn.prepare(
             "SELECT f.id, f.filename, f.relative_path, f.size_bytes,
                     (SELECT count(*) FROM faces fa WHERE fa.file_id = f.id),
+                    -- What the picture shows before text read in it: a
+                    -- misread name is 0.9 confident and would win otherwise.
                     (SELECT t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-                      WHERE ft.file_id = f.id
-                      ORDER BY ft.confidence DESC LIMIT 1)
+                      WHERE ft.file_id = f.id AND t.tag_type <> 'person'
+                      ORDER BY (ft.source = 'name'), ft.confidence DESC LIMIT 1)
                FROM files f
               WHERE f.drive_id = ?1 AND f.status = 'complete'
               ORDER BY f.rowid DESC LIMIT ?2",
@@ -1142,10 +1159,15 @@ pub fn scan_for_names(conn: &Connection, drive_number: Option<i64>) -> Result<Na
             )?;
             let real_id: String =
                 tx.query_row("SELECT id FROM tags WHERE name = ?1", [&hit.tag], |r| r.get(0))?;
+            // Upgrades an older row to the known-brand confidence, so running
+            // this again brings a catalogue written before that existed up to
+            // date.
             tx.execute(
-                "INSERT OR IGNORE INTO file_tags (file_id, tag_id, confidence, source, created_at)
-                 VALUES (?1, ?2, 0.9, 'name', ?3)",
-                rusqlite::params![file_id, real_id, now],
+                "INSERT INTO file_tags (file_id, tag_id, confidence, source, created_at)
+                 VALUES (?1, ?2, ?3, 'name', ?4)
+                 ON CONFLICT(file_id, tag_id) DO UPDATE
+                   SET confidence = max(file_tags.confidence, excluded.confidence)",
+                rusqlite::params![file_id, real_id, hit.confidence(), now],
             )?;
             *counts.entry(hit.tag).or_default() += 1;
         }
@@ -1538,5 +1560,55 @@ mod useful_subject_tests {
         assert_eq!(names, vec!["bicycle", "cake"], "people is on every photograph; Kent is a person");
         // The full list still has everything that is not a person.
         assert_eq!(tags_on_drive(&conn, 20, None).unwrap().len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod name_recurrence_tests {
+    use super::*;
+    use crate::db::{open_in_memory, SchemaKind};
+
+    /// A name read once is not offered as a subject; a name read again and
+    /// again is; a subject Vision saw once still is.
+    #[test]
+    fn a_name_read_once_is_not_offered_as_a_subject() {
+        let conn = open_in_memory(SchemaKind::Archive).unwrap();
+        conn.execute_batch(
+            "INSERT INTO drives (id, drive_number, status, first_seen_at) VALUES ('d',1,'online','now');
+             INSERT INTO roots (id, drive_id, relative_root, created_at) VALUES ('r','d','','now');
+             INSERT INTO tags (id, name, tag_type, created_at) VALUES
+               ('misread','pipparts','automatic','now'), ('brand','sandtex','automatic','now'),
+               ('bike','bicycle','automatic','now');",
+        )
+        .unwrap();
+        let tag = |file: &str, tag: &str, source: &str| {
+            conn.execute(
+                "INSERT INTO file_tags (file_id, tag_id, confidence, source, created_at) VALUES (?1,?2,0.9,?3,'now')",
+                rusqlite::params![file, tag, source],
+            )
+            .unwrap();
+        };
+        for i in 0..4 {
+            let f = format!("f{i}");
+            conn.execute(
+                "INSERT INTO files (id, drive_id, root_id, relative_path, filename, size_bytes,
+                                    source_mtime_ns, status, created_at, updated_at)
+                 VALUES (?1,'d','r',?1,?1,1,1,'complete','now','now')",
+                [&f],
+            )
+            .unwrap();
+            tag(&f, "brand", "name");
+        }
+        tag("f0", "misread", "name");
+        tag("f0", "bike", "automatic");
+
+        let subjects: Vec<String> =
+            tags_on_drive(&conn, 50, None).unwrap().into_iter().map(|t| t.tag).collect();
+        assert_eq!(subjects, vec!["bicycle", "sandtex"]);
+
+        // The live feed shows what the picture is of, not a word read in it.
+        let stats = scan_stats(&conn, 1, 10).unwrap();
+        let f0 = stats.recent.iter().find(|r| r.file_id == "f0").unwrap();
+        assert_eq!(f0.top_tag.as_deref(), Some("bicycle"));
     }
 }

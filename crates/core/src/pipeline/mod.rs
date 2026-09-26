@@ -1389,7 +1389,7 @@ impl<'a> Pipeline<'a> {
             tx.execute(
                 "INSERT OR IGNORE INTO file_tags (file_id, tag_id, confidence, source, created_at)
                  VALUES (?1,?2,?3,'name',?4)",
-                params![file_id, tag_id, 0.9, now],
+                params![file_id, tag_id, hit.confidence(), now],
             )?;
         }
 

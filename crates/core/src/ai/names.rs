@@ -254,6 +254,24 @@ pub struct NameHit {
     pub known_brand: bool,
 }
 
+/// Confidence recorded for a name matched against the list of known brands.
+/// Distinct from [`READ_NAME_CONFIDENCE`] so the catalogue can tell a trusted
+/// spelling from an open-ended reading (see `inventory::MIN_NAME_RECURRENCE`).
+pub const KNOWN_BRAND_CONFIDENCE: f64 = 0.95;
+/// Confidence recorded for any other name read in a photograph.
+pub const READ_NAME_CONFIDENCE: f64 = 0.9;
+
+impl NameHit {
+    /// What the tag row records: a known brand is trusted from one sighting.
+    pub fn confidence(&self) -> f64 {
+        if self.known_brand {
+            KNOWN_BRAND_CONFIDENCE
+        } else {
+            READ_NAME_CONFIDENCE
+        }
+    }
+}
+
 /// Find the names printed on things in a photograph, from its text.
 ///
 /// A candidate is a run of capitalised words. It becomes a tag when at least
