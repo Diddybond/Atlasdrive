@@ -1,4 +1,4 @@
-import { setMockScanError, setMockScanning, setMockStopping } from "./api";
+import { resetMockBackup, setMockScanError, setMockScanning, setMockStopping } from "./api";
 import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
 import { App } from "./App";
 
@@ -1107,5 +1107,23 @@ describe("Faces nobody has named", () => {
     await waitFor(() => {
       expect(screen.getByText(/Put 17,400 faces into 3,100 groups/)).toBeDefined();
     });
+  });
+});
+
+describe("Catalogue backup notice", () => {
+  /// The owner's catalogue of ~218,000 photographs had never been backed up,
+  /// and the only place that said so was a card in Settings.
+  it("says on every screen that the catalogue has never been backed up", async () => {
+    resetMockBackup();
+    render(<App />);
+    expect(await screen.findByText(/never been backed up/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: /Drives/ }));
+    expect(await screen.findByText(/never been backed up/)).toBeDefined();
+
+    // Its button leads to where the backup is set up, and the notice does not
+    // repeat itself there.
+    fireEvent.click(screen.getByRole("button", { name: "Choose a backup folder" }));
+    await screen.findByRole("heading", { name: /Settings/ });
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

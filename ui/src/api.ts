@@ -344,6 +344,11 @@ export interface NamedPerson {
 /// what the Drives screen offers when the machine is idle turn it off, rather
 /// than each quietly assuming the opposite of the other.
 export let mockScanRunning = true;
+/// Put the mock's catalogue backup back to "never backed up".
+export function resetMockBackup() {
+  mockSettings = { ...mockSettings, backup_destination: null, last_backup_at: null };
+}
+
 export function setMockScanning(v: boolean) {
   mockScanRunning = v;
 }

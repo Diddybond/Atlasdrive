@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { SearchScreen } from "./screens/SearchScreen";
 import { DrivesScreen } from "./screens/DrivesScreen";
 import { ScanScreen } from "./screens/ScanScreen";
 import { ReviewScreen } from "./screens/ReviewScreen";
 import { EventsScreen } from "./screens/EventsScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
-import { runningInTauri } from "./api";
+import { api, runningInTauri, Settings } from "./api";
+import { backupWarning } from "./lib/backupWarning";
 
 type Section = "search" | "drives" | "review" | "events" | "scan" | "settings";
 
@@ -29,6 +30,14 @@ export interface SearchContext {
 export function App() {
   const [section, setSection] = useState<Section>("search");
   const [context, setContext] = useState<SearchContext | null>(null);
+  // Re-read on every change of screen, so a backup made in Settings clears the
+  // notice as soon as you leave it — and a backup that stops happening brings
+  // it back.
+  const [settings, setSettings] = useState<Settings | null>(null);
+  useEffect(() => {
+    void api.getSettings().then(setSettings, () => setSettings(null));
+  }, [section]);
+  const warning = section === "settings" ? null : backupWarning(settings);
 
   /// Jumping to Search with a filter is the only cross-screen navigation in
   /// the app, so it is a callback rather than a router.
@@ -74,6 +83,14 @@ export function App() {
       </nav>
 
       <main className="content" aria-live="polite">
+        {warning && (
+          <div className="notice-bar" role="alert">
+            <span>{warning}</span>
+            <button onClick={() => setSection("settings")}>
+              {settings?.backup_destination ? "Back up now" : "Choose a backup folder"}
+            </button>
+          </div>
+        )}
         {section === "search" && (
           <SearchScreen context={context} onClearContext={() => setContext(null)} />
         )}
