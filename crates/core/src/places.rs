@@ -215,7 +215,22 @@ pub fn backfill(conn: &Connection) -> Result<PlacesReport> {
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<std::result::Result<_, _>>()?;
     let mut report = PlacesReport::default();
-    for chunk in rows.chunks(2000) {
+    if rows.is_empty() {
+        return Ok(report);
+    }
+    // The search index keeps `file_id` unindexed, so finding one photograph's
+    // row by it reads the whole index: on 228,000 photographs that made each
+    // update take a noticeable fraction of a second and held the catalogue's
+    // write lock long enough for the face upgrade and scans to give up with
+    // "database is locked". Map file to index row once, then update by rowid.
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS temp.fts_rows;
+         CREATE TEMP TABLE fts_rows AS SELECT rowid AS r, file_id FROM files_fts;
+         CREATE INDEX temp.idx_fts_rows ON fts_rows(file_id);",
+    )?;
+    // Small batches: the write lock is held only briefly, so other work
+    // (a scan, the face upgrade) interleaves rather than waits.
+    for chunk in rows.chunks(200) {
         let tx = crate::db::write_tx(conn)?;
         for (file_id, raw_json) in chunk {
             let Ok(raw) = serde_json::from_str::<BTreeMap<String, String>>(raw_json) else { continue };
@@ -225,11 +240,19 @@ pub fn backfill(conn: &Connection) -> Result<PlacesReport> {
             report.with_position += 1;
             if tag_file(&tx, file_id, &raw)?.is_some() {
                 report.placed += 1;
-                refresh_search_text(&tx, file_id)?;
+                tx.execute(
+                    "UPDATE files_fts
+                        SET tags = (SELECT coalesce(group_concat(name, ' '), '')
+                                      FROM (SELECT t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+                                             WHERE ft.file_id = ?1 ORDER BY t.name))
+                      WHERE rowid IN (SELECT r FROM temp.fts_rows WHERE file_id = ?1)",
+                    [file_id],
+                )?;
             }
         }
         tx.commit()?;
     }
+    conn.execute_batch("DROP TABLE IF EXISTS temp.fts_rows;")?;
     Ok(report)
 }
 

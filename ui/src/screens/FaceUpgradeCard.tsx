@@ -8,10 +8,20 @@ import { api, FaceIdentityState } from "../api";
 /// stopped at any time, and carries on where it left off.
 export function FaceUpgradeCard({ onFinished }: { onFinished: () => void }) {
   const [s, setS] = useState<FaceIdentityState | null>(null);
+  // Why the state could not be read. Shown rather than hiding the card: a
+  // card that silently vanished left the owner with no way to carry on.
+  const [problem, setProblem] = useState<string | null>(null);
   const wasRunning = useRef(false);
 
   async function refresh() {
-    const next = await api.faceIdentityState().catch(() => null);
+    let next: FaceIdentityState | null = null;
+    try {
+      next = await api.faceIdentityState();
+      setProblem(null);
+    } catch (e) {
+      setProblem(String(e));
+      return; // keep showing the last good state
+    }
     setS(next);
     if (next) {
       if (wasRunning.current && !next.job.running) onFinished();
@@ -26,7 +36,26 @@ export function FaceUpgradeCard({ onFinished }: { onFinished: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (!s || !s.model_installed) return null;
+  if (!s) {
+    return problem ? (
+      <div className="card upgrade-card" role="status">
+        <h2>Face recognition</h2>
+        <p className="error">Could not check the face recognition upgrade: {problem}</p>
+        <p className="subtle">Trying again every few seconds.</p>
+      </div>
+    ) : null;
+  }
+  if (!s.model_installed) {
+    return (
+      <div className="card upgrade-card" role="status">
+        <h2>Face recognition</h2>
+        <p className="subtle">
+          The improved face recognition is not installed in this copy of AtlasDrive. Rebuild the app
+          (the build fetches it) to carry on.
+        </p>
+      </div>
+    );
+  }
   const { job, status } = s;
 
   if (job.running) {

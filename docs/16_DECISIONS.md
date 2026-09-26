@@ -2884,3 +2884,10 @@ accident. Typing words afterwards searches within the shoot as before.
   holds a stay-awake assertion like a scan, so the Mac does not sleep
   part-way. **Check photos** says how many of the person's faces are ready,
   and when someone has too few faces to compare at all.
+- Follow-up (D-106, live): the search index keeps `file_id` unindexed, so
+  the places pass read the whole index for every photograph it placed. On
+  228,000 photographs that held the write lock for long stretches, and
+  concurrent work timed out. The pass now maps file to index row once in a
+  temporary table, updates by rowid, and commits every 200 photographs. The
+  People upgrade card shows an error when its state cannot be read, instead
+  of disappearing.
