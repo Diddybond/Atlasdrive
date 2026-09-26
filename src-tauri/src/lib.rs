@@ -34,6 +34,33 @@ struct AppState {
     /// photographs in ..." and the owner watched nothing happen for a day. A
     /// scan that dies has to be able to say so.
     last_error: Arc<Mutex<Option<String>>>,
+    /// One shared connection for the small lookups a screen fires by the dozen
+    /// (a picture per face, a preview per result).
+    ///
+    /// Each used to open its own connection to the catalogue: fifty at once is
+    /// a hundred and fifty file handles against macOS's default limit of 256
+    /// for an app, and the losers failed with "unable to open database file".
+    reader: Arc<Mutex<Option<rusqlite::Connection>>>,
+}
+
+/// Run a quick read on the shared connection, opening it on first use.
+///
+/// Held only for the query itself. Dropped after any error, so a catalogue
+/// replaced underneath it (a restore) is reopened rather than read stale.
+fn with_reader<T>(
+    slot: &Mutex<Option<rusqlite::Connection>>,
+    paths: &AppPaths,
+    f: impl FnOnce(&rusqlite::Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = Some(open_archive(paths)?);
+    }
+    let result = f(guard.as_ref().expect("opened above"));
+    if result.is_err() {
+        *guard = None;
+    }
+    result
 }
 
 fn map_err<E: std::fmt::Display>(e: E) -> String {
@@ -346,14 +373,14 @@ async fn group_faces(state: State<'_, AppState>) -> Result<faces::GroupingReport
 #[tauri::command]
 async fn face_thumbnail(state: State<'_, AppState>, face_id: String) -> Result<Option<String>, String> {
     let paths = state.paths.lock().unwrap().clone();
+    let reader = state.reader.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
-        let archive = open_archive(&paths)?;
         let key = keystore::existing_key(paths.keys_dir())
             .map_err(map_err)?
             .ok_or_else(|| keystore::MISSING_KEY.to_string())?;
-        let crop = faces::FaceRepo::new(&archive)
-            .thumbnail(&face_id, &key)
-            .map_err(map_err)?;
+        let crop = with_reader(&reader, &paths, |archive| {
+            faces::FaceRepo::new(archive).thumbnail(&face_id, &key).map_err(map_err)
+        })?;
         Ok(crop.map(|(bytes, format)| format!("data:image/{format};base64,{}", b64(&bytes))))
     })
     .await
@@ -580,15 +607,17 @@ async fn photo_thumbnail(
     max_edge: Option<u32>,
 ) -> Result<Option<String>, String> {
     let paths = state.paths.lock().unwrap().clone();
+    let reader = state.reader.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
-        let archive = open_archive(&paths)?;
-        let rel: Option<String> = archive
-            .query_row(
-                "SELECT rel_path FROM thumbnails WHERE file_id = ?1",
-                [&file_id],
-                |r| r.get(0),
-            )
-            .ok();
+        let rel: Option<String> = with_reader(&reader, &paths, |archive| {
+            Ok(archive
+                .query_row(
+                    "SELECT rel_path FROM thumbnails WHERE file_id = ?1",
+                    [&file_id],
+                    |r| r.get(0),
+                )
+                .ok())
+        })?;
         let Some(rel) = rel else { return Ok(None) };
 
         let abs = paths.thumbnails_dir().join(rel);
@@ -2017,6 +2046,8 @@ async fn restore_backup(
     bundle: String,
 ) -> Result<family_archive_core::backup::RestoreReport, String> {
     let paths = state.paths.lock().unwrap().clone();
+    // The catalogue file is about to be replaced; never read the old one.
+    *state.reader.lock().unwrap_or_else(|e| e.into_inner()) = None;
     tauri::async_runtime::spawn_blocking(move || -> Result<family_archive_core::backup::RestoreReport, String> {
         use family_archive_core::backup;
         backup::restore(
@@ -2070,6 +2101,7 @@ pub fn run() {
                 paths: Mutex::new(paths),
                 running: Arc::new(Mutex::new(None)),
                 last_error: Arc::new(Mutex::new(None)),
+                reader: Arc::new(Mutex::new(None)),
             });
             Ok(())
         })

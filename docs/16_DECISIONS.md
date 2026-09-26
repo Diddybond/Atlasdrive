@@ -2702,3 +2702,14 @@ read in it.
   face pictures at once, and each one used to query the Keychain separately,
   racing macOS's access prompt. Restore goes through `replace_key`, which
   updates the cached key.
+
+## D-099 — Picture lookups share one connection
+
+**Status:** settled.
+
+- `face_thumbnail` and `photo_thumbnail` run on one shared catalogue connection
+  (`AppState::reader`), held only for the lookup. Each used to open its own; a
+  People screen of fifty faces exhausted file handles and some pictures failed
+  with "unable to open database file" (seen on the live archive).
+- The shared connection is dropped after any error and before a restore, so a
+  replaced catalogue is never read stale.
