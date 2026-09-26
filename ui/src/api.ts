@@ -378,6 +378,7 @@ export interface DoubtfulFace {
 
 export interface PersonCheck {
   checked: number;
+  total: number;
   doubtful: DoubtfulFace[];
 }
 
@@ -963,7 +964,7 @@ function mock<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
         { face_id: `${id}-x1`, file_id: "f2", filename: "portrait.jpg", drive_number: 7, online: false, likeness: 0.04 },
         { face_id: `${id}-x2`, file_id: "f1", filename: "beach_1998.jpg", drive_number: 14, online: true, likeness: 0.21 },
       ];
-      return Promise.resolve({ checked: 140, doubtful: mockDoubtful[id] } as unknown as T);
+      return Promise.resolve({ checked: 140, total: 144, doubtful: mockDoubtful[id] } as unknown as T);
     }
     case "answer_doubtful_face": {
       for (const k of Object.keys(mockDoubtful)) {

@@ -92,10 +92,22 @@ pub fn embed_pending(
             report.stopped = true;
             return Ok(report);
         }
-        let ids: Vec<String> = conn
-            .prepare(&format!("SELECT t.face_id {PENDING} LIMIT ?2"))?
-            .query_map(params![identity::MODEL_ID, batch as i64], |r| r.get(0))?
-            .collect::<std::result::Result<_, _>>()?;
+        // Faces of people the owner has named go first: they are what
+        // "Check photos" and every suggestion are measured against, so those
+        // work within minutes rather than at the end of a long run.
+        let pick = |extra: &str| -> Result<Vec<String>> {
+            Ok(conn
+                .prepare(&format!("SELECT t.face_id {PENDING} {extra} LIMIT ?2"))?
+                .query_map(params![identity::MODEL_ID, batch as i64], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?)
+        };
+        let mut ids = pick(
+            "AND f.cluster_id IN (SELECT id FROM face_clusters
+                                   WHERE status = 'confirmed' AND person_id IS NOT NULL)",
+        )?;
+        if ids.is_empty() {
+            ids = pick("")?;
+        }
         if ids.is_empty() {
             return Ok(report);
         }
@@ -290,6 +302,38 @@ mod tests {
         // Nothing left to try.
         let again = embed_pending(&conn, &model, &key, 2, &stop, |_| {}).unwrap();
         assert_eq!(again, EmbedReport::default());
+    }
+
+    /// Named people's faces are upgraded before anyone else's.
+    #[test]
+    fn named_faces_go_first() {
+        let Some(dir) = IdentityModel::find(&[]) else {
+            eprintln!("face identity model not installed; skipping");
+            return;
+        };
+        let model = IdentityModel::load(&dir).unwrap();
+        let (conn, key) = catalogue();
+        let repo = FaceRepo::new(&conn);
+        let stranger = face(&conn, &key, 1, &[1.0, 0.0]);
+        let named = face(&conn, &key, 2, &[0.0, 1.0]);
+        repo.name_one_face(&named, "Sabrina").unwrap();
+        // A batch of one (one worker × 24 is more than two faces, so stop after
+        // the first batch by checking which face was tried first).
+        let first: String = conn
+            .query_row(
+                &format!(
+                    "SELECT t.face_id {PENDING} AND f.cluster_id IN
+                       (SELECT id FROM face_clusters WHERE status='confirmed' AND person_id IS NOT NULL)
+                     LIMIT 1"
+                ),
+                [identity::MODEL_ID],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(first, named);
+        let stop = AtomicBool::new(false);
+        embed_pending(&conn, &model, &key, 1, &stop, |_| {}).unwrap();
+        let _ = stranger;
     }
 
     /// Regrouping rebuilds unnamed groups and leaves named ones and refused

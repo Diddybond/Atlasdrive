@@ -999,6 +999,7 @@ fn faces_cmd(ctx: &Ctx, action: FaceAction) -> Result<()> {
             let stop = std::sync::atomic::AtomicBool::new(false);
             let started = std::time::Instant::now();
             let total = now.pending;
+            let _awake = family_archive_core::awake::StayAwake::hold("improving face recognition");
             let report = up::embed_pending(&archive, &model, &key, workers, &stop, |r| {
                 let handled = r.embedded + r.unreadable;
                 let rate = handled as f64 / started.elapsed().as_secs_f64().max(1.0);

@@ -695,6 +695,9 @@ fn start_face_upgrade(state: State<'_, AppState>) -> Result<(), String> {
             f(&mut j);
             j.elapsed_secs = started.elapsed().as_secs();
         };
+        // Hours of work: keep the Mac from sleeping part-way (it can still
+        // lock its screen), as a scan does.
+        let _awake = family_archive_core::awake::StayAwake::hold("improving face recognition");
         let result = (|| -> Result<(), String> {
             use family_archive_core::identity_upgrade as up;
             let model = family_archive_core::ai::identity::shared()

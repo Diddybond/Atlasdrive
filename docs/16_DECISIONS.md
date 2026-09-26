@@ -2878,3 +2878,9 @@ accident. Typing words afterwards searches within the shoot as before.
 - **Fix:** every write transaction in core now begins `IMMEDIATE`
   (`db::write_tx`), so concurrent writers queue behind the 30 s busy timeout
   instead of failing.
+- Follow-up (live): on the owner's Intel iMac the upgrade reads about 6
+  faces a second, roughly 9 hours for 202,142 faces. Faces of named people now
+  go first, so **Check photos** and suggestions work within minutes. The run
+  holds a stay-awake assertion like a scan, so the Mac does not sleep
+  part-way. **Check photos** says how many of the person's faces are ready,
+  and when someone has too few faces to compare at all.

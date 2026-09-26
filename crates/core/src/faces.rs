@@ -381,6 +381,9 @@ pub struct DoubtfulFace {
 pub struct PersonCheck {
     /// Faces of this person the identity model could compare.
     pub checked: usize,
+    /// All of this person's faces, compared or not yet.
+    #[serde(default)]
+    pub total: usize,
     /// Faces that do not look like the rest, least alike first.
     pub doubtful: Vec<DoubtfulFace>,
 }
@@ -735,8 +738,14 @@ impl<'a> FaceRepo<'a> {
             }
         }
         let checked = faces.len();
+        let total: usize = self.conn.query_row(
+            "SELECT count(*) FROM faces f JOIN face_clusters c ON c.id = f.cluster_id
+              WHERE c.person_id = ?1 AND c.status = 'confirmed' AND f.is_false_detection = 0",
+            [person_id],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
         if checked < DOUBT_MIN_FACES {
-            return Ok(PersonCheck { checked, doubtful: Vec::new() });
+            return Ok(PersonCheck { checked, total, doubtful: Vec::new() });
         }
         let kept: std::collections::HashSet<String> = self
             .conn
@@ -773,7 +782,7 @@ impl<'a> FaceRepo<'a> {
             }
         }
         doubtful.sort_by(|a, b| a.likeness.total_cmp(&b.likeness));
-        Ok(PersonCheck { checked, doubtful })
+        Ok(PersonCheck { checked, total, doubtful })
     }
 
     /// The owner looked and said: yes, this face is them. Not asked again.

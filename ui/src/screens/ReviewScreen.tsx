@@ -503,8 +503,9 @@ export function ReviewScreen({ onFind }: { onFind?: (query: string) => void } = 
             <p className="subtle">Comparing {checking.display_name}'s faces…</p>
           ) : check.checked < 4 ? (
             <p className="empty">
-              This check needs the improved face recognition. Once it has finished (see the card at
-              the top), {checking.display_name}'s photographs can be checked here.
+              {check.total > 0 && check.total < 4
+                ? `${checking.display_name} has only ${check.total} face${check.total === 1 ? "" : "s"} — too few to compare with each other. Check them by eye with Find their photographs.`
+                : `Waiting for the improved face recognition: ${check.checked} of ${checking.display_name}'s ${check.total.toLocaleString()} faces are ready. Named people are done first, so this is usually a matter of minutes — try again shortly.`}
             </p>
           ) : check.doubtful.length === 0 ? (
             <p className="empty">
